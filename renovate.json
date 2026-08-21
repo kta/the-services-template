@@ -1,0 +1,37 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", ":dependencyDashboard", ":semanticCommits"],
+  "timezone": "Asia/Tokyo",
+  "schedule": ["after 10pm and before 5am every weekday", "every weekend"],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "automerge": true,
+    "schedule": ["before 5am on monday"]
+  },
+  "packageRules": [
+    {
+      "description": "Auto-merge non-major devDependencies on green CI",
+      "matchDepTypes": ["devDependencies"],
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "groupName": "dev dependencies (non-major)",
+      "automerge": true
+    },
+    {
+      "description": "Production deps: human review only",
+      "matchDepTypes": ["dependencies", "peerDependencies"],
+      "automerge": false
+    },
+    {
+      "description": "Never auto-merge majors",
+      "matchUpdateTypes": ["major"],
+      "automerge": false
+    },
+    {
+      "description": "pnpm catalog loses dev/prod intent → group, human review",
+      "matchDepTypes": ["pnpm.catalog.default"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "pnpm catalog (non-major)",
+      "automerge": false
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+# ローカル開発用の dev 値。`make init` が .dev.vars にコピーする(.dev.vars は gitignore)。
+# 本番は `wrangler secret put` で設定(docs/howto/deploy.md)。
+INTERNAL_KEY=dev-internal-key
+JWT_SECRET=dev-jwt-secret-change-me
+AUTH_PEPPER=dev-auth-pepper-change-me
+# credential 無しの dev トークングラント(/api/auth/token)を有効化。本番では設定しない(fail close)。
+AUTH_DEV_GRANT=true

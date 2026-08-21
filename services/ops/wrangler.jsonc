@@ -1,0 +1,46 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ops",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-25",
+  "observability": { "enabled": true },
+  // Backup generations (private bucket, no public access). The Workflow prunes
+  // to 30 generations (~15 days); an R2 lifecycle rule (e.g. 16d) can serve as
+  // a second safety net. Rename the bucket per fork (e.g. myapp-backups).
+  "r2_buckets": [{ "binding": "BACKUPS", "bucket_name": "app-backups" }],
+  // Durable, multi-step backup job (Free tier: 3,000 steps/day ≫ our usage).
+  "workflows": [
+    {
+      "name": "backup-workflow",
+      "binding": "BACKUP_WF",
+      "class_name": "BackupWorkflow"
+    }
+  ],
+  // Cron: backup at JST 02:00 / 14:00 (UTC 17:00 / 05:00 — D1 export blocks the
+  // DB, so one run is fixed to deep night). Freshness + health + capacity at
+  // +90min (JST 03:30 / 15:30 = UTC 18:30 / 06:30). scheduled() branches on
+  // event.cron.
+  "triggers": { "crons": ["0 17,5 * * *", "30 18,6 * * *"] },
+  // Service bindings: NOTIFIER for ops mails; ADMIN for /api/health probes.
+  // Forks: add a binding here (and in src/index.ts opsTargets) for each
+  // additional service to monitor, e.g. { "binding": "MYSERVICE", "service": "myservice" }.
+  "services": [
+    { "binding": "NOTIFIER", "service": "notifier" },
+    { "binding": "ADMIN", "service": "admin" }
+  ],
+  // Secrets (INTERNAL_KEY / D1_EXPORT_API_TOKEN) are NOT in vars: dev values
+  // live in .dev.vars (copied from .dev.vars.example by `make init`); prod is
+  // `wrangler secret put` only (docs/howto/deploy.md).
+  "vars": {
+    // Cloudflare account id for the D1 REST export API.
+    "CF_ACCOUNT_ID": "dev-account-id",
+    // Target D1 database_ids to export. Prod: real UUIDs from `wrangler d1 info`.
+    // Forks: add one var per additional target DB (e.g. "MYSERVICE_DB_ID") and
+    // register it in opsTargets() in src/index.ts.
+    "ADMIN_DB_ID": "00000000-0000-0000-0000-000000000000",
+    // Ops alert recipient (not a secret). Empty in dev (notifier LogSender).
+    // In prod set a verified address here. Empty → 'ops' placeholder (a real
+    // mail provider would reject it), so set it before relying on alerts.
+    "OPS_ALERT_EMAIL": ""
+  }
+}

@@ -1,0 +1,43 @@
+/*
+ * Design tokens — the single place a project's visual identity lives.
+ *
+ * This default theme is a PLACEHOLDER identity ("paper & pine"): warm paper
+ * surfaces, near-black green-cast ink, one pine accent, amber reserved for
+ * focus. When you copy this template for a real product, REPLACE these values
+ * following docs/frontend/DESIGN_RULE.md (pick a subject-grounded palette and
+ * type pairing first, then encode it here). Components and app code must only
+ * ever reference these semantic tokens — never raw hex, never Tailwind's
+ * default palette (bg-blue-500 etc.), never arbitrary values (p-[13px]).
+ *
+ * Tailwind v4 turns each token into utilities automatically:
+ *   --color-ink → text-ink / bg-ink / border-ink …
+ *   --font-display → font-display
+ *   --radius-ctl → rounded-ctl
+ */
+@theme {
+  /* --- Type. Two roles on purpose: a characterful display face used with
+     restraint (wordmark, page titles) and a quiet body face for everything
+     else. Data (timestamps, ids) uses the mono stack. --- */
+  --font-display: "Fraunces Variable", Georgia, "Times New Roman", serif;
+  --font-sans: "Public Sans Variable", system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, monospace;
+
+  /* --- Surfaces & ink --- */
+  --color-paper: #f4f3ee; /* app background */
+  --color-surface: #fdfdfb; /* cards, inputs */
+  --color-ink: #22271f; /* primary text — near-black with a green cast */
+  --color-ink-muted: #68705f; /* secondary text; AA on paper */
+  --color-line: #d9d7cc; /* hairline borders */
+
+  /* --- Accent. One dominant accent (pine) spent on primary actions and the
+     wordmark; amber appears ONLY as the focus ring — a deliberate, scarce
+     signal. Resist adding more colors; add neutrals instead. --- */
+  --color-pine: #2f5743;
+  --color-pine-deep: #21402f;
+  --color-amber: #c2921e;
+  --color-amber-deep: #8a6712; /* amber legible at small sizes (warning text on soft fills) */
+  --color-danger: #a2372c;
+
+  /* --- Shape. Controls share one radius; anything larger must be earned. --- */
+  --radius-ctl: 0.3125rem;
+}

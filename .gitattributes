@@ -1,0 +1,6 @@
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+pnpm-lock.yaml linguist-generated=true -diff
+**/drizzle/** linguist-generated=true
+**/worker-configuration.d.ts linguist-generated=true

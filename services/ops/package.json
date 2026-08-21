@@ -1,0 +1,27 @@
+{
+  "name": "@app/ops",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "typecheck": "wrangler types && tsc --noEmit",
+    "cf-typegen": "wrangler types",
+    "test": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@app/contracts": "workspace:*",
+    "@app/shared": "workspace:*",
+    "hono": "catalog:"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "catalog:",
+    "@cloudflare/workers-types": "catalog:",
+    "@vitest/coverage-istanbul": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:",
+    "wrangler": "catalog:"
+  }
+}

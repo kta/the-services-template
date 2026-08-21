@@ -1,0 +1,30 @@
+name: "Bug report"
+description: "Something is broken."
+title: "fix: "
+labels: ["bug"]
+body:
+  - type: input
+    id: service
+    attributes:
+      label: Service / area
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. …
+        2. …
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment / logs

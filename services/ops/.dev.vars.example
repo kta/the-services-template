@@ -1,0 +1,6 @@
+# ローカル開発用の dev 値。`make init` が .dev.vars にコピーする(.dev.vars は gitignore)。
+# 本番は `wrangler secret put` で設定(docs/howto/deploy.md)。
+INTERNAL_KEY=dev-internal-key
+# D1 REST export 用トークン(D1:Read のみにスコープ)。dev はダミーで良い
+# (ローカルでは REST export を実行しない/テストは fetch をモック)。
+D1_EXPORT_API_TOKEN=dev-d1-export-token

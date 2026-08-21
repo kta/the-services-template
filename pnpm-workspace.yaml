@@ -1,0 +1,46 @@
+packages:
+  - 'services/*'
+  - 'packages/*'
+
+# Postinstall scripts are opt-in (pnpm 10). Keep this list minimal.
+onlyBuiltDependencies:
+  - '@biomejs/biome'
+  - '@tailwindcss/oxide'
+  - esbuild
+  - lefthook
+  - sharp
+  - workerd
+
+# Single source of version truth (referenced as "catalog:" in package.json).
+catalog:
+  typescript: ^5.9.3
+
+  # Backend (Hono Workers)
+  hono: ^4.12.34
+  '@hono/zod-validator': ^0.8.0
+  zod: ^3.25.76
+  drizzle-orm: ^0.45.0
+  drizzle-kit: ^0.31.0
+  wrangler: ^4.107.0
+  '@cloudflare/workers-types': ^4.20260625.0
+
+  # Testing
+  vitest: ^4.1.0
+  '@cloudflare/vitest-pool-workers': ^0.16.0
+  '@vitest/coverage-istanbul': ^4.1.0
+  '@playwright/test': ^1.61.0
+
+  # Frontend (React + Vite)
+  vite: ^8.1.0
+  '@vitejs/plugin-react': ^6.0.0
+  '@cloudflare/vite-plugin': ^1.43.0
+  tailwindcss: ^4.3.2
+  '@tailwindcss/vite': ^4.3.2
+  react: ^19.2.0
+  react-dom: ^19.2.0
+  react-router: ^8.2.0
+  '@types/react': ^19.2.0
+  '@types/react-dom': ^19.2.0
+
+  # Tooling
+  '@biomejs/biome': ^2.5.1

@@ -1,0 +1,7 @@
+# ローカル開発用の dev 値。`make init` が .dev.vars にコピーする(.dev.vars は gitignore)。
+# 本番は `wrangler secret put` で設定(docs/howto/deploy.md)。
+INTERNAL_KEY=dev-internal-key
+# 空 = LogSender(メールを送らずログ出力)。実送信したいローカルだけ実キーを入れる。
+RESEND_API_KEY=
+# dev では LogSender(メールを送らずログ出力)を明示許可。本番には設定しない。
+MAIL_DEV_LOG=true

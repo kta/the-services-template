@@ -1,0 +1,10 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+
+# Local variable values (may contain account id / secrets)
+terraform.tfvars
+*.auto.tfvars

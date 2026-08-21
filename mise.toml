@@ -1,0 +1,6 @@
+# Pins BOTH Node and pnpm so agents/humans get a deterministic toolchain.
+# (corepack — which used to activate `packageManager` — was removed from Node
+# 25+, so .nvmrc + corepack is no longer enough.) Install mise, then `mise install`.
+[tools]
+node = "22"
+pnpm = "10.33.2"

@@ -1,0 +1,46 @@
+name: Agent compatibility
+
+on:
+  pull_request:
+    paths:
+      - 'AGENTS.md'
+      - 'CLAUDE.md'
+      - '.agents/**'
+      - '.claude/skills'
+      - '.claude/skills/**'
+      - '.codex/**'
+      - '.codex-plugin/**'
+      - 'skills/**'
+      - 'scripts/check-agent-compat.sh'
+      - 'scripts/validate-skills.sh'
+      - '.github/workflows/agent-compat.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'AGENTS.md'
+      - 'CLAUDE.md'
+      - '.agents/**'
+      - '.claude/skills'
+      - '.claude/skills/**'
+      - '.codex/**'
+      - '.codex-plugin/**'
+      - 'skills/**'
+      - 'scripts/check-agent-compat.sh'
+      - 'scripts/validate-skills.sh'
+      - '.github/workflows/agent-compat.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Verify shared agent instructions and skills
+        run: scripts/check-agent-compat.sh
+      - name: Validate skill metadata and links
+        run: |
+          if [[ -x scripts/validate-skills.sh ]]; then
+            scripts/validate-skills.sh
+          fi

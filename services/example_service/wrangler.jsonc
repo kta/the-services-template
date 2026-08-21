@@ -1,0 +1,34 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "example-service",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-06-25",
+  "observability": { "enabled": true },
+  // One Worker serves both the SPA (static assets) and the API. Only /api/*
+  // reaches the Worker script; every other path is served as an asset (with
+  // SPA fallback to index.html). `directory` is intentionally absent: the
+  // Cloudflare Vite plugin points it at the client build output.
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  // One D1 database per domain. Replace database_id with the real UUID from
+  // `wrangler d1 create example_service` (Terraform output) before deploying
+  // remotely — local dev/tests ignore it. `migrations_dir` must equal
+  // Drizzle's `out` (./migrations).
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "example_service",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  // No secrets in `vars` (official guidance). Dev values live in .dev.vars
+  // (copied from .dev.vars.example by `make init`, gitignored); prod values are
+  // set via `wrangler secret put` only. Until secrets are set, internal APIs
+  // and auth fail closed. See docs/howto/deploy.md.
+  // Notifier binding (this template does not use Queues). POST NotificationJob to
+  // the notifier Worker's /api/internal/send over this service binding.
+  "services": [{ "binding": "NOTIFIER", "service": "notifier" }]
+}

@@ -1,0 +1,14 @@
+# Rename this to `.github/CODEOWNERS` and replace the placeholder handles with
+# real GitHub users/teams to auto-request reviewers on PRs (incl. agent PRs).
+# (Shipped as .example so the placeholder owner doesn't error in GitHub.)
+# First matching pattern wins.
+
+# Default owner for everything
+*                       @your-github-username
+
+# Per-area (examples — adjust as the team grows)
+/backend/               @your-github-username
+/apps/                  @your-github-username
+/packages/contracts/    @your-github-username
+/infra/                 @your-github-username
+/.github/               @your-github-username

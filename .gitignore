@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Cloudflare / Wrangler
+.wrangler/
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+
+# Vite env files (keep the *.example committed)
+.env
+.env.*
+!.env.*.example
+
+# Generated worker binding types
+worker-configuration.d.ts
+
+# Test / coverage
+coverage/
+playwright-report/
+test-results/
+
+# Logs / OS / editor
+*.log
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# design-select skill sessions (HTML mockups + server state)
+.superpowers/
+
+# Coding agents (personal/local state — keep shared skills & settings.json committed)
+.claude/settings.local.json
+.claude/worktrees/
+.claude/scheduled_tasks.lock
+CLAUDE.local.md

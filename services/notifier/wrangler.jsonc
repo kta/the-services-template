@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "notifier",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-25",
+  "observability": { "enabled": true },
+  // Idempotency store (dedupe key = job.id, TTL 24h). Callers may redeliver.
+  "kv_namespaces": [{ "binding": "DEDUPE", "id": "00000000000000000000000000000000" }],
+  // No queues by design: Queues work on the free plan, but this template keeps
+  // delivery to one moving part. Other Workers post NotificationJob to
+  // POST /api/internal/send over a service binding (x-internal-key).
+  // No secrets in `vars`: INTERNAL_KEY / RESEND_API_KEY live in .dev.vars for
+  // local dev and are set via `wrangler secret put` in prod (deploy.md).
+  // Fail closed: with no RESEND_API_KEY and no MAIL_DEV_LOG=true, sending 502s.
+  // LogSender is dev-only (.dev.vars MAIL_DEV_LOG=true) — never set it in prod.
+  "vars": {
+    // Resend `from` address (not a secret). Resend requires a verified sender
+    // domain — set a verified operational address in prod. Empty → senders
+    // fall back to the default placeholder (notifications@example.com), which
+    // Resend will reject.
+    "MAIL_FROM": ""
+  }
+}

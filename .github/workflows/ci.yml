@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  pull_request: {}
+  push:
+    branches: [main]
+  # PR / main-merge run verify: agent compatibility, lint, typecheck, and unit
+  # tests with coverage gates. e2e is opt-in only (manual) because it needs
+  # Playwright browsers + workerd; run it on demand via this trigger, or locally
+  # with `pnpm --filter <pkg> e2e`.
+  workflow_dispatch: {}
+
+# Least privilege: jobs authenticate to Cloudflare via the env secret, not the
+# GITHUB_TOKEN, so read is enough.
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: verify-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Generate worker binding types
+        run: pnpm -r --if-present cf-typegen
+      - name: Check agent compatibility
+        run: bash scripts/check-agent-compat.sh
+      - name: Lint + format
+        run: pnpm exec biome check .
+      - name: Typecheck
+        run: pnpm -r --if-present typecheck
+      - name: Test (with coverage gates)
+        run: pnpm -r --if-present test
+
+  # Manual only: does NOT run on pull_request or push to main. Trigger from the
+  # Actions tab (workflow_dispatch) when you want CI e2e.
+  e2e:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: e2e-${{ github.ref }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: example_service, pkg: '@app/example_service', dir: services/example_service }
+          - { name: admin, pkg: '@app/admin', dir: services/admin }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # e2e は dev グラント(AUTH_DEV_GRANT)等の dev 値に依存する。.dev.vars は
+      # gitignore なので、CI では example からコピーして用意する(make dev-vars)。
+      - run: make dev-vars
+      - run: pnpm --filter ${{ matrix.pkg }} exec playwright install --with-deps chromium
+      - run: pnpm --filter ${{ matrix.pkg }} run e2e
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-report-${{ matrix.name }}
+          path: ${{ matrix.dir }}/playwright-report/
+          retention-days: 7
+
+  # Deploy each service on push to main. Set CLOUDFLARE_API_TOKEN (scoped:
+  # Workers Scripts/D1/KV/R2 Edit + Account Read — no Queues permission: this
+  # template does not use Queues) + CLOUDFLARE_ACCOUNT_ID as repo secrets. Each service
+  # deploys its SPA and API together (one Worker), so no per-SPA API-origin
+  # variables are needed. Prerequisite: `terraform apply` (infra) before the
+  # first deploy.
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # e2e is not a gate here (manual-only). verify covers agent compatibility,
+    # lint, typecheck, and unit tests with coverage gates.
+    needs: [verify]
+    runs-on: ubuntu-latest
+    environment: production
+    # Serialize deploys and never cancel one mid-migration/mid-upload.
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      # Binding-aware order: notifier (no deps) → admin (binds example_service +
+      # notifier) → ops (binds notifier + admin, so deploys last). On the very
+      # first deploy a service may reference a not-yet-created binding target
+      # (wrangler deploys anyway; the binding resolves once both exist).
+      # NOTE: example_service is the template SCAFFOLD (copy source for
+      # new-service) — it is verified/e2e'd but NOT deployed to prod. Your real
+      # domain services (copied from it) go in this matrix instead. Secrets are
+      # never committed: dev values live in each service's .dev.vars (local
+      # only); prod values are set once via `wrangler secret put` (deploy.md).
+      matrix:
+        include:
+          - { pkg: '@app/notifier' }
+          - { pkg: '@app/admin' }
+          - { pkg: '@app/ops' }
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Apply remote D1 migrations before deploying code that expects the
+      # schema. No-op for Workers without a db:migrate:remote script.
+      - run: pnpm --filter ${{ matrix.pkg }} --if-present run db:migrate:remote
+      - run: pnpm --filter ${{ matrix.pkg }} run deploy

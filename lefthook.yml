@@ -1,0 +1,50 @@
+# Git hooks. Auto-installed by the root `prepare` script (`lefthook install`).
+#
+# 品質ゲートの責務分担:
+#   pre-commit … 早期ローカルフィードバック(lint/format + **ユニットテスト全実行**)
+#   pre-push   … 早期ローカルフィードバック(lint + typecheck + カバレッジゲート)
+#   CI verify  … 最終リモートゲート(agent compatibility + lint + typecheck + coverage-gated unit tests)
+#
+# 緊急時の一時回避は `LEFTHOOK=0 git commit ...` / `git commit --no-verify`。
+# 常用しないこと。最終的には CI `verify` が検出するが、早期フィードバックを失う。
+
+pre-commit:
+  parallel: false # biome の --write でファイルが変わるため、テストは整形後に走らせる
+  # merge / rebase 中は走らせない(コンフリクト解決の途中でテストが落ちるのは当然で、
+  # ここで止めると解決作業そのものができなくなる)。
+  skip:
+    - merge
+    - rebase
+  commands:
+    # 1) 変更ファイルの lint + format(自動修正して stage し直す)
+    lint-format:
+      priority: 1
+      glob: '*.{js,ts,cjs,mjs,jsx,tsx,json,jsonc,css}'
+      run: pnpm exec biome check --write --no-errors-on-unmatched --files-ignore-unknown=true {staged_files}
+      stage_fixed: true
+    # 2) ユニットテスト(全パッケージ)。**落ちたらコミットさせない。**
+    #    全体で数秒〜十数秒。重い e2e は含めない(Playwright は手動 / CI 手動トリガ)。
+    test:
+      priority: 2
+      run: pnpm -r --if-present test
+
+commit-msg:
+  commands:
+    commitlint:
+      run: pnpm exec commitlint --edit {1}
+
+# push 前は最終リモートゲートの主要品質検査をローカルで先行実行する。
+pre-push:
+  parallel: false
+  commands:
+    # CI と同条件: 書き換えなしの check(format 崩れも lint 違反もここで失敗)
+    lint-format:
+      priority: 1
+      run: pnpm exec biome check .
+    typecheck:
+      priority: 2
+      run: pnpm -r --if-present typecheck
+    # カバレッジゲート込み(各パッケージの vitest.config.ts の thresholds)
+    test:
+      priority: 3
+      run: pnpm -r --if-present test
