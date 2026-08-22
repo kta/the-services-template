@@ -42,13 +42,13 @@
 - best-effort（通知・同期）が失敗を握りつぶす経路は、**握りつぶした事実**まで見る: 戻り値（`synced: false` / `emailed: false`）、代替経路（招待リンクの返却）、冪等キーを残さないこと。
 
 ## 完了の定義とゲートの所在
-`pnpm check`（lint + typecheck + test）を緑にする。Lefthook は開発中の早期ローカルフィードバックであり、CI `verify` が lint・typecheck・カバレッジゲート込み unit test の最終リモートゲートである。
+`pnpm check`（lint + Knip dependency audit + typecheck + test）を緑にする。Lefthook は開発中の早期ローカルフィードバックであり、CI `verify` が lint・dependency audit・typecheck・カバレッジゲート込み unit test の最終リモートゲートである。
 
 | タイミング | 実行内容 |
 |---|---|
 | pre-commit | 早期ローカルフィードバック: 変更ファイルの lint/format 自動修正 → **ユニットテスト全実行**（落ちたらコミット不可） |
-| pre-push | 早期ローカルフィードバック: biome check（全体）+ typecheck + カバレッジゲート込みテスト |
-| CI `verify` | 最終リモートゲート: agent compatibility + lint + typecheck + **カバレッジゲート込み unit test**（`deploy` の前提） |
+| pre-push | 早期ローカルフィードバック: Biome check + Knip dependency audit + typecheck + カバレッジゲート込みテスト |
+| CI `verify` | 最終リモートゲート: agent compatibility + lint + dependency audit + typecheck + **カバレッジゲート込み unit test**（`deploy` の前提） |
 
 `--no-verify` / `LEFTHOOK=0` は緊急時の一回限りとし、常用しない。e2e は UI 変更時にローカルで実行し、CI は手動トリガ（`workflow_dispatch`）のオンデマンド実行のみ — PR / main マージのゲートではない。
 

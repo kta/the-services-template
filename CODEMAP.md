@@ -33,6 +33,8 @@ topology and ownership boundary.
 
 Service-local deployment and binding configuration is in each service's
 `wrangler.jsonc`; migrations, tests, and web sources live beside that service.
+Each service also has a local `AGENTS.md` describing its invariants, commands,
+and required tests; the sibling `CLAUDE.md` is a symlink to that same source.
 
 ### Runtime bindings and dependency direction
 
@@ -84,7 +86,8 @@ not depend on services.
 
 ### Development and verification
 
-Use `pnpm check` as the repository-wide completion gate. For a focused unit
+Use `pnpm check` as the repository-wide completion gate; it covers lint,
+dependency hygiene, typechecking, and coverage-gated unit tests. For a focused unit
 test, run `pnpm --filter <pkg> exec vitest run -t "<name>"`. When changing UI,
 run `pnpm --filter <pkg> e2e` for the affected package.
 

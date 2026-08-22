@@ -26,10 +26,11 @@
 | テストを書く | [`testing/TEST_RULE.md`](./testing/TEST_RULE.md) |
 | インフラ構成を知る | [`architecture/infra.md`](./architecture/infra.md) |
 | 開発体制・ワークフロー | [`howto/agent-development.md`](./howto/agent-development.md) |
+| 依存を追加・削除・更新する | [`howto/dependency-management.md`](./howto/dependency-management.md) |
 | AI（LLM）を組み込む機能を作る | [`security/AI_GUARDRAILS_RULE.md`](./security/AI_GUARDRAILS_RULE.md) |
 | 開発の大原則（なぜこのルールなのか） | [`constitution/SDD_CONSTITUTION.md`](./constitution/SDD_CONSTITUTION.md) |
 
 ## この文書たちの立ち位置
 
-- **`AGENTS.md` が正**（`CLAUDE.md` はそのシンボリックリンク）。ここの文書は AGENTS.md から必要なときだけ参照される詳細版です。
+- **ルートと各サービスの `AGENTS.md` がそのscopeの正**（同階層の `CLAUDE.md` はそのシンボリックリンク）。ここの文書は AGENTS.md から必要なときだけ参照される詳細版です。
 - 迷ったら **実物のコードと `pnpm check` の結果が正**。文書と実装が食い違っていたら、それはバグ報告に値します（エージェントに「この文書、実装と違う」と言えば直します）。

@@ -2,7 +2,8 @@
 
 AI コーディングエージェント（Claude Code / Cursor / Codex / Copilot）向けの単一ソース。ツール固有ファイルはこれを指す（`CLAUDE.md` は**このファイルへのシンボリックリンク**、`.github/copilot-instructions.md` はポインタ）。人間向けの入口は [`README.md`](./README.md)。
 
-**常時読むのはこのファイルだけ**。詳細規約は末尾の「タスク別ロードガイド」から**必要なときだけ**読む。
+ルート共通規約はこのファイルを読む。`services/*` で作業するときは、その階層の `AGENTS.md` も
+追加適用する。詳細規約は末尾の「タスク別ロードガイド」から**必要なときだけ**読む。
 
 ## プロジェクト概要
 Cloudflare-only の SDD/TDD モノレポ **テンプレート**。**1 サービス = 1 Worker が React SPA と Hono API を同一オリジンで配信**し、ドメインごとに D1(SQLite) を持つ。型は **Zod 単一ソース + Hono RPC**、デザインは **`packages/ui` のトークン単一ソース**。**全スタックが Cloudflare 無料枠で動く**（Queues 等の Paid 機能は不使用。通知は service binding の同期送信 API）。IaC は Terraform + Wrangler。`services/example_service` を雛形に新サービスを増やす。
@@ -10,7 +11,7 @@ Cloudflare-only の SDD/TDD モノレポ **テンプレート**。**1 サービ�
 アーキテクチャの構成・責務・主要フローは [`CODEMAP.md`](./CODEMAP.md) を参照。
 
 ## セットアップ / コマンド
-- 必要: Node ≥ 22 / pnpm 10（`mise install` でピン）。
+- 必要: Node ≥ 22 / pnpm 11（`mise install` でピン）。
 - `make init` — install + `.dev.vars` 生成 + 型生成 + ローカル D1 マイグレーション + seed（admin ユーザー等）。
 - dev: `make dev/example_service`（:5173）/ `make dev/admin`（:5174）/ `make dev/notifier` / `make dev/all`（admin + example_service 併走。service binding が dev サーバ間でも解決される）。**1 コマンドで SPA + Worker**（`@cloudflare/vite-plugin`、実 workerd、proxy 無し）。
 - DB: スキーマ編集 → `pnpm --filter <pkg> db:generate` → `db:migrate:local`。
@@ -18,7 +19,7 @@ Cloudflare-only の SDD/TDD モノレポ **テンプレート**。**1 サービ�
 - ターゲット一覧は `make help`。
 
 ## 完了の定義（必ず緑にする）
-- **`pnpm check`**（= `make check`）= lint(biome) + typecheck + test(vitest、カバレッジゲート込み)。**実装後に必ず通す。**
+- **`pnpm check`**（= `make check`）= lint(Biome) + dependency audit(Knip) + typecheck + test(Vitest、カバレッジゲート込み)。**実装後に必ず通す。**
 - 1 テストに絞る: `pnpm --filter <pkg> exec vitest run -t "<name>"`。
 - e2e（Playwright）は `pnpm --filter <pkg> e2e`。**CI では手動トリガのみ**（`workflow_dispatch`）なので、UI を変えたらローカルで回す。
 
@@ -26,8 +27,8 @@ Cloudflare-only の SDD/TDD モノレポ **テンプレート**。**1 サービ�
 | タイミング | 実行内容 | 効果 |
 |---|---|---|
 | **pre-commit**（`lefthook.yml`） | 変更ファイルの lint/format 自動修正 → **ユニットテスト全実行** | 早期ローカルフィードバック（落ちたらコミット不可） |
-| **pre-push** | biome check（全体・書き換えなし）+ typecheck + **カバレッジゲート込みテスト** | 早期ローカルフィードバック（落ちたら push 不可） |
-| **CI `verify`**（`.github/workflows/ci.yml`） | agent compatibility + lint + typecheck + **カバレッジゲート込みユニットテスト** | PR / main の最終リモートゲート。`deploy` の前提 |
+| **pre-push** | Biome check + Knip dependency audit + typecheck + **カバレッジゲート込みテスト** | 早期ローカルフィードバック（落ちたら push 不可） |
+| **CI `verify`**（`.github/workflows/ci.yml`） | agent compatibility + lint + dependency audit + typecheck + **カバレッジゲート込みユニットテスト** | PR / main の最終リモートゲート。`deploy` の前提 |
 
 Lefthook は開発中の早期フィードバック、CI `verify` は迂回できない最終リモートゲートである。`--no-verify` / `LEFTHOOK=0` は緊急時の一回限りとし、常用しない。e2e は UI 変更時にローカルで実行し、CI では手動トリガ（`workflow_dispatch`）のみとする。
 
@@ -99,6 +100,7 @@ Lefthook は開発中の早期フィードバック、CI `verify` は迂回で�
 | バックアップ / リストア | `docs/howto/restore.md` |
 | 通知（Queue なし設計） | `docs/howto/notifications.md` |
 | 開発体制・ワークフロー全体 | `docs/howto/agent-development.md` |
+| 依存の追加・削除・更新 | `docs/howto/dependency-management.md` |
 | LLM を組み込む機能**のみ** | `docs/security/AI_GUARDRAILS_RULE.md`（LLM を扱わないタスクでは読まない） |
 
 ## 注意

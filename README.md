@@ -22,7 +22,7 @@
 | メール通知 | `notifier` サービス（Resend 経由。二重送信を防ぐ仕組み込み） |
 | 毎日のバックアップと監視 | `ops` サービス（R2 に世代保存＋容量/鮮度/死活の異常をメール通知） |
 | 見た目の一貫性 | デザイントークン単一ソース（`packages/ui`）+ 「AI っぽい見た目」を禁じるルール |
-| 壊れていないかの自動確認 | `pnpm check`（lint + 型 + テスト）。CI でも走る |
+| 壊れていないかの自動確認 | `pnpm check`（lint + 未使用依存 + 型 + カバレッジ付きテスト）。CI でも走る |
 
 技術スタックの詳細（Hono / Drizzle / Zod / Terraform など）は [`AGENTS.md`](./AGENTS.md) と [`docs/`](./docs/) にあります。**普段は読まなくて大丈夫です。**
 
@@ -39,7 +39,7 @@
 ### 動かす
 
 ```sh
-mise install    # Node 22 / pnpm 10 を入れる
+mise install    # Node 22 / pnpm 11 を入れる
 make init       # 必要なものを全部そろえる（初回のみ・数分かかります）
 
 make dev/admin  # → http://localhost:5174 が管理コンソール
@@ -144,7 +144,7 @@ GitHub の **Use this template** か `npx degit` で複製したら、エージ�
 ## 構成
 
 ```
-services/<name>/          1 サービス = 1 Worker（画面 + API + DB）
+services/<name>/          1 サービス = 1 Worker（画面 + API + DB）+ サービス固有 AGENTS.md
 packages/contracts        API の型の単一ソース（Zod）
 packages/ui               デザイントークン + 共有パーツ
 packages/shared           認証・日付・解析などの共通処理
@@ -158,6 +158,7 @@ infra/terraform           クラウド側リソースの定義
 - [`docs/README.md`](./docs/README.md) — **「何をしたいときにどれを読むか」の案内**（まずここ）
 - [`AGENTS.md`](./AGENTS.md) — **エージェント向けの全ルール**（`CLAUDE.md` はこれへのシンボリックリンク）
 - [`docs/howto/agent-development.md`](./docs/howto/agent-development.md) — 開発体制とワークフロー
+- [`docs/howto/dependency-management.md`](./docs/howto/dependency-management.md) — 依存の更新・追加・削除とRenovate運用
 - [`docs/frontend/DESIGN_RULE.md`](./docs/frontend/DESIGN_RULE.md) — デザインの決まり
 - [`docs/howto/restore.md`](./docs/howto/restore.md) — バックアップからの復旧手順
 - [`SECURITY.md`](./SECURITY.md) — 脆弱性の報告先
