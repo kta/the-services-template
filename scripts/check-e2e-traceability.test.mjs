@@ -33,7 +33,8 @@ async function withFixture(files, check) {
 }
 
 const approvedSpec = `# Feature\n\n- ステータス: Approved\n\n- AC-ITEM-01: creates an item\n`
-const mappedTest = `// @e2e-covers AC-ITEM-01\ntest('creates an item', async () => {})\n`
+const playwrightImport = `import { test } from '@playwright/test'\n`
+const mappedTest = `${playwrightImport}// @e2e-covers AC-ITEM-01\ntest('creates an item', async () => {})\n`
 
 test('accepts every approved identifier mapped to one Playwright test', async () => {
   await withFixture(
@@ -59,8 +60,7 @@ test('reports an unknown E2E mapping', async () => {
   await withFixture(
     {
       'specs/example/features/001/spec.md': approvedSpec,
-      'services/example/e2e/items.spec.ts':
-        "// @e2e-covers AC-UNKNOWN-99\ntest('creates an item', async () => {})\n",
+      'services/example/e2e/items.spec.ts': `${playwrightImport}// @e2e-covers AC-UNKNOWN-99\ntest('creates an item', async () => {})\n`,
     },
     async (root) => {
       assert.deepEqual(await validateTraceability(root), [
@@ -79,7 +79,7 @@ test('reports an identifier mapped by more than one E2E test', async () => {
     },
     async (root) => {
       assert.deepEqual(await validateTraceability(root), [
-        'Duplicate E2E mapping for AC-ITEM-01: services/example/e2e/items.spec.ts:1, services/example/e2e/items.spec.ts:4.',
+        'Duplicate E2E mapping for AC-ITEM-01: services/example/e2e/items.spec.ts:2, services/example/e2e/items.spec.ts:5.',
       ])
     },
   )
@@ -105,11 +105,11 @@ for (const modifier of ['skip', 'fixme', 'only']) {
     await withFixture(
       {
         'specs/example/features/001/spec.md': approvedSpec,
-        'services/example/e2e/items.spec.ts': `// @e2e-covers AC-ITEM-01\ntest.${modifier}('creates an item', async () => {})\n`,
+        'services/example/e2e/items.spec.ts': `${playwrightImport}// @e2e-covers AC-ITEM-01\ntest.${modifier}('creates an item', async () => {})\n`,
       },
       async (root) => {
         assert.deepEqual(await validateTraceability(root), [
-          `E2E mapping AC-ITEM-01 in services/example/e2e/items.spec.ts:1 targets test.${modifier}, which cannot satisfy traceability.`,
+          `E2E mapping AC-ITEM-01 in services/example/e2e/items.spec.ts:2 targets test.${modifier}, which cannot satisfy traceability.`,
           'Missing E2E mapping for approved AC-ITEM-01.',
         ])
       },
@@ -127,6 +127,63 @@ test('requires every feature spec to declare a status', async () => {
       assert.deepEqual(await validateTraceability(root), [
         'Feature spec specs/example/features/001/spec.md must declare `- ステータス: Draft` or `- ステータス: Approved`.',
         'Unknown E2E mapping AC-ITEM-01 in services/example/e2e/items.spec.ts.',
+      ])
+    },
+  )
+})
+
+test('accepts an aliased Playwright test import', async () => {
+  await withFixture(
+    {
+      'specs/example/features/001/spec.md': approvedSpec,
+      'services/example/e2e/items.spec.ts': `import { test as playwrightTest } from '@playwright/test'\n// @e2e-covers AC-ITEM-01\nplaywrightTest('creates an item', async () => {})\n`,
+    },
+    async (root) => {
+      assert.deepEqual(await validateTraceability(root), [])
+    },
+  )
+})
+
+test('rejects a local function named test', async () => {
+  await withFixture(
+    {
+      'specs/example/features/001/spec.md': approvedSpec,
+      'services/example/e2e/items.spec.ts': `function test() {}\n// @e2e-covers AC-ITEM-01\ntest('creates an item', async () => {})\n`,
+    },
+    async (root) => {
+      assert.deepEqual(await validateTraceability(root), [
+        'E2E mapping AC-ITEM-01 in services/example/e2e/items.spec.ts:2 does not target a Playwright test.',
+        'Missing E2E mapping for approved AC-ITEM-01.',
+      ])
+    },
+  )
+})
+
+test('rejects a shadowed Playwright test binding', async () => {
+  await withFixture(
+    {
+      'specs/example/features/001/spec.md': approvedSpec,
+      'services/example/e2e/items.spec.ts': `import { test as playwrightTest } from '@playwright/test'\nfunction scoped(playwrightTest: () => void) {\n  // @e2e-covers AC-ITEM-01\n  playwrightTest()\n}\n`,
+    },
+    async (root) => {
+      assert.deepEqual(await validateTraceability(root), [
+        'E2E mapping AC-ITEM-01 in services/example/e2e/items.spec.ts:3 does not target a Playwright test.',
+        'Missing E2E mapping for approved AC-ITEM-01.',
+      ])
+    },
+  )
+})
+
+test('rejects a test imported from another module', async () => {
+  await withFixture(
+    {
+      'specs/example/features/001/spec.md': approvedSpec,
+      'services/example/e2e/items.spec.ts': `import { test } from 'vitest'\n// @e2e-covers AC-ITEM-01\ntest('creates an item', async () => {})\n`,
+    },
+    async (root) => {
+      assert.deepEqual(await validateTraceability(root), [
+        'E2E mapping AC-ITEM-01 in services/example/e2e/items.spec.ts:2 does not target a Playwright test.',
+        'Missing E2E mapping for approved AC-ITEM-01.',
       ])
     },
   )

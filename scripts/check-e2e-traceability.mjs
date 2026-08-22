@@ -3,6 +3,8 @@
 import { lstat, readdir, readFile, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { SyntaxKind } from 'typescript/unstable/ast'
+import { API } from 'typescript/unstable/sync'
 
 const IDENTIFIER = '(?:UC|AC)-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+'
 const definitionPattern = new RegExp(`^[\\t ]*-\\s+(${IDENTIFIER}):\\s+\\S.*$`, 'gm')
@@ -10,7 +12,6 @@ const mappingPattern = new RegExp(
   `^[\\t ]*//\\s*@e2e-covers\\s+((?:${IDENTIFIER})(?:\\s+(?:${IDENTIFIER}))*)\\s*$`,
   'gm',
 )
-const testDeclaration = /^\s*test(?:\.(only|skip|fixme))?\s*\(/u
 const statusPattern = /^[\t ]*-\s+(?:ステータス|Status):\s*(Draft|Approved)\s*$/mu
 
 async function filesUnder(directory) {
@@ -37,6 +38,94 @@ function lineAt(source, offset) {
 function isInside(root, path) {
   const pathFromRoot = relative(root, path)
   return pathFromRoot === '' || (!pathFromRoot.startsWith('..') && !isAbsolute(pathFromRoot))
+}
+
+function isPlaywrightTestImport(statement) {
+  return (
+    statement.kind === SyntaxKind.ImportDeclaration &&
+    statement.moduleSpecifier?.kind === SyntaxKind.StringLiteral &&
+    statement.moduleSpecifier.text === '@playwright/test'
+  )
+}
+
+function isValueDeclarationName(node) {
+  const parent = node.parent
+  return (
+    (parent.kind === SyntaxKind.VariableDeclaration && parent.name === node) ||
+    (parent.kind === SyntaxKind.Parameter && parent.name === node) ||
+    ((parent.kind === SyntaxKind.FunctionDeclaration ||
+      parent.kind === SyntaxKind.FunctionExpression) &&
+      parent.name === node) ||
+    ((parent.kind === SyntaxKind.ClassDeclaration || parent.kind === SyntaxKind.ClassExpression) &&
+      parent.name === node) ||
+    (parent.kind === SyntaxKind.EnumDeclaration && parent.name === node) ||
+    (parent.kind === SyntaxKind.BindingElement && parent.name === node) ||
+    (parent.kind === SyntaxKind.ImportSpecifier && parent.name === node) ||
+    (parent.kind === SyntaxKind.NamespaceImport && parent.name === node) ||
+    (parent.kind === SyntaxKind.ImportClause && parent.name === node)
+  )
+}
+
+async function playwrightTestCalls(path) {
+  const api = new API()
+  let snapshot
+  try {
+    snapshot = api.updateSnapshot({ openFiles: [path] })
+    const project = snapshot.getDefaultProjectForFile(path)
+    const file = project?.program.getSourceFile(path)
+    if (!file) throw new Error(`TypeScript could not parse E2E file ${path}.`)
+    const importedTestBindings = new Map()
+
+    for (const statement of file.statements) {
+      if (!isPlaywrightTestImport(statement) || !statement.importClause?.namedBindings) continue
+      const { namedBindings } = statement.importClause
+      if (namedBindings.kind !== SyntaxKind.NamedImports) continue
+      for (const element of namedBindings.elements) {
+        const importedName = element.propertyName?.text ?? element.name.text
+        if (importedName === 'test') {
+          importedTestBindings.set(element.name.text, element.name.getStart(file))
+        }
+      }
+    }
+
+    const shadowedBindings = new Set()
+    const calls = []
+    const visit = (node) => {
+      if (
+        node.kind === SyntaxKind.Identifier &&
+        importedTestBindings.has(node.text) &&
+        isValueDeclarationName(node) &&
+        importedTestBindings.get(node.text) !== node.getStart(file)
+      ) {
+        shadowedBindings.add(node.text)
+      }
+
+      if (node.kind === SyntaxKind.CallExpression) {
+        const callee = node.expression
+        if (callee.kind === SyntaxKind.Identifier && importedTestBindings.has(callee.text)) {
+          calls.push({ binding: callee.text, modifier: undefined, start: node.getStart(file) })
+        } else if (
+          callee.kind === SyntaxKind.PropertyAccessExpression &&
+          callee.expression.kind === SyntaxKind.Identifier &&
+          importedTestBindings.has(callee.expression.text) &&
+          ['only', 'skip', 'fixme'].includes(callee.name.text)
+        ) {
+          calls.push({
+            binding: callee.expression.text,
+            modifier: callee.name.text,
+            start: node.getStart(file),
+          })
+        }
+      }
+      node.forEachChild(visit)
+    }
+    visit(file)
+
+    return calls.filter((call) => !shadowedBindings.has(call.binding))
+  } finally {
+    snapshot?.dispose()
+    api.close()
+  }
 }
 
 async function regularFiles(candidates, root, kind) {
@@ -109,14 +198,18 @@ async function e2eMappings(root) {
   for (const path of files) {
     const source = await readFile(path, 'utf8')
     const displayPath = relative(root, path)
+    const testCalls = await playwrightTestCalls(path)
     for (const match of source.matchAll(mappingPattern)) {
       const line = lineAt(source, match.index)
       const identifiers = match[1].split(/\s+/u)
-      const testTarget = source.slice(match.index + match[0].length).match(testDeclaration)
+      const testTarget = testCalls.find(
+        (call) => source.slice(match.index + match[0].length, call.start).trim() === '',
+      )
       for (const id of identifiers) {
         const mapping = { id, path: displayPath, line }
         if (!testTarget) invalidMappings.push(mapping)
-        else if (testTarget[1]) disabledMappings.push({ ...mapping, modifier: testTarget[1] })
+        else if (testTarget.modifier)
+          disabledMappings.push({ ...mapping, modifier: testTarget.modifier })
         else mappings.push(mapping)
       }
     }

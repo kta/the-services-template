@@ -77,9 +77,10 @@ test('creation persists and appears in the ledger when the notifier fixture retu
   page,
   request,
 }) => {
-  const notifier = await request.post('http://127.0.0.1:8788/api/internal/send')
-  expect(notifier.status()).toBe(418)
-  expect(notifier.headers()['x-e2e-notifier-fixture']).toBe('failure')
+  const fixture = 'http://127.0.0.1:8788'
+  const reset = await request.post(`${fixture}/__e2e/reset`)
+  expect(reset.status()).toBe(200)
+  expect(await reset.json()).toEqual({ calls: 0 })
 
   await page.goto('/')
   await page.getByLabel('Workspace id').fill(unique('org-notifier-fallback'))
@@ -94,4 +95,46 @@ test('creation persists and appears in the ledger when the notifier fixture retu
   await page.getByRole('button', { name: 'Add entry' }).click()
   expect((await create).status()).toBe(201)
   await expect(page.getByText(title)).toBeVisible()
+
+  await expect
+    .poll(async () => {
+      const status = await request.get(`${fixture}/__e2e/status`)
+      expect(status.status()).toBe(200)
+      return ((await status.json()) as { calls: number }).calls
+    })
+    .toBeGreaterThanOrEqual(1)
+
+  const status = await request.get(`${fixture}/__e2e/status`)
+  expect(status.status()).toBe(200)
+  const observed = (await status.json()) as {
+    calls: number
+    responseStatus: number
+    lastRequest: {
+      headers: Record<string, string>
+      job: {
+        id: string
+        payload: { itemId: string; title: string }
+        to: string
+        type: string
+      }
+      method: string
+      pathname: string
+    }
+  }
+  expect(observed.calls).toBeGreaterThanOrEqual(1)
+  expect(observed.responseStatus).toBe(418)
+  expect(observed.lastRequest).toMatchObject({
+    method: 'POST',
+    pathname: '/api/internal/send',
+    job: {
+      type: 'item.created',
+      to: 'team@example.com',
+      payload: { title },
+    },
+  })
+  expect(observed.lastRequest.headers['content-type']).toContain('application/json')
+  expect(observed.lastRequest.headers['x-internal-key']).toBeTruthy()
+  expect(observed.lastRequest.job.id).toBe(
+    `item.created:${observed.lastRequest.job.payload.itemId}`,
+  )
 })
