@@ -3,10 +3,10 @@
   "private": true,
   "license": "MIT",
   "type": "module",
-  "packageManager": "pnpm@10.33.2",
+  "packageManager": "pnpm@11.22.0",
   "engines": {
     "node": ">=22",
-    "pnpm": ">=10"
+    "pnpm": ">=11"
   },
   "scripts": {
     "check": "pnpm run lint && pnpm run typecheck && pnpm run test",
@@ -20,9 +20,9 @@
   },
   "devDependencies": {
     "@biomejs/biome": "catalog:",
-    "@commitlint/cli": "^19.6.1",
-    "@commitlint/config-conventional": "^19.6.0",
-    "lefthook": "^1.10.0",
+    "@commitlint/cli": "^21.2.2",
+    "@commitlint/config-conventional": "^21.2.2",
+    "lefthook": "^2.1.10",
     "typescript": "catalog:"
   }
 }
