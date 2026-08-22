@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { messageForCode, messageForError, messageForStatus } from './errorMessages'
+import { messageForError, messageForStatus } from './errorMessages'
 
 describe('admin error messages', () => {
   it.each([
@@ -26,9 +26,9 @@ describe('admin error messages', () => {
     ['operator_only', undefined, 'この操作を行う権限がありません。'],
     ['unknown', 403, 'この操作を行う権限がありません。'],
     ['unknown', undefined, 'エラーが発生しました（unknown）'],
-    [undefined, undefined, 'エラーが発生しました'],
-  ])('maps code %s with status %s', (code, status, expected) => {
-    expect(messageForCode(code, status)).toBe(expected)
+    [undefined, undefined, '通信に失敗しました。時間をおいて再度お試しください。'],
+  ])('maps code %s with status %s through the public error boundary', (code, status, expected) => {
+    expect(messageForError({ code, status })).toBe(expected)
   })
 
   it.each([
