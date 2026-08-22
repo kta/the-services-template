@@ -19,6 +19,9 @@
 - No real network, wall clock, random ID, or shared cross-test state.
 - Do not add test-only production APIs; refactor only around genuine responsibility boundaries.
 - Do not lower an established coverage threshold to make a failing change pass.
+- Frontend unit coverage may never fall below 60% for lines, statements, functions, or branches.
+- Backend unit/integration coverage may never fall below 80% for lines, statements, functions, or branches.
+- E2E must map 100% of approved Use Case and Acceptance Criterion IDs; this is specification coverage, not line coverage.
 
 ---
 
@@ -113,7 +116,7 @@ For each retained failure, make the smallest production change and rerun the sin
 
 - [ ] **Step 5: Establish and verify UI coverage thresholds**
 
-Set thresholds no lower than the measured coverage rounded down to a stable whole number, with a target of at least 85% lines/statements and 80% functions/branches. Run `pnpm --filter @app/ui test` and confirm all tests and gates pass.
+Set thresholds no lower than the measured coverage rounded down to a stable whole number and never below 60% in any metric, with a target of at least 85% lines/statements and 80% functions/branches. Run `pnpm --filter @app/ui test` and confirm all tests and gates pass.
 
 - [ ] **Step 6: Commit**
 
@@ -237,7 +240,7 @@ Cover navigation/current user/logout controls, multiple toast tones, dismiss int
 
 Run: `pnpm --filter @app/admin test:web`
 
-Set final web thresholds based on achieved coverage with a target of at least 80% lines/statements and 75% functions/branches. Do not exclude route files to reach the target.
+Set final web thresholds based on achieved coverage, never below 60% in any metric, with a target of at least 80% lines/statements and 75% functions/branches. Do not exclude route files to reach the target.
 
 - [ ] **Step 6: Commit**
 
@@ -281,7 +284,7 @@ Cover empty and overlong title, optional body, busy state, successful create/res
 
 Run: `pnpm --filter @app/example_service test:web`
 
-Set final thresholds with a target of at least 85% lines/statements and 80% functions/branches because the example frontend is compact. Keep `App.tsx` included.
+Set final thresholds no lower than 60% in any metric, with a target of at least 85% lines/statements and 80% functions/branches because the example frontend is compact. Keep `App.tsx` included.
 
 - [ ] **Step 7: Commit**
 
@@ -290,7 +293,45 @@ git add services/example_service
 git commit -m "test: cover example service frontend"
 ```
 
-### Task 7: Enforce the combined gate and synchronize documentation
+### Task 7: Raise and satisfy backend coverage floors
+
+**Files:**
+- Modify: `packages/contracts/vitest.config.ts`
+- Modify: `packages/shared/vitest.config.ts`
+- Modify: `services/admin/vitest.config.ts`
+- Modify: `services/example_service/vitest.config.ts`
+- Modify: `services/notifier/vitest.config.ts`
+- Modify: `services/ops/vitest.config.ts`
+- Test: affected `test/**/*.test.ts` files, especially ops failure and branch paths
+
+**Interfaces:**
+- Consumes: existing backend unit/integration suites and Istanbul reports.
+- Produces: enforced minimum 80% for every backend coverage metric.
+
+- [ ] **Step 1: Raise all backend thresholds to 80**
+
+Set lines, statements, functions, and branches to at least 80 in every backend Vitest configuration. Do not add coverage exclusions.
+
+- [ ] **Step 2: Run backend suites and record RED**
+
+Run the recursive backend tests. Expected: any package below the new floor fails specifically at its coverage gate; preserve the output as the TDD baseline.
+
+- [ ] **Step 3: Add meaningful missing branch tests**
+
+For each failing metric, inspect the uncovered report and add tests for real boundary, fallback, partial failure, retry limit, malformed input, or default-deny behavior. Do not add assertions that merely execute lines without validating outcomes.
+
+- [ ] **Step 4: Rerun all backend coverage gates**
+
+Confirm every package reports at least 80% independently for lines, statements, functions, and branches.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/*/vitest.config.ts services/*/vitest.config.ts packages/*/test services/*/test
+git commit -m "test: enforce backend coverage floors"
+```
+
+### Task 8: Enforce the combined gate and synchronize documentation
 
 **Files:**
 - Modify: `package.json`
@@ -304,6 +345,8 @@ git commit -m "test: cover example service frontend"
 - Modify: `docs/testing/TEST_RULE.md`
 - Modify: `docs/howto/agent-development.md`
 - Modify: `docs/howto/dependency-management.md`
+- Create: `scripts/check-e2e-traceability.mjs`
+- Create: `docs/testing/E2E_TRACEABILITY.md`
 
 **Interfaces:**
 - Consumes: all package-level Worker/web/UI test commands and coverage gates.
@@ -317,18 +360,22 @@ Ensure the root test runner invokes `test:all` for React services, ordinary `tes
 
 Temporarily change one web assertion to fail, run the root test command, and confirm non-zero exit. Restore the assertion and rerun green. Do not commit the temporary failure.
 
-- [ ] **Step 3: Update operational documentation**
+- [ ] **Step 3: Add use-case traceability enforcement**
+
+Define a machine-readable convention linking approved `UC-*` / `AC-*` identifiers in `specs/**/spec.md` to Playwright tests. Implement `scripts/check-e2e-traceability.mjs` so it fails for every approved UC/AC without an E2E mapping, duplicate/unknown mappings, or an E2E mapping to a missing test. Document the current baseline and require 100% mapped specification coverage. Add the validator to `pnpm check` and pre-push.
+
+- [ ] **Step 4: Update operational documentation**
 
 Document exact `test`, `test:web`, `test:all`, targeted Vitest, coverage, and E2E responsibilities. State that all new production behavior—including frontend—requires a prior failing test. Make each service AGENTS file identify its required web test cases and commands.
 
-- [ ] **Step 4: Commit the enforcement and documentation**
+- [ ] **Step 5: Commit the enforcement and documentation**
 
 ```bash
 git add package.json lefthook.yml .github/workflows/ci.yml README.md CODEMAP.md AGENTS.md services/*/AGENTS.md docs
 git commit -m "chore: enforce frontend unit tests"
 ```
 
-### Task 8: Final verification and independent review
+### Task 9: Final verification and independent review
 
 **Files:**
 - Review only: all changes from `main...HEAD`
@@ -365,6 +412,8 @@ pnpm --filter @app/admin e2e
 ```
 
 Expected: example smoke 1/1 and admin smoke 2/2 pass.
+
+Run the UC/AC traceability validator before E2E and confirm 100% specification coverage. If existing approved specs expose unmapped use cases, add meaningful E2E scenarios rather than weakening the validator.
 
 - [ ] **Step 4: Verify dependency and repository hygiene**
 

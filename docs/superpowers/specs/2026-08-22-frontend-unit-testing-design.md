@@ -41,10 +41,23 @@ Web coverage is measured separately from Worker coverage. Initial gates must be 
 - Include production code under `src/web/**` for each React service and `src/**` for `packages/ui`.
 - Exclude non-behavioral bootstrap entrypoints, generated files, declarations, and stylesheet-only files.
 - Do not exclude a file merely because it is difficult to test.
-- Establish package-level line, statement, function, and branch thresholds after the initial test matrix is implemented.
+- Frontend unit coverage must remain at or above 60% independently for lines, statements, functions, and branches.
+- Backend unit/integration coverage must remain at or above 80% independently for lines, statements, functions, and branches.
+- Packages may enforce higher ratchets after the initial test matrix is implemented.
 - Thresholds become ratchets: future changes may raise them and must not silently lower them.
 
 Coverage is a backstop, not the test-design target. Assertions focus on observable behavior and meaningful branch outcomes.
+
+## Use-case E2E coverage
+
+E2E 100% means specification coverage, not executable line coverage. Every approved Use Case and Acceptance Criterion must map to at least one automated E2E scenario. Specs and E2E suites maintain stable UC/AC identifiers so a mechanical traceability check can fail when an approved requirement has no E2E mapping.
+
+- New behavior begins by defining or refining its UC/AC identifiers in the spec.
+- Each UC/AC identifier appears in E2E test metadata or a colocated traceability manifest.
+- One E2E may cover multiple identifiers, and one identifier may require multiple boundary scenarios.
+- Unit tests do not substitute for missing UC/AC E2E coverage.
+- Infrastructure-only and non-behavioral maintenance must explicitly state that no UC/AC is introduced; it must not fabricate an E2E requirement.
+- Before push, the traceability validator and all mapped E2E suites run locally. A missing mapping or failed E2E blocks push.
 
 ## Admin test matrix
 
@@ -150,6 +163,8 @@ CI and local gates must execute the same frontend unit suite. The agent compatib
 - `packages/ui` contains focused tests for its exported runtime primitives.
 - Worker and frontend tests can run independently and together.
 - `pnpm check` executes frontend tests and enforces web coverage.
+- Frontend coverage is at least 60% and backend coverage is at least 80% for each of lines, statements, functions, and branches.
+- Every approved UC/AC has an automated E2E mapping and the traceability validator reports 100% specification coverage.
 - Playwright E2E remains green and covers the integrated smoke flows.
 - Documentation names commands that exist and gates that actually run.
 - No production behavior changes except narrowly justified refactoring required to expose real responsibility boundaries.
