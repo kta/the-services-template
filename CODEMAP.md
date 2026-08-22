@@ -33,6 +33,8 @@ topology and ownership boundary.
 
 Service-local deployment and binding configuration is in each service's
 `wrangler.jsonc`; migrations, tests, and web sources live beside that service.
+Each service also has a local `AGENTS.md` describing its invariants, commands,
+and required tests; the sibling `CLAUDE.md` is a symlink to that same source.
 
 ### Runtime bindings and dependency direction
 
@@ -84,9 +86,15 @@ not depend on services.
 
 ### Development and verification
 
-Use `pnpm check` as the repository-wide completion gate. For a focused unit
-test, run `pnpm --filter <pkg> exec vitest run -t "<name>"`. When changing UI,
-run `pnpm --filter <pkg> e2e` for the affected package.
+Use `pnpm check` as the repository-wide completion gate; it covers lint,
+dependency hygiene, typechecking, the explicit combined Worker/web coverage-gated
+test path, and Approved UC/AC E2E traceability. React services expose `test`
+(Worker), `test:web` (jsdom), and `test:all` (both); the root `pnpm test` invokes
+`test:all` exactly once for each React service. For a focused web test, run
+`pnpm --filter <pkg> exec vitest run --config vitest.web.config.ts -t "<name>"`.
+When changing UI or API behavior, run `pnpm --filter <pkg> e2e` for the affected
+package. The mapping convention and current baseline are in
+[`docs/testing/E2E_TRACEABILITY.md`](./docs/testing/E2E_TRACEABILITY.md).
 
 For implementation rules and required checks, use the task-specific guide in
 [`AGENTS.md`](./AGENTS.md), rather than expanding this map with policy.

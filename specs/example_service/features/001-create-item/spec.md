@@ -1,6 +1,7 @@
 # 001-create-item: item の作成・一覧
 
-- サービス: `example_service` / ステータス: Approved（実装済み）
+- サービス: `example_service`
+- ステータス: Approved
 
 > SDD 成果物の見本（`.specify/templates/feature-template.md` 準拠の 1 ファイル spec）。実装は `services/example_service` / `packages/contracts/src/example_service.ts`。
 

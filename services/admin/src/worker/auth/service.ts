@@ -21,7 +21,7 @@ import { authEvents, invitations, organizations, refreshTokens, users } from '..
 
 type Db = DrizzleD1Database<Record<string, never>>
 
-export type AuthConfig = {
+type AuthConfig = {
   pepper: string
   jwtSecret: string
   /** テスト用の固定時刻(秒)。未指定なら実時刻。 */

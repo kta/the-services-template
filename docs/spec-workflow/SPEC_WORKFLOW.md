@@ -18,6 +18,22 @@
 2. **HOW** — 触るファイル / 契約（Zod スキーマ名）/ データモデル差分 / 却下した代替案（1 行ずつ）。
 3. **TASKS** — チェックボックス列挙。**テストタスクを実装タスクより前に**。1 タスク ≤ 30 分目安。
 
+feature spec の先頭には status を必ず 1 行で置く。初期値は Draft、人間が WHAT を承認した後に
+Approved に変える。E2E traceability validator は Approved の `specs/**/spec.md` だけを対象にする。
+
+```md
+- ステータス: Draft
+```
+
+UC/AC を定義する場合は、本文中の参照と区別するため次の definition bullet だけを使う。同じ ID を
+複数 spec に定義してはならない。Approved UC/AC は Playwright test 直前の `@e2e-covers` に一意に
+対応付ける（[`E2E_TRACEABILITY.md`](../testing/E2E_TRACEABILITY.md)）。
+
+```md
+- UC-BOOKING-01: スタッフは予約を登録できる。
+- AC-BOOKING-01: Given ... When ... Then ...
+```
+
 ルール:
 - WHAT に HOW を混ぜない（受け入れ基準にライブラリ名・テーブル名を書かない）。
 - 不明点は `[要確認: ...]` を書き、**解消するまで実装に進まない**（勝手に埋めない）。

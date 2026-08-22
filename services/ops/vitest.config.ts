@@ -25,7 +25,7 @@ export default defineConfig({
       // d1-export.ts is thin HTTP orchestration exercised via mocked fetch in the
       // integration test; lib/backup.ts is fully unit-tested.
       include: ['src/**'],
-      thresholds: { lines: 75, functions: 75, branches: 70, statements: 75 },
+      thresholds: { lines: 80, functions: 80, branches: 80, statements: 80 },
     },
   },
 })

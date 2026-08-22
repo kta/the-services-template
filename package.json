@@ -3,26 +3,29 @@
   "private": true,
   "license": "MIT",
   "type": "module",
-  "packageManager": "pnpm@10.33.2",
+  "packageManager": "pnpm@11.22.0",
   "engines": {
     "node": ">=22",
-    "pnpm": ">=10"
+    "pnpm": ">=11"
   },
   "scripts": {
-    "check": "pnpm run lint && pnpm run typecheck && pnpm run test",
+    "check": "pnpm run lint && pnpm run deps:check && pnpm run typecheck && pnpm run test",
     "build": "pnpm -r --if-present build",
     "typecheck": "pnpm -r --if-present typecheck",
-    "test": "pnpm -r --if-present test",
+    "test": "pnpm --filter @app/contracts test && pnpm --filter @app/shared test && pnpm --filter @app/ui test && pnpm --filter @app/admin test:all && pnpm --filter @app/example_service test:all && pnpm --filter @app/notifier test && pnpm --filter @app/ops test && pnpm run test:traceability",
+    "test:traceability": "node --test scripts/check-e2e-traceability.test.mjs && node scripts/check-e2e-traceability.mjs",
     "lint": "biome check .",
+    "deps:check": "knip",
     "fix": "biome check --write .",
     "cf-typegen": "pnpm -r --if-present cf-typegen",
     "prepare": "lefthook install || true"
   },
   "devDependencies": {
     "@biomejs/biome": "catalog:",
-    "@commitlint/cli": "^19.6.1",
-    "@commitlint/config-conventional": "^19.6.0",
-    "lefthook": "^1.10.0",
+    "@commitlint/cli": "^21.2.2",
+    "@commitlint/config-conventional": "^21.2.2",
+    "knip": "6.32.2",
+    "lefthook": "^2.1.10",
     "typescript": "catalog:"
   }
 }

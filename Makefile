@@ -56,9 +56,9 @@ db/migrate/remote:
 build:
 	pnpm -r --if-present build
 
-## test: run all tests
+## test: run the root combined test gate (Worker/web coverage + traceability)
 test:
-	pnpm -r --if-present test
+	pnpm run test
 
 ## typecheck: typecheck all packages
 typecheck:
@@ -68,7 +68,7 @@ typecheck:
 lint:
 	pnpm exec biome check .
 
-## check: lint + typecheck + test (the "definition of done")
+## check: lint + dependency audit + typecheck + combined test (the "definition of done")
 check:
 	pnpm run check
 

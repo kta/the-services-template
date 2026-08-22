@@ -16,7 +16,17 @@ const timeFormat = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyl
 
 export function App() {
   const [org, setOrg] = useState(() => auth.getOrganization())
-  return org ? <Ledger org={org} onSignOut={() => setOrg(null)} /> : <SignIn onSignedIn={setOrg} />
+  return org ? (
+    <Ledger
+      org={org}
+      onSignOut={() => {
+        auth.logout()
+        setOrg(null)
+      }}
+    />
+  ) : (
+    <SignIn onSignedIn={setOrg} />
+  )
 }
 
 function Masthead({ org, onSignOut }: { org?: string; onSignOut?: () => void }) {
@@ -102,7 +112,6 @@ function Ledger({ org, onSignOut }: { org: string; onSignOut: () => void }) {
   const load = useCallback(async () => {
     const res = await client.api.items.$get()
     if (res.status === 401) {
-      auth.logout()
       onSignOut()
       return
     }
@@ -134,7 +143,6 @@ function Ledger({ org, onSignOut }: { org: string; onSignOut: () => void }) {
       // (401 は認証ミドルウェア由来で RPC の型面には現れないため number に広げる)
       const status: number = res.status
       if (status === 401) {
-        auth.logout()
         onSignOut()
         return
       }

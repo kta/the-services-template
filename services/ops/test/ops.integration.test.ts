@@ -126,6 +126,23 @@ describe('performBackup', () => {
     const after = await env.BACKUPS.list({ prefix: 'admin/' })
     expect(after.objects.length).toBe(30)
   })
+
+  it('Error ではない export 失敗も安全な export_error に正規化する', async () => {
+    const fetchThatThrowsString = (async () => {
+      throw 'network unavailable'
+    }) as unknown as typeof fetch
+    const logSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    const summary = await backupTarget(
+      env as unknown as Bindings,
+      { name: 'admin', databaseId: 'x', sentinelTable: 'users' },
+      new Date('2026-07-20T06:00:00Z'),
+      fetchThatThrowsString,
+    )
+
+    expect(summary).toEqual({ target: 'admin', ok: false, reason: 'export_error' })
+    expect(logSpy).toHaveBeenCalledWith('backup target failed', 'admin', 'network unavailable')
+  })
 })
 
 describe('checkFreshness', () => {

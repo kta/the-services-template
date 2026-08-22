@@ -40,7 +40,7 @@ export function messageForStatus(status: number): string {
   return GENERIC
 }
 
-export function messageForCode(code?: string, status?: number): string {
+function messageForCode(code?: string, status?: number): string {
   if (code) {
     const known = messageForKnownCode(code)
     if (known) return known

@@ -22,7 +22,7 @@
 | メール通知 | `notifier` サービス（Resend 経由。二重送信を防ぐ仕組み込み） |
 | 毎日のバックアップと監視 | `ops` サービス（R2 に世代保存＋容量/鮮度/死活の異常をメール通知） |
 | 見た目の一貫性 | デザイントークン単一ソース（`packages/ui`）+ 「AI っぽい見た目」を禁じるルール |
-| 壊れていないかの自動確認 | `pnpm check`（lint + 型 + テスト）。CI でも走る |
+| 壊れていないかの自動確認 | `pnpm check`（lint + 未使用依存 + 型 + Worker/web coverage + E2E traceability）。CI でも走る |
 
 技術スタックの詳細（Hono / Drizzle / Zod / Terraform など）は [`AGENTS.md`](./AGENTS.md) と [`docs/`](./docs/) にあります。**普段は読まなくて大丈夫です。**
 
@@ -39,7 +39,7 @@
 ### 動かす
 
 ```sh
-mise install    # Node 22 / pnpm 10 を入れる
+mise install    # Node 22 / pnpm 11 を入れる
 make init       # 必要なものを全部そろえる（初回のみ・数分かかります）
 
 make dev/admin  # → http://localhost:5174 が管理コンソール
@@ -55,6 +55,29 @@ make dev/all               # admin と example_service を同時に起動
 make check                 # 壊れていないか全部確認する（緑ならOK）
 make help                  # コマンド一覧
 ```
+
+### テストを実行する
+
+`pnpm test` は全 package の Worker/unit test、React service の `test:web`、coverage gate、
+Approved spec の UC/AC→Playwright 対応検証をまとめて実行します。`pnpm check` はこれに
+lint・未使用依存・typecheck を加えた完了 gate です。
+
+```sh
+pnpm --filter @app/admin test          # admin Worker/unit test
+pnpm --filter @app/admin test:web      # admin React/jsdom test（4指標とも 60% 以上）
+pnpm --filter @app/admin test:all      # admin の Worker + web test
+pnpm --filter @app/example_service test:all
+pnpm --filter @app/admin exec vitest run --config vitest.web.config.ts -t "<test name>"
+pnpm run test:traceability              # Approved UC/AC の E2E mapping を検証
+pnpm --filter @app/example_service e2e  # UI/API を変えた service の Playwright
+pnpm check                              # リポジトリ全体の完了 gate
+```
+
+backend Worker/unit coverage は lines / statements / functions / branches の各 80% 以上、
+React web coverage は各 60% 以上です。新しい production behavior は frontend を含めて
+先に失敗するテストを書き、Approved spec の UC/AC には実際の Playwright scenario を 1 本
+対応付けます。詳細は [`docs/testing/TEST_RULE.md`](./docs/testing/TEST_RULE.md) と
+[`docs/testing/E2E_TRACEABILITY.md`](./docs/testing/E2E_TRACEABILITY.md) を参照してください。
 
 **うまくいかないときは、ターミナルの赤い文字をそのままエージェントに貼って「直して」と言えば直ります。**
 
@@ -144,7 +167,7 @@ GitHub の **Use this template** か `npx degit` で複製したら、エージ�
 ## 構成
 
 ```
-services/<name>/          1 サービス = 1 Worker（画面 + API + DB）
+services/<name>/          1 サービス = 1 Worker（画面 + API + DB）+ サービス固有 AGENTS.md
 packages/contracts        API の型の単一ソース（Zod）
 packages/ui               デザイントークン + 共有パーツ
 packages/shared           認証・日付・解析などの共通処理
@@ -158,6 +181,7 @@ infra/terraform           クラウド側リソースの定義
 - [`docs/README.md`](./docs/README.md) — **「何をしたいときにどれを読むか」の案内**（まずここ）
 - [`AGENTS.md`](./AGENTS.md) — **エージェント向けの全ルール**（`CLAUDE.md` はこれへのシンボリックリンク）
 - [`docs/howto/agent-development.md`](./docs/howto/agent-development.md) — 開発体制とワークフロー
+- [`docs/howto/dependency-management.md`](./docs/howto/dependency-management.md) — 依存の更新・追加・削除とRenovate運用
 - [`docs/frontend/DESIGN_RULE.md`](./docs/frontend/DESIGN_RULE.md) — デザインの決まり
 - [`docs/howto/restore.md`](./docs/howto/restore.md) — バックアップからの復旧手順
 - [`SECURITY.md`](./SECURITY.md) — 脆弱性の報告先

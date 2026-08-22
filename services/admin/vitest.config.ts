@@ -35,7 +35,7 @@ export default defineConfig({
       provider: 'istanbul',
       reporter: ['text'],
       include: ['src/worker/**'],
-      thresholds: { lines: 80, functions: 75, branches: 75, statements: 80 },
+      thresholds: { lines: 80, functions: 80, branches: 80, statements: 80 },
     },
   },
 })

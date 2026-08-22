@@ -93,7 +93,10 @@ describe('ResendSender', () => {
       .spyOn(globalThis, 'fetch')
       .mockResolvedValue(new Response('{}', { status: 200 }) as never)
     await new ResendSender('k').send(job)
-    const body = JSON.parse((spy.mock.calls[0]?.[1] as RequestInit).body as string) as {
+    const init = spy.mock.calls[0]?.[1]
+    expect(init).toBeDefined()
+    if (!init) throw new Error('missing request init')
+    const body = JSON.parse(init.body as string) as {
       from: string
     }
     expect(body.from).toBe('notifications@example.com')
@@ -104,7 +107,10 @@ describe('ResendSender', () => {
       .spyOn(globalThis, 'fetch')
       .mockResolvedValue(new Response('{}', { status: 200 }) as never)
     await new ResendSender('k', 'alerts@ops.example.com').send(job)
-    const body = JSON.parse((spy.mock.calls[0]?.[1] as RequestInit).body as string) as {
+    const init = spy.mock.calls[0]?.[1]
+    expect(init).toBeDefined()
+    if (!init) throw new Error('missing request init')
+    const body = JSON.parse(init.body as string) as {
       from: string
     }
     expect(body.from).toBe('alerts@ops.example.com')
@@ -115,7 +121,10 @@ describe('ResendSender', () => {
       .spyOn(globalThis, 'fetch')
       .mockResolvedValue(new Response('{}', { status: 200 }) as never)
     await new ResendSender('k', '').send(job)
-    const body = JSON.parse((spy.mock.calls[0]?.[1] as RequestInit).body as string) as {
+    const init = spy.mock.calls[0]?.[1]
+    expect(init).toBeDefined()
+    if (!init) throw new Error('missing request init')
+    const body = JSON.parse(init.body as string) as {
       from: string
     }
     expect(body.from).toBe('notifications@example.com')
@@ -134,7 +143,10 @@ describe('pickSender は MAIL_FROM を ResendSender へ渡す', () => {
       .mockResolvedValue(new Response('{}', { status: 200 }) as never)
     const sender = pickSender({ RESEND_API_KEY: 'k', MAIL_FROM: 'alerts@ops.example.com' })
     await sender.send(job)
-    const body = JSON.parse((spy.mock.calls[0]?.[1] as RequestInit).body as string) as {
+    const init = spy.mock.calls[0]?.[1]
+    expect(init).toBeDefined()
+    if (!init) throw new Error('missing request init')
+    const body = JSON.parse(init.body as string) as {
       from: string
     }
     expect(body.from).toBe('alerts@ops.example.com')

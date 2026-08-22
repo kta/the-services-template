@@ -8,22 +8,35 @@ import { authFetch } from './auth/session'
  */
 export const client = hc<AppType>('/', { fetch: authFetch })
 
+async function parseJsonBody(res: Response): Promise<unknown | undefined> {
+  const text = await res.text()
+  return text === '' ? undefined : JSON.parse(text)
+}
+
 /** unwrap ヘルパ: 非 2xx を例外化し、JSON を型付きで返す。 */
 export async function unwrap<T>(res: Response): Promise<T> {
   if (!res.ok) {
     let code = `http_${res.status}`
     try {
-      const body = (await res.json()) as { error?: string }
-      if (body?.error) code = body.error
+      const body = await parseJsonBody(res)
+      if (
+        body !== null &&
+        typeof body === 'object' &&
+        'error' in body &&
+        typeof body.error === 'string'
+      ) {
+        code = body.error
+      }
     } catch {
       // ignore
     }
     throw new ApiError(res.status, code)
   }
-  return res.json() as Promise<T>
+  const body = await parseJsonBody(res)
+  return body as T
 }
 
-export class ApiError extends Error {
+class ApiError extends Error {
   constructor(
     public status: number,
     public code: string,

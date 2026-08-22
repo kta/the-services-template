@@ -4,8 +4,8 @@ on:
   pull_request: {}
   push:
     branches: [main]
-  # PR / main-merge run verify: agent compatibility, lint, typecheck, and unit
-  # tests with coverage gates. e2e is opt-in only (manual) because it needs
+  # PR / main-merge run verify: agent compatibility, lint, dependency audit,
+  # typecheck, and unit tests with coverage gates. e2e is opt-in only because it needs
   # Playwright browsers + workerd; run it on demand via this trigger, or locally
   # with `pnpm --filter <pkg> e2e`.
   workflow_dispatch: {}
@@ -22,9 +22,9 @@ jobs:
       group: verify-${{ github.ref }}
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: pnpm
@@ -35,10 +35,12 @@ jobs:
         run: bash scripts/check-agent-compat.sh
       - name: Lint + format
         run: pnpm exec biome check .
+      - name: Dependency audit
+        run: pnpm run deps:check
       - name: Typecheck
         run: pnpm -r --if-present typecheck
-      - name: Test (with coverage gates)
-        run: pnpm -r --if-present test
+      - name: Combined test gate (coverage, web tests, traceability)
+        run: pnpm run test
 
   # Manual only: does NOT run on pull_request or push to main. Trigger from the
   # Actions tab (workflow_dispatch) when you want CI e2e.
@@ -55,9 +57,9 @@ jobs:
           - { name: example_service, pkg: '@app/example_service', dir: services/example_service }
           - { name: admin, pkg: '@app/admin', dir: services/admin }
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: pnpm
@@ -67,7 +69,7 @@ jobs:
       - run: make dev-vars
       - run: pnpm --filter ${{ matrix.pkg }} exec playwright install --with-deps chromium
       - run: pnpm --filter ${{ matrix.pkg }} run e2e
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ !cancelled() }}
         with:
           name: playwright-report-${{ matrix.name }}
@@ -83,7 +85,7 @@ jobs:
   deploy:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     # e2e is not a gate here (manual-only). verify covers agent compatibility,
-    # lint, typecheck, and unit tests with coverage gates.
+    # lint, dependency audit, typecheck, and unit tests with coverage gates.
     needs: [verify]
     runs-on: ubuntu-latest
     environment: production
@@ -112,9 +114,9 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: pnpm
