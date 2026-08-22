@@ -22,12 +22,19 @@ test('sign in, add an entry, see it in the ledger', async ({ page }) => {
   await page.goto('/')
   await expect(page.getByRole('heading', { name: 'Example Service' })).toBeVisible()
 
-  await page.getByLabel('Workspace id').fill(`org_e2e_${Date.now()}`)
+  await page.getByLabel('Workspace id').fill(unique('org-e2e'))
   await page.getByRole('button', { name: 'Open workspace' }).click()
+  await expect(page.getByText('The ledger is empty — add its first entry above.')).toBeVisible()
 
-  const title = `First entry ${Date.now()}`
+  const title = unique('First entry')
+  const create = page.waitForResponse(
+    (response) => response.url().endsWith('/api/items') && response.request().method() === 'POST',
+  )
   await page.getByLabel('Title').fill(title)
   await page.getByRole('button', { name: 'Add entry' }).click()
+  expect((await create).status()).toBe(201)
+  await expect(page.getByText(title)).toBeVisible()
+  await page.reload()
   await expect(page.getByText(title)).toBeVisible()
 })
 
@@ -78,6 +85,17 @@ test('creation persists and appears in the ledger when the notifier fixture retu
   request,
 }) => {
   const fixture = 'http://127.0.0.1:8788'
+  const preflight = await request.post(`${fixture}/api/internal/send`, {
+    data: {
+      id: 'preflight-notification',
+      type: 'item.created',
+      to: 'preflight@example.test',
+      payload: { itemId: 'preflight-item', title: 'preflight' },
+    },
+  })
+  expect(preflight.status()).toBe(418)
+  expect(preflight.headers()['x-e2e-notifier-fixture']).toBe('failure')
+
   const reset = await request.post(`${fixture}/__e2e/reset`)
   expect(reset.status()).toBe(200)
   expect(await reset.json()).toEqual({ calls: 0 })
@@ -93,7 +111,10 @@ test('creation persists and appears in the ledger when the notifier fixture retu
   )
   await page.getByLabel('Title').fill(title)
   await page.getByRole('button', { name: 'Add entry' }).click()
-  expect((await create).status()).toBe(201)
+  const createdResponse = await create
+  expect(createdResponse.status()).toBe(201)
+  const created = (await createdResponse.json()) as { id: string; title: string }
+  expect(created.title).toBe(title)
   await expect(page.getByText(title)).toBeVisible()
 
   await expect
@@ -108,7 +129,6 @@ test('creation persists and appears in the ledger when the notifier fixture retu
   expect(status.status()).toBe(200)
   const observed = (await status.json()) as {
     calls: number
-    responseStatus: number
     lastRequest: {
       headers: Record<string, string>
       job: {
@@ -122,19 +142,16 @@ test('creation persists and appears in the ledger when the notifier fixture retu
     }
   }
   expect(observed.calls).toBeGreaterThanOrEqual(1)
-  expect(observed.responseStatus).toBe(418)
   expect(observed.lastRequest).toMatchObject({
     method: 'POST',
     pathname: '/api/internal/send',
     job: {
       type: 'item.created',
       to: 'team@example.com',
-      payload: { title },
+      payload: { itemId: created.id, title },
     },
   })
   expect(observed.lastRequest.headers['content-type']).toContain('application/json')
   expect(observed.lastRequest.headers['x-internal-key']).toBeTruthy()
-  expect(observed.lastRequest.job.id).toBe(
-    `item.created:${observed.lastRequest.job.payload.itemId}`,
-  )
+  expect(observed.lastRequest.job.id).toBe(`item.created:${created.id}`)
 })

@@ -18,7 +18,7 @@ export default {
       return Response.json({ calls })
     }
     if (url.pathname === '/__e2e/status' && request.method === 'GET') {
-      return Response.json({ calls, lastRequest, responseStatus: 418 })
+      return Response.json({ calls, lastRequest })
     }
     if (url.pathname === '/api/internal/send' && request.method === 'POST') {
       calls += 1

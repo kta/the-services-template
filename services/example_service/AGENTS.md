@@ -58,7 +58,7 @@ pnpm --filter @app/example_service db:migrate:local
 ## 必須テスト
 
 - 新route: `permissions.test.ts` の全role/org/unauthenticated/default-deny表へ行を追加する。
-- item query/write: `tenant-isolation.test.ts` で2tenant、偽装入力、越境read/writeを検証する。
+- item query/write: `tenant-isolation.test.ts` で3 tenant、偽装入力、越境read/writeを検証する。
 - Zod変更: `item.contract.test.ts` で境界値とunknown keyの扱いを固定する。
 - Worker flow: `items.integration.test.ts` でD1結果、status、通知成功/失敗を検証する。
 - 時刻を使う機能: `*.time.test.ts` を分け、実時刻でなく引数注入する。

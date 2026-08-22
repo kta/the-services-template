@@ -3,7 +3,7 @@
 import { lstat, readdir, readFile, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { SyntaxKind } from 'typescript/unstable/ast'
+import { NodeFlags, SyntaxKind } from 'typescript/unstable/ast'
 import { API } from 'typescript/unstable/sync'
 
 const IDENTIFIER = '(?:UC|AC)-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+'
@@ -48,22 +48,125 @@ function isPlaywrightTestImport(statement) {
   )
 }
 
-function isValueDeclarationName(node) {
-  const parent = node.parent
-  return (
-    (parent.kind === SyntaxKind.VariableDeclaration && parent.name === node) ||
-    (parent.kind === SyntaxKind.Parameter && parent.name === node) ||
-    ((parent.kind === SyntaxKind.FunctionDeclaration ||
-      parent.kind === SyntaxKind.FunctionExpression) &&
-      parent.name === node) ||
-    ((parent.kind === SyntaxKind.ClassDeclaration || parent.kind === SyntaxKind.ClassExpression) &&
-      parent.name === node) ||
-    (parent.kind === SyntaxKind.EnumDeclaration && parent.name === node) ||
-    (parent.kind === SyntaxKind.BindingElement && parent.name === node) ||
-    (parent.kind === SyntaxKind.ImportSpecifier && parent.name === node) ||
-    (parent.kind === SyntaxKind.NamespaceImport && parent.name === node) ||
-    (parent.kind === SyntaxKind.ImportClause && parent.name === node)
+function addBinding(bindings, name, start) {
+  const positions = bindings.get(name) ?? new Set()
+  positions.add(start)
+  bindings.set(name, positions)
+}
+
+function addBindingNames(name, bindings) {
+  if (name.kind === SyntaxKind.Identifier) {
+    addBinding(bindings, name.text, name.getStart())
+    return
+  }
+  for (const element of name.elements) {
+    if (element.kind === SyntaxKind.BindingElement) addBindingNames(element.name, bindings)
+  }
+}
+
+function addModuleScopedVarBindings(node, bindings) {
+  if (
+    node.kind === SyntaxKind.FunctionDeclaration ||
+    node.kind === SyntaxKind.FunctionExpression ||
+    node.kind === SyntaxKind.ArrowFunction ||
+    node.kind === SyntaxKind.ClassDeclaration ||
+    node.kind === SyntaxKind.ClassExpression ||
+    node.kind === SyntaxKind.ModuleDeclaration
   )
+    return
+  if (node.kind === SyntaxKind.VariableDeclarationList && node.flags === NodeFlags.None) {
+    for (const declaration of node.declarations) addBindingNames(declaration.name, bindings)
+  }
+  node.forEachChild((child) => addModuleScopedVarBindings(child, bindings))
+}
+
+function topLevelValueBindings(file) {
+  const bindings = new Map()
+  for (const statement of file.statements) {
+    if (statement.kind === SyntaxKind.ImportDeclaration) {
+      const clause = statement.importClause
+      if (!clause || clause.isTypeOnly) continue
+      if (clause.name) addBinding(bindings, clause.name.text, clause.name.getStart(file))
+      const named = clause.namedBindings
+      if (!named) continue
+      if (named.kind === SyntaxKind.NamespaceImport) {
+        addBinding(bindings, named.name.text, named.name.getStart(file))
+      } else if (named.kind === SyntaxKind.NamedImports) {
+        for (const element of named.elements) {
+          if (!element.isTypeOnly)
+            addBinding(bindings, element.name.text, element.name.getStart(file))
+        }
+      }
+      continue
+    }
+    if (statement.kind === SyntaxKind.VariableStatement) {
+      for (const declaration of statement.declarationList.declarations) {
+        addBindingNames(declaration.name, bindings)
+      }
+      continue
+    }
+    if (
+      (statement.kind === SyntaxKind.FunctionDeclaration ||
+        statement.kind === SyntaxKind.ClassDeclaration ||
+        statement.kind === SyntaxKind.EnumDeclaration) &&
+      statement.name
+    ) {
+      addBinding(bindings, statement.name.text, statement.name.getStart(file))
+    }
+  }
+  // `var` in a source-file block is hoisted into module scope, unlike a
+  // block-scoped `let`/`const`. Walk non-function descendants to retain that
+  // distinction without treating a nested function parameter as a shadow.
+  addModuleScopedVarBindings(file, bindings)
+  return bindings
+}
+
+function topLevelPlaywrightTestCalls(file) {
+  const importedTestBindings = new Map()
+  for (const statement of file.statements) {
+    if (!isPlaywrightTestImport(statement) || !statement.importClause?.namedBindings) continue
+    const { importClause } = statement
+    if (importClause.isTypeOnly || importClause.namedBindings.kind !== SyntaxKind.NamedImports)
+      continue
+    for (const element of importClause.namedBindings.elements) {
+      const importedName = element.propertyName?.text ?? element.name.text
+      if (importedName === 'test' && !element.isTypeOnly) {
+        importedTestBindings.set(element.name.text, element.name.getStart(file))
+      }
+    }
+  }
+
+  const sourceScopeBindings = topLevelValueBindings(file)
+  const calls = []
+  for (const statement of file.statements) {
+    // The convention intentionally permits only a direct source-file statement.
+    // A test nested in a function or describe callback is not a guaranteed
+    // Playwright registration, even if its identifier spells `test`.
+    if (statement.kind !== SyntaxKind.ExpressionStatement) continue
+    const call = statement.expression
+    if (call.kind !== SyntaxKind.CallExpression) continue
+    const callee = call.expression
+    let binding
+    let modifier
+    if (callee.kind === SyntaxKind.Identifier) {
+      binding = callee.text
+    } else if (
+      callee.kind === SyntaxKind.PropertyAccessExpression &&
+      callee.expression.kind === SyntaxKind.Identifier &&
+      ['only', 'skip', 'fixme'].includes(callee.name.text)
+    ) {
+      binding = callee.expression.text
+      modifier = callee.name.text
+    }
+    if (!binding || !importedTestBindings.has(binding)) continue
+    // A value declared in source-file scope with the same name wins over the
+    // import. Nested declarations do not shadow this direct source-file call.
+    const sourceBindings = sourceScopeBindings.get(binding)
+    if (sourceBindings?.size !== 1 || !sourceBindings.has(importedTestBindings.get(binding)))
+      continue
+    calls.push({ binding, modifier, start: call.getStart(file) })
+  }
+  return calls
 }
 
 async function playwrightTestCalls(path) {
@@ -74,54 +177,7 @@ async function playwrightTestCalls(path) {
     const project = snapshot.getDefaultProjectForFile(path)
     const file = project?.program.getSourceFile(path)
     if (!file) throw new Error(`TypeScript could not parse E2E file ${path}.`)
-    const importedTestBindings = new Map()
-
-    for (const statement of file.statements) {
-      if (!isPlaywrightTestImport(statement) || !statement.importClause?.namedBindings) continue
-      const { namedBindings } = statement.importClause
-      if (namedBindings.kind !== SyntaxKind.NamedImports) continue
-      for (const element of namedBindings.elements) {
-        const importedName = element.propertyName?.text ?? element.name.text
-        if (importedName === 'test') {
-          importedTestBindings.set(element.name.text, element.name.getStart(file))
-        }
-      }
-    }
-
-    const shadowedBindings = new Set()
-    const calls = []
-    const visit = (node) => {
-      if (
-        node.kind === SyntaxKind.Identifier &&
-        importedTestBindings.has(node.text) &&
-        isValueDeclarationName(node) &&
-        importedTestBindings.get(node.text) !== node.getStart(file)
-      ) {
-        shadowedBindings.add(node.text)
-      }
-
-      if (node.kind === SyntaxKind.CallExpression) {
-        const callee = node.expression
-        if (callee.kind === SyntaxKind.Identifier && importedTestBindings.has(callee.text)) {
-          calls.push({ binding: callee.text, modifier: undefined, start: node.getStart(file) })
-        } else if (
-          callee.kind === SyntaxKind.PropertyAccessExpression &&
-          callee.expression.kind === SyntaxKind.Identifier &&
-          importedTestBindings.has(callee.expression.text) &&
-          ['only', 'skip', 'fixme'].includes(callee.name.text)
-        ) {
-          calls.push({
-            binding: callee.expression.text,
-            modifier: callee.name.text,
-            start: node.getStart(file),
-          })
-        }
-      }
-      node.forEachChild(visit)
-    }
-    visit(file)
-
-    return calls.filter((call) => !shadowedBindings.has(call.binding))
+    return topLevelPlaywrightTestCalls(file)
   } finally {
     snapshot?.dispose()
     api.close()

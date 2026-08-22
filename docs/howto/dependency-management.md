@@ -119,7 +119,7 @@ upstreamが最新安定版をまだsupportしない場合だけ、互換性の�
 - production/peer dependencyとmajor updateの人間review
 - greenな非major dev dependencyだけのautomerge
 - pnpmの `packageManager` と `mise.toml` pinを同じgroupで提示
-- 定期lockfile maintenance
+- 定期lockfile maintenance（transitive update を含めて automerge せず、人間review）
 
 GitHub Actionsはtagだけでなく、確認済みrelease commit SHAへpinする。Terraform provider更新は
 `terraform -chdir=infra/terraform/cloudflare init -backend=false -upgrade` でlockfileを更新し、

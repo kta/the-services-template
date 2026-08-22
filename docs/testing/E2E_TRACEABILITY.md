@@ -26,18 +26,17 @@ test('staff creates a booking', async ({ page }) => {
 - E2E mapping がない UC/AC
 - Approved spec にない ID
 - 同じ ID の重複 mapping
-- `@e2e-covers` の直後に `@playwright/test` から import した Playwright `test(...)` がない mapping
+- `@e2e-covers` の直後に、`@playwright/test` から**値として import**した top-level の Playwright `test(...)` がない mapping（`import type`、関数内、`test.describe.skip` 内は対象外）
 
 `pnpm test`、`pnpm check`、pre-commit、pre-push、CI `verify` はこの validator を実行する。
 Playwright 自体は重いため、UI/API の挙動を変えた担当者が対象サービスで実行し、CI では
 `workflow_dispatch` の e2e job で実行する。
 
 AC-ITEM-05 は `playwright.config.ts` が test-only の `notifier` Worker fixture を Wrangler
-local mode で起動する。fixture は `POST /api/internal/send` の呼出しと job/header を test-only
-state に記録して 418 を返す。scenario は state を reset してから UI による item 作成（201）と
-一覧表示を行い、service binding 経由で notifier が呼ばれたこと、`item.created` の job と
-idempotency ID が届いたこと、fixture の失敗状態を検証する。production Worker にテスト専用
-route/header は追加しない。
+local mode で起動する。scenario は fixture の `POST /api/internal/send` 実レスポンスが 418 で
+あることを先に確認してから state を reset する。UI による item 作成（201）後、state は
+service binding 経由の呼出し、`item.created` の job/payload、internal key、返却 item ID 由来の
+idempotency ID を検証するためだけに使う。production Worker にテスト専用 route/header は追加しない。
 
 ## 現在の基準線
 
@@ -48,7 +47,7 @@ infrastructure-only の文書には UC/AC がないため、分母には入ら�
 
 | Spec ID | Playwright scenario |
 |---|---|
-| AC-ITEM-01 | `services/example_service/e2e/smoke.spec.ts` — sign in, add an entry, see it in the ledger |
+| AC-ITEM-01 | `services/example_service/e2e/smoke.spec.ts` — sign in, capture `POST /api/items` 201, reload, and see the persisted entry |
 | AC-ITEM-02 | `services/example_service/e2e/smoke.spec.ts` — item API rejects unauthenticated reads and writes |
 | AC-ITEM-03 | `services/example_service/e2e/smoke.spec.ts` — item API rejects empty and overlong titles |
 | AC-ITEM-04 | `services/example_service/e2e/smoke.spec.ts` — an organization cannot list an item created by another organization |

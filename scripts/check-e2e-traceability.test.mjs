@@ -174,6 +174,93 @@ test('rejects a shadowed Playwright test binding', async () => {
   )
 })
 
+test('rejects a mapping inside an uncalled function despite a Playwright import', async () => {
+  await withFixture(
+    {
+      'specs/example/features/001/spec.md': approvedSpec,
+      'services/example/e2e/items.spec.ts': `${playwrightImport}function registerScenario() {\n  // @e2e-covers AC-ITEM-01\n  test('creates an item', async () => {})\n}\n`,
+    },
+    async (root) => {
+      assert.deepEqual(await validateTraceability(root), [
+        'E2E mapping AC-ITEM-01 in services/example/e2e/items.spec.ts:3 does not target a Playwright test.',
+        'Missing E2E mapping for approved AC-ITEM-01.',
+      ])
+    },
+  )
+})
+
+test('rejects a mapping inside a skipped describe block', async () => {
+  await withFixture(
+    {
+      'specs/example/features/001/spec.md': approvedSpec,
+      'services/example/e2e/items.spec.ts': `${playwrightImport}test.describe.skip('disabled suite', () => {\n  // @e2e-covers AC-ITEM-01\n  test('creates an item', async () => {})\n})\n`,
+    },
+    async (root) => {
+      assert.deepEqual(await validateTraceability(root), [
+        'E2E mapping AC-ITEM-01 in services/example/e2e/items.spec.ts:3 does not target a Playwright test.',
+        'Missing E2E mapping for approved AC-ITEM-01.',
+      ])
+    },
+  )
+})
+
+test('rejects a mapping backed only by a type-only Playwright import', async () => {
+  await withFixture(
+    {
+      'specs/example/features/001/spec.md': approvedSpec,
+      'services/example/e2e/items.spec.ts': `import type { test } from '@playwright/test'\n// @e2e-covers AC-ITEM-01\ntest('creates an item', async () => {})\n`,
+    },
+    async (root) => {
+      assert.deepEqual(await validateTraceability(root), [
+        'E2E mapping AC-ITEM-01 in services/example/e2e/items.spec.ts:2 does not target a Playwright test.',
+        'Missing E2E mapping for approved AC-ITEM-01.',
+      ])
+    },
+  )
+})
+
+test('accepts an imported top-level registration despite a nested shadow', async () => {
+  await withFixture(
+    {
+      'specs/example/features/001/spec.md': approvedSpec,
+      'services/example/e2e/items.spec.ts': `import { test as playwrightTest } from '@playwright/test'\n// @e2e-covers AC-ITEM-01\nplaywrightTest('creates an item', async () => {})\nfunction helper(playwrightTest: () => void) {\n  playwrightTest()\n}\n`,
+    },
+    async (root) => {
+      assert.deepEqual(await validateTraceability(root), [])
+    },
+  )
+})
+
+test('rejects a top-level binding that shadows the Playwright import before it', async () => {
+  await withFixture(
+    {
+      'specs/example/features/001/spec.md': approvedSpec,
+      'services/example/e2e/items.spec.ts': `const playwrightTest = () => {}\nimport { test as playwrightTest } from '@playwright/test'\n// @e2e-covers AC-ITEM-01\nplaywrightTest('creates an item', async () => {})\n`,
+    },
+    async (root) => {
+      assert.deepEqual(await validateTraceability(root), [
+        'E2E mapping AC-ITEM-01 in services/example/e2e/items.spec.ts:3 does not target a Playwright test.',
+        'Missing E2E mapping for approved AC-ITEM-01.',
+      ])
+    },
+  )
+})
+
+test('rejects a module-scoped var shadow inside a top-level block', async () => {
+  await withFixture(
+    {
+      'specs/example/features/001/spec.md': approvedSpec,
+      'services/example/e2e/items.spec.ts': `${playwrightImport}{\n  var test = () => {}\n}\n// @e2e-covers AC-ITEM-01\ntest('creates an item', async () => {})\n`,
+    },
+    async (root) => {
+      assert.deepEqual(await validateTraceability(root), [
+        'E2E mapping AC-ITEM-01 in services/example/e2e/items.spec.ts:5 does not target a Playwright test.',
+        'Missing E2E mapping for approved AC-ITEM-01.',
+      ])
+    },
+  )
+})
+
 test('rejects a test imported from another module', async () => {
   await withFixture(
     {

@@ -7,7 +7,7 @@
   "schedule": ["after 10pm every weekday", "before 5am every weekday", "every weekend"],
   "lockFileMaintenance": {
     "enabled": true,
-    "automerge": true,
+    "automerge": false,
     "schedule": ["before 5am on monday"]
   },
   "packageRules": [
