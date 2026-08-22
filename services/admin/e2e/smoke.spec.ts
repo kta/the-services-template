@@ -35,7 +35,7 @@ test('組織作成 → 招待 → プラン切替 → 無効化', async ({ page,
 
   // 組織一覧
   await page.goto('/')
-  await expect(page.getByRole('heading', { name: '組織' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '組織', exact: true })).toBeVisible()
 
   // 組織を作成
   const name = `E2E Org ${Date.now()}`
