@@ -19,16 +19,17 @@ Cloudflare-only の SDD/TDD モノレポ **テンプレート**。**1 サービ�
 - ターゲット一覧は `make help`。
 
 ## 完了の定義（必ず緑にする）
-- **`pnpm check`**（= `make check`）= lint(Biome) + dependency audit(Knip) + typecheck + test(Vitest、カバレッジゲート込み)。**実装後に必ず通す。**
-- 1 テストに絞る: `pnpm --filter <pkg> exec vitest run -t "<name>"`。
+- **`pnpm check`**（= `make check`）= lint(Biome) + dependency audit(Knip) + typecheck + combined test（Worker/unit + React web + coverage + E2E traceability）。**実装後に必ず通す。**
+- React service は `test`（Worker）、`test:web`（jsdom）、`test:all`（両方）。root `pnpm test` は React service の `test:all` を各 1 回だけ明示実行する。
+- 1 テストに絞る: `pnpm --filter <pkg> exec vitest run -t "<name>"`（web は `--config vitest.web.config.ts` を加える）。
 - e2e（Playwright）は `pnpm --filter <pkg> e2e`。**CI では手動トリガのみ**（`workflow_dispatch`）なので、UI を変えたらローカルで回す。
 
 ### 品質ゲートの所在（重要）
 | タイミング | 実行内容 | 効果 |
 |---|---|---|
-| **pre-commit**（`lefthook.yml`） | 変更ファイルの lint/format 自動修正 → **ユニットテスト全実行** | 早期ローカルフィードバック（落ちたらコミット不可） |
-| **pre-push** | Biome check + Knip dependency audit + typecheck + **カバレッジゲート込みテスト** | 早期ローカルフィードバック（落ちたら push 不可） |
-| **CI `verify`**（`.github/workflows/ci.yml`） | agent compatibility + lint + dependency audit + typecheck + **カバレッジゲート込みユニットテスト** | PR / main の最終リモートゲート。`deploy` の前提 |
+| **pre-commit**（`lefthook.yml`） | 変更ファイルの lint/format 自動修正 → **combined test**（Worker/web coverage + traceability） | 早期ローカルフィードバック（落ちたらコミット不可） |
+| **pre-push** | Biome check + Knip dependency audit + typecheck + **combined test** | 早期ローカルフィードバック（落ちたら push 不可） |
+| **CI `verify`**（`.github/workflows/ci.yml`） | agent compatibility + lint + dependency audit + typecheck + **combined test** | PR / main の最終リモートゲート。`deploy` の前提 |
 
 Lefthook は開発中の早期フィードバック、CI `verify` は迂回できない最終リモートゲートである。`--no-verify` / `LEFTHOOK=0` は緊急時の一回限りとし、常用しない。e2e は UI 変更時にローカルで実行し、CI では手動トリガ（`workflow_dispatch`）のみとする。
 
@@ -47,8 +48,8 @@ Lefthook は開発中の早期フィードバック、CI `verify` は迂回で�
 1. **SDD**: 挙動が変わる変更は spec 先行（`docs/spec-workflow/SPEC_WORKFLOW.md`）。軽微変更（バグ修正・文言・リファクタ）は免除。曖昧は `[要確認: ...]` を残し解消まで進まない。
 2. **TDD**: 実装より先にテスト。Red→Green→Refactor。Worker/APIだけでなくReact frontendと共有UIも対象とし、挙動を追加・変更するproduction codeは、期待した理由で失敗するテストを先に確認してから書く。
    - frontend unit coverageはlines / statements / functions / branchesの各指標で**60%以上**、backend unit/integration coverageは各指標で**80%以上**を下限とする。下限を満たすための広範な除外や閾値引き下げは禁止。
-   - E2Eの「100%」はline coverageではなく、承認済みspecの全Use Case / Acceptance Criteriaが少なくとも1本のE2Eへ追跡可能であることを指す。specとE2Eの対応表を維持し、未対応UC/ACを残さない。
-   - push直前はローカルでunit/integration coverage gateとUC/AC対応E2Eを全実行する。未達・失敗時はpushせず、テストまたは実装を修正して全gateを再実行する。
+   - E2Eの「100%」はline coverageではなく、Approved `specs/**/spec.md` の全Use Case / Acceptance Criteriaがちょうど1本のE2Eへ追跡可能であることを指す。`pnpm run test:traceability` と [`docs/testing/E2E_TRACEABILITY.md`](./docs/testing/E2E_TRACEABILITY.md) の convention を維持し、未対応・未知・重複UC/ACを残さない。infrastructure-only でUC/ACを持たない文書は分母外である。
+   - push直前はローカルでcombined coverage gate、traceability validator、変更した挙動の対象E2Eを実行する。未達・失敗時はpushせず、テストまたは実装を修正して全gateを再実行する。
 3. **型は派生物**: API 契約は **Zod 単一ソース**（`packages/contracts/src/<service>.ts`）。手書き型・`any` 禁止（`unknown`+Zod）。バックは `zValidator` インライン、フロントは `hc<AppType>`（type-only import）。
 4. **API は Hono RPC**: ルートは**チェーン**して `export type AppType = typeof routes`。同一オリジンなので CORS を書かない。
 5. **デザインはトークン経由のみ**: 色・フォント・角丸は `packages/ui/src/theme.css` のセマンティックトークンだけ。**Tailwind デフォルトパレット（`bg-blue-500`）・任意値（`p-[13px]`・`text-[#hex]`）禁止**。UI 作成/変更時は `docs/frontend/DESIGN_RULE.md` に従う（2 パス設計）。

@@ -179,11 +179,13 @@ describe('example service app', () => {
   it('returns to sign-in and clears the session when loading is unauthorized', async () => {
     signedInAs()
     mockFetch([new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401 })])
+    const logoutSpy = vi.spyOn(auth, 'logout')
 
     render(<App />)
 
     expect(await screen.findByRole('button', { name: 'Open workspace' })).toBeVisible()
     expect(auth.getOrganization()).toBeNull()
+    expect(logoutSpy).toHaveBeenCalledTimes(1)
   })
 
   it('rejects empty and overlong entry titles before sending a create request', async () => {

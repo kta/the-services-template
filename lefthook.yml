@@ -22,11 +22,11 @@ pre-commit:
       glob: '*.{js,ts,cjs,mjs,jsx,tsx,json,jsonc,css}'
       run: pnpm exec biome check --write --no-errors-on-unmatched --files-ignore-unknown=true {staged_files}
       stage_fixed: true
-    # 2) ユニットテスト(全パッケージ)。**落ちたらコミットさせない。**
-    #    全体で数秒〜十数秒。重い e2e は含めない(Playwright は手動 / CI 手動トリガ)。
+    # 2) combined test gate (全パッケージ + SPA web)。**落ちたらコミットさせない。**
+    #    traceability はここで検証するが、重い Playwright e2e は含めない(手動 / CI 手動トリガ)。
     test:
       priority: 2
-      run: pnpm -r --if-present test
+      run: pnpm run test
 
 commit-msg:
   commands:
@@ -47,7 +47,7 @@ pre-push:
     typecheck:
       priority: 3
       run: pnpm -r --if-present typecheck
-    # カバレッジゲート込み(各パッケージの vitest.config.ts の thresholds)
+    # combined test gate: coverage thresholds + SPA web + E2E traceability
     test:
       priority: 4
-      run: pnpm -r --if-present test
+      run: pnpm run test

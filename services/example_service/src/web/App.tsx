@@ -112,7 +112,6 @@ function Ledger({ org, onSignOut }: { org: string; onSignOut: () => void }) {
   const load = useCallback(async () => {
     const res = await client.api.items.$get()
     if (res.status === 401) {
-      auth.logout()
       onSignOut()
       return
     }
@@ -144,7 +143,6 @@ function Ledger({ org, onSignOut }: { org: string; onSignOut: () => void }) {
       // (401 は認証ミドルウェア由来で RPC の型面には現れないため number に広げる)
       const status: number = res.status
       if (status === 401) {
-        auth.logout()
         onSignOut()
         return
       }

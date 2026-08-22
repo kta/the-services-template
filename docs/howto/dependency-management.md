@@ -90,6 +90,7 @@ findingを消すだけの広い `ignoreDependencies`、issue type全体の除外
 pnpm deps:check
 pnpm check
 pnpm build
+pnpm run test:traceability
 pnpm --filter @app/example_service e2e
 pnpm --filter @app/admin e2e
 pnpm outdated -r
@@ -141,5 +142,5 @@ npx --yes --package renovate -- renovate-config-validator --strict
 - [ ] official migration guideに沿うsource/config変更がある
 - [ ] Knipに未説明finding・広すぎるignoreがない
 - [ ] lockfileはpin済みpnpmで再生成され、frozen installが通る
-- [ ] check、build、必要なe2e、outdated確認が完了している
+- [ ] check、traceability、build、必要なe2e、outdated確認が完了している
 - [ ] README、AGENTS、service AGENTS、運用文書が実際のcommandと一致する

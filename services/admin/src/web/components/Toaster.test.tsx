@@ -24,7 +24,7 @@ describe('Toaster', () => {
       .getAllByRole('status')
       .find((notification) => notification.textContent?.includes('Saved'))
     if (!savedToast) throw new Error('saved notification is missing')
-    await user.click(within(savedToast).getByRole('button'))
+    await user.click(within(savedToast).getByRole('button', { name: '閉じる' }))
     expect(screen.queryByText('Saved')).not.toBeInTheDocument()
   })
 })

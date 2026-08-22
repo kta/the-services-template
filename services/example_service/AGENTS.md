@@ -43,7 +43,10 @@
 pnpm --filter @app/example_service dev
 pnpm --filter @app/example_service build
 pnpm --filter @app/example_service typecheck
-pnpm --filter @app/example_service test
+pnpm --filter @app/example_service test       # Worker/integration coverage (各4指標 80%以上)
+pnpm --filter @app/example_service test:web   # React/jsdom coverage (各4指標 60%以上)
+pnpm --filter @app/example_service test:all   # 上記を順に両方実行
+pnpm --filter @app/example_service exec vitest run --config vitest.web.config.ts -t "<test name>"
 pnpm --filter @app/example_service e2e
 pnpm --filter @app/example_service cf-typegen
 pnpm --filter @app/example_service db:generate
@@ -59,7 +62,8 @@ pnpm --filter @app/example_service db:migrate:local
 - Zod変更: `item.contract.test.ts` で境界値とunknown keyの扱いを固定する。
 - Worker flow: `items.integration.test.ts` でD1結果、status、通知成功/失敗を検証する。
 - 時刻を使う機能: `*.time.test.ts` を分け、実時刻でなく引数注入する。
-- UI変更: unit gateに加え `e2e` を実行する。
+- UI変更: `src/web/App.test.tsx`（workspace sign-in/out、loading、validation、create/error/401、表示とaccessibility）と `client.test.ts`（bearer/logout）を対象に応じて先に失敗させ、`test:web` と e2e を実行する。新しい production behavior は frontend も例外なく test-first。
+- Approved UC/AC: `e2e/smoke.spec.ts` の `@e2e-covers` を各scenario直前に置き、`docs/testing/E2E_TRACEABILITY.md` の100%対応を維持する。
 
 ## コピー時の確認
 
@@ -74,4 +78,4 @@ pnpm --filter @app/example_service db:migrate:local
 
 binding、data ownership、entry、port、deploy方針が変われば `CODEMAP.md` と関連how-toを更新する。package scriptや検証方法を変えればこのファイルも同じ変更で更新する。
 
-完了前に、対象テスト、`pnpm --filter @app/example_service typecheck`、必要なe2e、最後にルート `pnpm check` をgreenにする。secret、deploy、pushはルートの承認規則に従う。
+完了前に、対象テスト、`pnpm --filter @app/example_service typecheck`、必要なe2e、`pnpm run test:traceability`、最後にルート `pnpm check` をgreenにする。secret、deploy、pushはルートの承認規則に従う。

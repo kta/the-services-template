@@ -53,7 +53,10 @@ React SPAとHono APIを1 Workerで配信し、admin専用D1と `AUTH_RL` KVを�
 pnpm --filter @app/admin dev
 pnpm --filter @app/admin build
 pnpm --filter @app/admin typecheck
-pnpm --filter @app/admin test
+pnpm --filter @app/admin test       # Worker/integration coverage (各4指標 80%以上)
+pnpm --filter @app/admin test:web   # React/jsdom coverage (各4指標 60%以上)
+pnpm --filter @app/admin test:all   # 上記を順に両方実行
+pnpm --filter @app/admin exec vitest run --config vitest.web.config.ts -t "<test name>"
 pnpm --filter @app/admin e2e
 pnpm --filter @app/admin cf-typegen
 pnpm --filter @app/admin db:generate
@@ -69,11 +72,11 @@ pnpm --filter @app/admin db:seed:local
 - auth変更: `auth.time.test.ts` で期限・grace・lockout・invite境界を固定時刻で検証する。
 - organization/invitation flow: `admin.integration.test.ts` でD1、cookie、event、通知fallback、tenant境界を検証する。
 - sync/reconcile: `reconcile.test.ts` でdrift、上限、partial failure、notification failureを検証する。
-- UI変更: login/session復元/権限遷移を対象unitとe2eで確認する。
+- UI変更: `App.test.tsx`（route）、`auth/{session,useSession}.test.tsx`（session）、`routes/{Login,Invite,Orgs}.test.tsx`（form/error/busy）、`components/{AppShell,Toaster,ui}.test.tsx`（accessibility/action）を対象に応じて先に失敗させ、`test:web` と e2e を実行する。新しい production behavior は frontend も例外なく test-first。
 - schema変更: migrationを生成し、setupがlocal D1へ全migrationを適用できることを確認する。
 
 ## 文書と完了
 
 認証フロー、cookie、secret、binding、deploy順、organization ownershipが変わればCODEMAPと該当するauth/deploy/infra文書を同時更新する。コマンドや責務が変わればこのファイルも更新する。
 
-完了前に対象test、admin typecheck、必要なe2e、ルート `pnpm check` を通す。認証・通知・binding・architecture変更は承認済みspecとの一致をセルフレビューする。
+完了前に対象test、admin typecheck、必要なe2e、ルート `pnpm check` を通す。Approved UC/AC を追加・変更したら `@e2e-covers` mapping と `pnpm run test:traceability` を同じ変更で更新する。認証・通知・binding・architecture変更は承認済みspecとの一致をセルフレビューする。

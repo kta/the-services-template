@@ -42,13 +42,29 @@
 - best-effort（通知・同期）が失敗を握りつぶす経路は、**握りつぶした事実**まで見る: 戻り値（`synced: false` / `emailed: false`）、代替経路（招待リンクの返却）、冪等キーを残さないこと。
 
 ## 完了の定義とゲートの所在
-`pnpm check`（lint + Knip dependency audit + typecheck + test）を緑にする。Lefthook は開発中の早期ローカルフィードバックであり、CI `verify` が lint・dependency audit・typecheck・カバレッジゲート込み unit test の最終リモートゲートである。
+`pnpm check`（lint + Knip dependency audit + typecheck + combined test）を緑にする。combined
+test は root `pnpm test` であり、通常 package の `test`、React service の Worker `test` と
+jsdom `test:web` を `test:all` で各1回、さらに traceability validator を実行する。
+
+| 対象 | コマンド | coverage |
+|---|---|---|
+| Worker / package unit・integration | `pnpm --filter <pkg> test` | lines / statements / functions / branches 各80%以上 |
+| React web unit | `pnpm --filter <pkg> test:web` | lines / statements / functions / branches 各60%以上 |
+| React service 両方 | `pnpm --filter <pkg> test:all` | 上記をこの順で実行 |
+| 1本だけ | `pnpm --filter <pkg> exec vitest run -t "<name>"` | web は `--config vitest.web.config.ts` を追加 |
+| Approved UC/AC mapping | `pnpm run test:traceability` | 100%・unknown/duplicate/未接続なし |
+| Browser E2E | `pnpm --filter <pkg> e2e` | UI/API挙動を変えた service で必須 |
+
+新しい production behavior は Worker/API、React、共有UIを問わず、先に期待した理由で失敗する
+test を確認してから実装する。Approved spec の UC/AC を追加・変更した場合は、実際の
+Playwright scenario の直前に `@e2e-covers` を置く。詳細と現行の対応表は
+[`E2E_TRACEABILITY.md`](./E2E_TRACEABILITY.md) を参照する。
 
 | タイミング | 実行内容 |
 |---|---|
-| pre-commit | 早期ローカルフィードバック: 変更ファイルの lint/format 自動修正 → **ユニットテスト全実行**（落ちたらコミット不可） |
-| pre-push | 早期ローカルフィードバック: Biome check + Knip dependency audit + typecheck + カバレッジゲート込みテスト |
-| CI `verify` | 最終リモートゲート: agent compatibility + lint + dependency audit + typecheck + **カバレッジゲート込み unit test**（`deploy` の前提） |
+| pre-commit | 早期ローカルフィードバック: 変更ファイルの lint/format 自動修正 → **combined test**（落ちたらコミット不可） |
+| pre-push | 早期ローカルフィードバック: Biome check + Knip dependency audit + typecheck + **combined test** |
+| CI `verify` | 最終リモートゲート: agent compatibility + lint + dependency audit + typecheck + **combined test**（`deploy` の前提） |
 
 `--no-verify` / `LEFTHOOK=0` は緊急時の一回限りとし、常用しない。e2e は UI 変更時にローカルで実行し、CI は手動トリガ（`workflow_dispatch`）のオンデマンド実行のみ — PR / main マージのゲートではない。
 
