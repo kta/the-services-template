@@ -58,4 +58,3 @@ opsはSPA、D1 migration、Playwright e2eを持たない。backup/restoreの本�
 backup対象、retention、R2 key、freshness/capacity閾値、Cron、binding、restore手順が変われば `docs/howto/restore.md`、free-tier limits、infra/deploy、CODEMAPを同時更新する。package commandが変わればこのファイルも更新する。
 
 完了前にops test/typecheck/build、生成型、ルート `pnpm check` をgreenにする。本番backup、restore、deploy、Cloudflare APIへの実送信は必ず直前承認を得る。
-

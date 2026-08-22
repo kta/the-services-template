@@ -75,4 +75,3 @@ pnpm --filter @app/example_service db:migrate:local
 binding、data ownership、entry、port、deploy方針が変われば `CODEMAP.md` と関連how-toを更新する。package scriptや検証方法を変えればこのファイルも同じ変更で更新する。
 
 完了前に、対象テスト、`pnpm --filter @app/example_service typecheck`、必要なe2e、最後にルート `pnpm check` をgreenにする。secret、deploy、pushはルートの承認規則に従う。
-

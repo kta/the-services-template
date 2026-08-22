@@ -382,4 +382,3 @@ gh pr view --json url,title,body,headRefName,baseRefName,statusCheckRollup
 ```
 
 Expected: a PR targeting `main`, with the task ID in its body.
-

@@ -77,4 +77,3 @@ pnpm --filter @app/admin db:seed:local
 認証フロー、cookie、secret、binding、deploy順、organization ownershipが変わればCODEMAPと該当するauth/deploy/infra文書を同時更新する。コマンドや責務が変わればこのファイルも更新する。
 
 完了前に対象test、admin typecheck、必要なe2e、ルート `pnpm check` を通す。認証・通知・binding・architecture変更は承認済みspecとの一致をセルフレビューする。
-

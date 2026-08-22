@@ -55,4 +55,3 @@ notifierはSPA、D1、Playwright e2eを持たない。存在しないdb/e2e comm
 配信保証、TTL、sender、secret、binding、statusが変われば `docs/howto/notifications.md`、CODEMAP、deploy checklistを同時更新する。package commandやlocal bindingが変わればこのファイルも更新する。
 
 完了前にnotifier test/typecheck/build、生成型、ルート `pnpm check` をgreenにする。実Resend APIへの送信とdeployは外部操作なので必ず直前承認を得る。
-
