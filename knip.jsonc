@@ -15,15 +15,28 @@
       "vitest": false
     },
     "packages/ui": {
+      "entry": ["src/**/*.test.{ts,tsx}"],
       "project": ["src/**/*.{ts,tsx}"]
     },
     "services/admin": {
-      "entry": ["test/**/*.test.ts", "test/setup.ts", "vitest.config.ts"],
+      "entry": [
+        "test/**/*.test.ts",
+        "test/setup.ts",
+        "vitest.config.ts",
+        "src/web/**/*.test.{ts,tsx}",
+        "src/web/test/setup.ts"
+      ],
       "project": ["src/**/*.{ts,tsx,css}", "test/**/*.ts", "e2e/**/*.ts", "*.ts", "*.mjs"],
       "vitest": false
     },
     "services/example_service": {
-      "entry": ["test/**/*.test.ts", "test/setup.ts", "vitest.config.ts"],
+      "entry": [
+        "test/**/*.test.ts",
+        "test/setup.ts",
+        "vitest.config.ts",
+        "src/web/**/*.test.{ts,tsx}",
+        "src/web/test/setup.ts"
+      ],
       "project": ["src/**/*.{ts,tsx,css}", "test/**/*.ts", "e2e/**/*.ts", "*.ts"],
       "vitest": false
     },
