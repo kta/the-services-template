@@ -45,7 +45,7 @@ Lefthook は開発中の早期フィードバック、CI `verify` は迂回で�
 
 ## 絶対ルール（毎タスク非交渉）
 1. **SDD**: 挙動が変わる変更は spec 先行（`docs/spec-workflow/SPEC_WORKFLOW.md`）。軽微変更（バグ修正・文言・リファクタ）は免除。曖昧は `[要確認: ...]` を残し解消まで進まない。
-2. **TDD**: 実装より先にテスト。Red→Green→Refactor。
+2. **TDD**: 実装より先にテスト。Red→Green→Refactor。Worker/APIだけでなくReact frontendと共有UIも対象とし、挙動を追加・変更するproduction codeは、期待した理由で失敗するテストを先に確認してから書く。
 3. **型は派生物**: API 契約は **Zod 単一ソース**（`packages/contracts/src/<service>.ts`）。手書き型・`any` 禁止（`unknown`+Zod）。バックは `zValidator` インライン、フロントは `hc<AppType>`（type-only import）。
 4. **API は Hono RPC**: ルートは**チェーン**して `export type AppType = typeof routes`。同一オリジンなので CORS を書かない。
 5. **デザインはトークン経由のみ**: 色・フォント・角丸は `packages/ui/src/theme.css` のセマンティックトークンだけ。**Tailwind デフォルトパレット（`bg-blue-500`）・任意値（`p-[13px]`・`text-[#hex]`）禁止**。UI 作成/変更時は `docs/frontend/DESIGN_RULE.md` に従う（2 パス設計）。
