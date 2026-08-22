@@ -16,8 +16,24 @@ import {
   TextInput,
 } from './index'
 
+const dialogPrototype = HTMLDialogElement.prototype
+const showModalDescriptor = Object.getOwnPropertyDescriptor(dialogPrototype, 'showModal')
+const closeDescriptor = Object.getOwnPropertyDescriptor(dialogPrototype, 'close')
+
+function restoreDialogMethod(
+  name: 'showModal' | 'close',
+  descriptor: PropertyDescriptor | undefined,
+) {
+  if (descriptor) Object.defineProperty(dialogPrototype, name, descriptor)
+  else Reflect.deleteProperty(dialogPrototype, name)
+}
+
 describe('shared UI primitives', () => {
-  afterEach(() => vi.restoreAllMocks())
+  afterEach(() => {
+    vi.restoreAllMocks()
+    restoreDialogMethod('showModal', showModalDescriptor)
+    restoreDialogMethod('close', closeDescriptor)
+  })
 
   it('renders accessible form controls and wires a field error to its input', async () => {
     const user = userEvent.setup()
@@ -87,11 +103,11 @@ describe('shared UI primitives', () => {
     const close = vi.fn(function close(this: HTMLDialogElement) {
       this.removeAttribute('open')
     })
-    Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
+    Object.defineProperty(dialogPrototype, 'showModal', {
       configurable: true,
       value: showModal,
     })
-    Object.defineProperty(HTMLDialogElement.prototype, 'close', {
+    Object.defineProperty(dialogPrototype, 'close', {
       configurable: true,
       value: close,
     })
