@@ -1,24 +1,30 @@
-import { getByText } from '@testing-library/dom'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it } from 'vitest'
 import { toast } from '../store/toast'
 import { Toaster } from './Toaster'
 
 describe('Toaster', () => {
-  afterEach(() => toast.clear())
+  afterEach(() => {
+    cleanup()
+    toast.clear()
+  })
 
-  it('renders user-visible tones and lets the user dismiss a toast', () => {
+  it('announces each toast tone and lets the user dismiss an individual toast', async () => {
+    const user = userEvent.setup()
     toast.success('Saved')
     toast.error('Failed')
     toast.info('Working')
     render(<Toaster />)
 
     expect(screen.getByRole('alert')).toHaveTextContent('Failed')
-    expect(getByText(document.body, 'Working')).toBeVisible()
+    expect(screen.getByText('Working')).toBeVisible()
     expect(screen.getAllByRole('status')).toHaveLength(2)
-    const closeButton = screen.getAllByRole('button', { name: '閉じる' })[0]
-    if (!closeButton) throw new Error('toast close button is missing')
-    fireEvent.click(closeButton)
+    const savedToast = screen
+      .getAllByRole('status')
+      .find((notification) => notification.textContent?.includes('Saved'))
+    if (!savedToast) throw new Error('saved notification is missing')
+    await user.click(within(savedToast).getByRole('button'))
     expect(screen.queryByText('Saved')).not.toBeInTheDocument()
   })
 })

@@ -52,9 +52,8 @@ describe('Invite', () => {
     await user.type(screen.getByLabelText('パスワード（確認）'), 'different')
     expect(screen.getAllByRole('alert')).toHaveLength(2)
 
-    const password = document.querySelector<HTMLInputElement>('#inv-pw')
-    const confirm = document.querySelector<HTMLInputElement>('#inv-pw2')
-    if (!password || !confirm) throw new Error('invite password inputs are missing')
+    const password = screen.getByLabelText(/パスワード（.*文字以上）/)
+    const confirm = screen.getByLabelText(/パスワード（確認）/)
     await user.clear(password)
     await user.clear(confirm)
     await user.type(password, 'long-password')
@@ -68,6 +67,26 @@ describe('Invite', () => {
         'long-password',
       ),
     )
+    expect(await screen.findByText('Home')).toBeVisible()
+  })
+
+  it('keeps the setup action busy until a valid invitation is accepted', async () => {
+    const user = userEvent.setup()
+    let resolveInvite: () => void = () => undefined
+    state.acceptInvite.mockReturnValue(
+      new Promise<void>((resolve) => {
+        resolveInvite = resolve
+      }),
+    )
+    renderInvite('?token=invite-token')
+
+    await user.type(screen.getByLabelText('招待メールの宛先アドレス'), 'staff@example.com')
+    await user.type(screen.getByLabelText('パスワード（12 文字以上）'), 'long-password')
+    await user.type(screen.getByLabelText('パスワード（確認）'), 'long-password')
+    await user.click(screen.getByRole('button', { name: 'パスワードを設定してはじめる' }))
+
+    expect(screen.getByRole('button', { name: '設定中…' })).toBeDisabled()
+    resolveInvite()
     expect(await screen.findByText('Home')).toBeVisible()
   })
 

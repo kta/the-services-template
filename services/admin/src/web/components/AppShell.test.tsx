@@ -27,6 +27,7 @@ describe('AppShell', () => {
     )
 
     expect(screen.getAllByRole('link', { name: '組織' })).toHaveLength(2)
+    expect(screen.getByText('管理者アカウント')).toBeVisible()
     expect(screen.getByText('Organizations')).toBeVisible()
     await user.click(screen.getByRole('button', { name: 'ログアウト' }))
 
