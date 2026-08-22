@@ -15,12 +15,10 @@
     "@fontsource-variable/public-sans": "^5.3.0"
   },
   "peerDependencies": {
-    "react": "catalog:",
-    "react-dom": "catalog:"
+    "react": "catalog:"
   },
   "devDependencies": {
     "@types/react": "catalog:",
-    "@types/react-dom": "catalog:",
     "react": "catalog:",
     "typescript": "catalog:"
   }

@@ -32,7 +32,7 @@ export interface ToastStoreOptions {
 
 const DEFAULT_AUTO_DISMISS_MS = 6000
 
-export function createToastStore(options: ToastStoreOptions = {}): ToastStore {
+function createToastStore(options: ToastStoreOptions = {}): ToastStore {
   const autoDismissMs = options.autoDismissMs ?? DEFAULT_AUTO_DISMISS_MS
   let seq = 0
   const idFactory =

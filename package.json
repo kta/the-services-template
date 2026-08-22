@@ -9,11 +9,12 @@
     "pnpm": ">=11"
   },
   "scripts": {
-    "check": "pnpm run lint && pnpm run typecheck && pnpm run test",
+    "check": "pnpm run lint && pnpm run deps:check && pnpm run typecheck && pnpm run test",
     "build": "pnpm -r --if-present build",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test",
     "lint": "biome check .",
+    "deps:check": "knip",
     "fix": "biome check --write .",
     "cf-typegen": "pnpm -r --if-present cf-typegen",
     "prepare": "lefthook install || true"
@@ -22,6 +23,7 @@
     "@biomejs/biome": "catalog:",
     "@commitlint/cli": "^21.2.2",
     "@commitlint/config-conventional": "^21.2.2",
+    "knip": "6.32.2",
     "lefthook": "^2.1.10",
     "typescript": "catalog:"
   }

@@ -2,8 +2,8 @@
 #
 # 品質ゲートの責務分担:
 #   pre-commit … 早期ローカルフィードバック(lint/format + **ユニットテスト全実行**)
-#   pre-push   … 早期ローカルフィードバック(lint + typecheck + カバレッジゲート)
-#   CI verify  … 最終リモートゲート(agent compatibility + lint + typecheck + coverage-gated unit tests)
+#   pre-push   … 早期ローカルフィードバック(lint + dependency audit + typecheck + カバレッジゲート)
+#   CI verify  … 最終リモートゲート(agent compatibility + lint + dependency audit + typecheck + coverage-gated unit tests)
 #
 # 緊急時の一時回避は `LEFTHOOK=0 git commit ...` / `git commit --no-verify`。
 # 常用しないこと。最終的には CI `verify` が検出するが、早期フィードバックを失う。
@@ -41,10 +41,13 @@ pre-push:
     lint-format:
       priority: 1
       run: pnpm exec biome check .
-    typecheck:
+    dependency-audit:
       priority: 2
+      run: pnpm run deps:check
+    typecheck:
+      priority: 3
       run: pnpm -r --if-present typecheck
     # カバレッジゲート込み(各パッケージの vitest.config.ts の thresholds)
     test:
-      priority: 3
+      priority: 4
       run: pnpm -r --if-present test

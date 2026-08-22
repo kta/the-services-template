@@ -1,0 +1,41 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "treatConfigHintsAsErrors": true,
+  "ignoreDependencies": ["^cloudflare(:.*)?$"],
+  "ignoreFiles": [".agents/skills/design-select/scripts/**"],
+  "workspaces": {
+    "packages/contracts": {
+      "entry": ["test/**/*.test.ts"],
+      "project": ["src/**/*.ts", "test/**/*.ts"],
+      "vitest": false
+    },
+    "packages/shared": {
+      "entry": ["test/**/*.test.ts"],
+      "project": ["src/**/*.ts", "test/**/*.ts"],
+      "vitest": false
+    },
+    "packages/ui": {
+      "project": ["src/**/*.{ts,tsx}"]
+    },
+    "services/admin": {
+      "entry": ["test/**/*.test.ts", "test/setup.ts", "vitest.config.ts"],
+      "project": ["src/**/*.{ts,tsx,css}", "test/**/*.ts", "e2e/**/*.ts", "*.ts", "*.mjs"],
+      "vitest": false
+    },
+    "services/example_service": {
+      "entry": ["test/**/*.test.ts", "test/setup.ts", "vitest.config.ts"],
+      "project": ["src/**/*.{ts,tsx,css}", "test/**/*.ts", "e2e/**/*.ts", "*.ts"],
+      "vitest": false
+    },
+    "services/notifier": {
+      "entry": ["test/**/*.test.ts"],
+      "project": ["src/**/*.ts", "test/**/*.ts"],
+      "vitest": false
+    },
+    "services/ops": {
+      "entry": ["test/**/*.test.ts"],
+      "project": ["src/**/*.ts", "test/**/*.ts"],
+      "vitest": false
+    }
+  }
+}

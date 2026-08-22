@@ -4,8 +4,8 @@ on:
   pull_request: {}
   push:
     branches: [main]
-  # PR / main-merge run verify: agent compatibility, lint, typecheck, and unit
-  # tests with coverage gates. e2e is opt-in only (manual) because it needs
+  # PR / main-merge run verify: agent compatibility, lint, dependency audit,
+  # typecheck, and unit tests with coverage gates. e2e is opt-in only because it needs
   # Playwright browsers + workerd; run it on demand via this trigger, or locally
   # with `pnpm --filter <pkg> e2e`.
   workflow_dispatch: {}
@@ -35,6 +35,8 @@ jobs:
         run: bash scripts/check-agent-compat.sh
       - name: Lint + format
         run: pnpm exec biome check .
+      - name: Dependency audit
+        run: pnpm run deps:check
       - name: Typecheck
         run: pnpm -r --if-present typecheck
       - name: Test (with coverage gates)
@@ -83,7 +85,7 @@ jobs:
   deploy:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     # e2e is not a gate here (manual-only). verify covers agent compatibility,
-    # lint, typecheck, and unit tests with coverage gates.
+    # lint, dependency audit, typecheck, and unit tests with coverage gates.
     needs: [verify]
     runs-on: ubuntu-latest
     environment: production

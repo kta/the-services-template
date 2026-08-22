@@ -23,7 +23,7 @@ export async function unwrap<T>(res: Response): Promise<T> {
   return res.json() as Promise<T>
 }
 
-export class ApiError extends Error {
+class ApiError extends Error {
   constructor(
     public status: number,
     public code: string,
