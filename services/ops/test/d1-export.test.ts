@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { type D1ExportConfig, exportD1Dump } from '../src/d1-export'
+import { type D1ExportConfig, exportD1Dump, fetchD1FileSize } from '../src/d1-export'
 
 const cfg: D1ExportConfig = { accountId: 'a', databaseId: 'd', apiToken: 't' }
 
@@ -71,6 +71,11 @@ describe('exportD1Dump', () => {
     await expect(exportD1Dump(cfg, f, instantSleep)).rejects.toThrow(/export_failed:boom/)
   })
 
+  it('status が failed で API エラー詳細が無ければ status を失敗理由にする', async () => {
+    const f = fetchSeq([() => new Response(JSON.stringify({ result: { status: 'failed' } }))])
+    await expect(exportD1Dump(cfg, f, instantSleep)).rejects.toThrow('export_failed:failed')
+  })
+
   it('complete でも signed_url 欠落なら例外', async () => {
     const f = fetchSeq([
       () => new Response(JSON.stringify({ result: { status: 'complete', result: {} } })),
@@ -87,5 +92,12 @@ describe('exportD1Dump', () => {
       () => new Response('err', { status: 500 }),
     ])
     await expect(exportD1Dump(cfg, f)).rejects.toThrow(/export_download_500/)
+  })
+})
+
+describe('fetchD1FileSize', () => {
+  it('file_size が欠落した REST 応答は容量判定に使わず失敗として返す', async () => {
+    const f = (async () => new Response(JSON.stringify({ result: {} }))) as unknown as typeof fetch
+    await expect(fetchD1FileSize(cfg, f)).rejects.toThrow('d1_get_no_size')
   })
 })

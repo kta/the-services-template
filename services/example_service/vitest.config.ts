@@ -31,7 +31,7 @@ export default defineConfig({
       provider: 'istanbul', // V8 coverage is unsupported in the Workers pool
       reporter: ['text'],
       include: ['src/worker/**'],
-      thresholds: { lines: 80, functions: 75, branches: 75, statements: 80 },
+      thresholds: { lines: 80, functions: 80, branches: 80, statements: 80 },
     },
   },
 })
