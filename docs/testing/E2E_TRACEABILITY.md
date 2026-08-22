@@ -1,8 +1,13 @@
 # E2E 要件トレーサビリティ
 
-承認済み feature spec（`specs/**/spec.md`）にある全 `UC-*` / `AC-*` は、Playwright
+承認済み feature spec（`specs/**/spec.md`）にある全 `UC-*` / `AC-*` **定義**は、Playwright
 scenario に**ちょうど 1 回**対応付ける。これは E2E の line coverage ではなく、仕様の
 網羅性を検証する 100% gate である。
+
+feature spec は先頭で `- ステータス: Draft` または `- ステータス: Approved` を必ず宣言する。
+`Approved` の定義だけが mapping の分母になる。UC/AC は `- AC-<TAG>-01: ...` または
+`- UC-<TAG>-01: ...` という definition bullet でのみ宣言し、同じ ID を複数 spec で定義しない。
+本文中の ID 参照は validator の分母に含めない。
 
 ## 機械可読な対応付け
 
@@ -26,6 +31,11 @@ test('staff creates a booking', async ({ page }) => {
 `pnpm test`、`pnpm check`、pre-commit、pre-push、CI `verify` はこの validator を実行する。
 Playwright 自体は重いため、UI/API の挙動を変えた担当者が対象サービスで実行し、CI では
 `workflow_dispatch` の e2e job で実行する。
+
+AC-ITEM-05 は `playwright.config.ts` が test-only の `notifier` Worker fixture を Wrangler
+local mode で起動する。fixture は `POST /api/internal/send` に 418 と
+`x-e2e-notifier-fixture: failure` を返し、scenario はその応答を先に検証してから UI による
+item 作成（201）と一覧表示を検証する。production Worker にテスト専用 route/header は追加しない。
 
 ## 現在の基準線
 

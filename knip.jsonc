@@ -24,7 +24,12 @@
       "vitest": false
     },
     "services/example_service": {
-      "entry": ["test/**/*.test.ts", "vitest.config.ts", "src/web/**/*.test.{ts,tsx}"],
+      "entry": [
+        "test/**/*.test.ts",
+        "vitest.config.ts",
+        "src/web/**/*.test.{ts,tsx}",
+        "e2e/notifier-failure.worker.ts"
+      ],
       "project": ["src/**/*.{ts,tsx,css}", "test/**/*.ts", "e2e/**/*.ts", "*.ts"],
       "vitest": false
     },

@@ -1,16 +1,17 @@
 #!/usr/bin/env node
 
-import { readdir, readFile } from 'node:fs/promises'
-import { dirname, relative, resolve } from 'node:path'
+import { lstat, readdir, readFile, realpath } from 'node:fs/promises'
+import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const IDENTIFIER = '(?:UC|AC)-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+'
-const identifierPattern = new RegExp(`\\b${IDENTIFIER}\\b`, 'g')
+const definitionPattern = new RegExp(`^[\\t ]*-\\s+(${IDENTIFIER}):\\s+\\S.*$`, 'gm')
 const mappingPattern = new RegExp(
   `^[\\t ]*//\\s*@e2e-covers\\s+((?:${IDENTIFIER})(?:\\s+(?:${IDENTIFIER}))*)\\s*$`,
   'gm',
 )
-const testDeclaration = /^\s*test(?:\.(?:only|skip|fixme))?\s*\(/u
+const testDeclaration = /^\s*test(?:\.(only|skip|fixme))?\s*\(/u
+const statusPattern = /^[\t ]*-\s+(?:ステータス|Status):\s*(Draft|Approved)\s*$/mu
 
 async function filesUnder(directory) {
   let entries
@@ -29,34 +30,81 @@ async function filesUnder(directory) {
   return files.flat()
 }
 
-function isApprovedSpecification(source) {
-  return /(?:ステータス|Status)\s*:\s*Approved(?:\s|$|[（(])/mu.test(source)
-}
-
 function lineAt(source, offset) {
   return source.slice(0, offset).split('\n').length
 }
 
-async function approvedIdentifiers(root) {
+function isInside(root, path) {
+  const pathFromRoot = relative(root, path)
+  return pathFromRoot === '' || (!pathFromRoot.startsWith('..') && !isAbsolute(pathFromRoot))
+}
+
+async function regularFiles(candidates, root, kind) {
+  if (candidates.length === 0) return { files: [], errors: [] }
+  const realRoot = await realpath(root)
+  const files = []
+  const errors = []
+
+  for (const path of candidates) {
+    const displayPath = relative(root, path)
+    const details = await lstat(path)
+    if (!details.isFile()) {
+      errors.push(`Refusing non-regular ${kind} file ${displayPath}.`)
+      continue
+    }
+    const resolvedPath = await realpath(path)
+    if (!isInside(realRoot, resolvedPath)) {
+      errors.push(`Refusing ${kind} file outside its root ${displayPath}.`)
+      continue
+    }
+    files.push(path)
+  }
+  return { files, errors }
+}
+
+async function specificationIdentifiers(root) {
   const specsRoot = resolve(root, 'specs')
-  const files = (await filesUnder(specsRoot)).filter((path) => path.endsWith('/spec.md')).sort()
-  const identifiers = new Set()
+  const candidates = (await filesUnder(specsRoot))
+    .filter((path) => path.endsWith('/spec.md'))
+    .sort()
+  const { files, errors } = await regularFiles(candidates, root, 'specification')
+  const approved = new Set()
+  const definitions = new Map()
 
   for (const path of files) {
     const source = await readFile(path, 'utf8')
-    if (!isApprovedSpecification(source)) continue
-    for (const match of source.matchAll(identifierPattern)) identifiers.add(match[0])
+    const displayPath = relative(root, path)
+    const status = source.match(statusPattern)?.[1]
+    if (!status) {
+      errors.push(
+        `Feature spec ${displayPath} must declare \`- ステータス: Draft\` or \`- ステータス: Approved\`.`,
+      )
+      continue
+    }
+    for (const match of source.matchAll(definitionPattern)) {
+      const id = match[1]
+      const existing = definitions.get(id) ?? []
+      definitions.set(id, [...existing, displayPath])
+      if (status === 'Approved') approved.add(id)
+    }
   }
-  return identifiers
+  for (const [id, paths] of [...definitions.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    if (paths.length > 1) {
+      errors.push(`Duplicate specification identifier ${id}: ${paths.sort().join(', ')}.`)
+    }
+  }
+  return { approved, errors }
 }
 
 async function e2eMappings(root) {
   const servicesRoot = resolve(root, 'services')
-  const files = (await filesUnder(servicesRoot))
+  const candidates = (await filesUnder(servicesRoot))
     .filter((path) => /\/e2e\/.*\.spec\.(?:[cm]?js|tsx?)$/u.test(path))
     .sort()
+  const { files, errors } = await regularFiles(candidates, root, 'E2E')
   const mappings = []
   const invalidMappings = []
+  const disabledMappings = []
 
   for (const path of files) {
     const source = await readFile(path, 'utf8')
@@ -64,15 +112,16 @@ async function e2eMappings(root) {
     for (const match of source.matchAll(mappingPattern)) {
       const line = lineAt(source, match.index)
       const identifiers = match[1].split(/\s+/u)
-      const followsTest = testDeclaration.test(source.slice(match.index + match[0].length))
+      const testTarget = source.slice(match.index + match[0].length).match(testDeclaration)
       for (const id of identifiers) {
         const mapping = { id, path: displayPath, line }
-        if (followsTest) mappings.push(mapping)
-        else invalidMappings.push(mapping)
+        if (!testTarget) invalidMappings.push(mapping)
+        else if (testTarget[1]) disabledMappings.push({ ...mapping, modifier: testTarget[1] })
+        else mappings.push(mapping)
       }
     }
   }
-  return { mappings, invalidMappings }
+  return { mappings, invalidMappings, disabledMappings, errors }
 }
 
 /**
@@ -83,11 +132,11 @@ async function e2eMappings(root) {
  * @returns {Promise<string[]>} deterministic diagnostics; an empty list is valid
  */
 export async function validateTraceability(root) {
-  const approved = await approvedIdentifiers(root)
-  const { mappings, invalidMappings } = await e2eMappings(root)
-  const errors = []
+  const { approved, errors: specificationErrors } = await specificationIdentifiers(root)
+  const { mappings, invalidMappings, disabledMappings, errors: e2eErrors } = await e2eMappings(root)
+  const errors = [...specificationErrors, ...e2eErrors]
 
-  for (const mapping of [...mappings, ...invalidMappings]) {
+  for (const mapping of [...mappings, ...invalidMappings, ...disabledMappings]) {
     if (!approved.has(mapping.id)) {
       errors.push(`Unknown E2E mapping ${mapping.id} in ${mapping.path}.`)
     }
@@ -95,6 +144,11 @@ export async function validateTraceability(root) {
   for (const mapping of invalidMappings) {
     errors.push(
       `E2E mapping ${mapping.id} in ${mapping.path}:${mapping.line} does not target a Playwright test.`,
+    )
+  }
+  for (const mapping of disabledMappings) {
+    errors.push(
+      `E2E mapping ${mapping.id} in ${mapping.path}:${mapping.line} targets test.${mapping.modifier}, which cannot satisfy traceability.`,
     )
   }
 

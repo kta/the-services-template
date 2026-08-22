@@ -1,9 +1,9 @@
 # Git hooks. Auto-installed by the root `prepare` script (`lefthook install`).
 #
 # 品質ゲートの責務分担:
-#   pre-commit … 早期ローカルフィードバック(lint/format + **ユニットテスト全実行**)
-#   pre-push   … 早期ローカルフィードバック(lint + dependency audit + typecheck + カバレッジゲート)
-#   CI verify  … 最終リモートゲート(agent compatibility + lint + dependency audit + typecheck + coverage-gated unit tests)
+#   pre-commit … 早期ローカルフィードバック(lint/format + **combined test**)
+#   pre-push   … 早期ローカルフィードバック(lint + dependency audit + typecheck + combined test)
+#   CI verify  … 最終リモートゲート(agent compatibility + lint + dependency audit + typecheck + combined test)
 #
 # 緊急時の一時回避は `LEFTHOOK=0 git commit ...` / `git commit --no-verify`。
 # 常用しないこと。最終的には CI `verify` が検出するが、早期フィードバックを失う。

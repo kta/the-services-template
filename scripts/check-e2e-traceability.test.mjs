@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -15,6 +15,12 @@ async function fixture(files) {
     }),
   )
   return root
+}
+
+async function addSymlink(root, path, target) {
+  const link = join(root, path)
+  await mkdir(join(link, '..'), { recursive: true })
+  await symlink(target, link)
 }
 
 async function withFixture(files, check) {
@@ -90,6 +96,91 @@ test('reports a mapping comment that is not attached to a Playwright test', asyn
         'E2E mapping AC-ITEM-01 in services/example/e2e/items.spec.ts:1 does not target a Playwright test.',
         'Missing E2E mapping for approved AC-ITEM-01.',
       ])
+    },
+  )
+})
+
+for (const modifier of ['skip', 'fixme', 'only']) {
+  test(`rejects an E2E mapping on test.${modifier}`, async () => {
+    await withFixture(
+      {
+        'specs/example/features/001/spec.md': approvedSpec,
+        'services/example/e2e/items.spec.ts': `// @e2e-covers AC-ITEM-01\ntest.${modifier}('creates an item', async () => {})\n`,
+      },
+      async (root) => {
+        assert.deepEqual(await validateTraceability(root), [
+          `E2E mapping AC-ITEM-01 in services/example/e2e/items.spec.ts:1 targets test.${modifier}, which cannot satisfy traceability.`,
+          'Missing E2E mapping for approved AC-ITEM-01.',
+        ])
+      },
+    )
+  })
+}
+
+test('requires every feature spec to declare a status', async () => {
+  await withFixture(
+    {
+      'specs/example/features/001/spec.md': '# Feature\n\n- AC-ITEM-01: creates an item\n',
+      'services/example/e2e/items.spec.ts': mappedTest,
+    },
+    async (root) => {
+      assert.deepEqual(await validateTraceability(root), [
+        'Feature spec specs/example/features/001/spec.md must declare `- ステータス: Draft` or `- ステータス: Approved`.',
+        'Unknown E2E mapping AC-ITEM-01 in services/example/e2e/items.spec.ts.',
+      ])
+    },
+  )
+})
+
+test('only extracts UC and AC identifiers from definition bullets', async () => {
+  await withFixture(
+    {
+      'specs/example/features/001/spec.md': `# Feature\n\n- ステータス: Approved\n\n本文で AC-ITEM-99 を参照する。\n\n- AC-ITEM-01: creates an item\n`,
+      'services/example/e2e/items.spec.ts': mappedTest,
+    },
+    async (root) => {
+      assert.deepEqual(await validateTraceability(root), [])
+    },
+  )
+})
+
+test('reports an identifier defined by more than one approved spec', async () => {
+  await withFixture(
+    {
+      'specs/example/features/001/spec.md': approvedSpec,
+      'specs/example/features/002/spec.md': approvedSpec,
+      'services/example/e2e/items.spec.ts': mappedTest,
+    },
+    async (root) => {
+      assert.deepEqual(await validateTraceability(root), [
+        'Duplicate specification identifier AC-ITEM-01: specs/example/features/001/spec.md, specs/example/features/002/spec.md.',
+      ])
+    },
+  )
+})
+
+test('rejects symlinked specification and E2E files without following them', async () => {
+  await withFixture(
+    {
+      'specs/example/features/001/spec.md': approvedSpec,
+      'services/example/e2e/items.spec.ts': mappedTest,
+    },
+    async (root) => {
+      const external = await mkdtemp(join(tmpdir(), 'e2e-traceability-external-'))
+      try {
+        const externalSpec = join(external, 'spec.md')
+        const externalE2E = join(external, 'items.spec.ts')
+        await writeFile(externalSpec, approvedSpec)
+        await writeFile(externalE2E, mappedTest)
+        await addSymlink(root, 'specs/example/features/002/spec.md', externalSpec)
+        await addSymlink(root, 'services/example/e2e/external.spec.ts', externalE2E)
+        assert.deepEqual(await validateTraceability(root), [
+          'Refusing non-regular specification file specs/example/features/002/spec.md.',
+          'Refusing non-regular E2E file services/example/e2e/external.spec.ts.',
+        ])
+      } finally {
+        await rm(external, { recursive: true, force: true })
+      }
     },
   )
 })

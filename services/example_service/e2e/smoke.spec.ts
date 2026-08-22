@@ -73,19 +73,25 @@ test('an organization cannot list an item created by another organization', asyn
 })
 
 // @e2e-covers AC-ITEM-05
-test('creation remains successful when the local notifier binding is unavailable', async ({
+test('creation persists and appears in the ledger when the notifier fixture returns non-2xx', async ({
+  page,
   request,
 }) => {
-  const token = await issueToken(request, unique('org-notifier-fallback'))
+  const notifier = await request.post('http://127.0.0.1:8788/api/internal/send')
+  expect(notifier.status()).toBe(418)
+  expect(notifier.headers()['x-e2e-notifier-fixture']).toBe('failure')
+
+  await page.goto('/')
+  await page.getByLabel('Workspace id').fill(unique('org-notifier-fallback'))
+  await page.getByRole('button', { name: 'Open workspace' }).click()
+  await expect(page.getByText('The ledger is empty — add its first entry above.')).toBeVisible()
   const title = unique('best-effort-notification')
 
-  const created = await request.post('/api/items', {
-    headers: authHeaders(token),
-    data: { title, body: '' },
-  })
-  expect(created.status()).toBe(201)
-
-  const list = await request.get('/api/items', { headers: authHeaders(token) })
-  const items = (await list.json()) as Array<{ title: string }>
-  expect(items).toContainEqual(expect.objectContaining({ title }))
+  const create = page.waitForResponse(
+    (response) => response.url().endsWith('/api/items') && response.request().method() === 'POST',
+  )
+  await page.getByLabel('Title').fill(title)
+  await page.getByRole('button', { name: 'Add entry' }).click()
+  expect((await create).status()).toBe(201)
+  await expect(page.getByText(title)).toBeVisible()
 })
