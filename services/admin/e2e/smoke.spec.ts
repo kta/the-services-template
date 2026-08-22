@@ -46,10 +46,13 @@ test('組織作成 → 招待 → プラン切替 → 無効化', async ({ page,
 
   // 招待(notifier 未起動のためメール失敗 → acceptUrl 表示)
   await row.getByRole('button', { name: '招待' }).click()
-  await page.getByLabel('メールアドレス').fill('staff@example.com')
-  await page.getByRole('button', { name: '招待を送信' }).click()
-  // 送信成功/失敗いずれでも閉じられる
-  await page.getByRole('button', { name: '閉じる' }).click()
+  const inviteDialog = page.getByRole('dialog', { name: `担当者を招待 — ${name}` })
+  await inviteDialog.getByLabel('メールアドレス').fill('staff@example.com')
+  await inviteDialog.getByRole('button', { name: '招待を送信' }).click()
+  await expect(inviteDialog.getByRole('alert')).toContainText('招待の送信に失敗しました。')
+  await expect(inviteDialog.getByLabel('メールアドレス')).toHaveValue('staff@example.com')
+  await inviteDialog.getByRole('button', { name: 'キャンセル' }).click()
+  await expect(inviteDialog).toBeHidden()
 
   // プラン切替(無料 → 契約)
   await row.getByRole('button', { name: '契約に変更' }).click()
