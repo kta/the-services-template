@@ -75,6 +75,24 @@ describe('admin browser session', () => {
     )
   })
 
+  it('clears the in-memory token when a retry refresh is rejected', async () => {
+    shared.stretchPassword.mockResolvedValue('stretched')
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json({ token: 'access-token' }))
+      .mockResolvedValueOnce(new Response(null, { status: 401 }))
+      .mockResolvedValueOnce(new Response(null, { status: 401 }))
+    vi.stubGlobal('fetch', fetch)
+    const session = await loadSession()
+
+    await session.login('admin@example.com', 'password')
+    const response = await session.authFetch('/api/protected')
+
+    expect(response.status).toBe(401)
+    expect(session.isAuthenticated()).toBe(false)
+    expect(fetch).toHaveBeenCalledTimes(3)
+  })
+
   it('uses a valid development token when refresh cannot restore a session', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-08-22T00:00:00.000Z'))

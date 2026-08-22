@@ -36,6 +36,20 @@ function renderLogin(stateValue: object | null = null) {
   )
 }
 
+function deferred<T>() {
+  let resolvePending: ((value: T) => void) | undefined
+  const promise = new Promise<T>((resolve) => {
+    resolvePending = resolve
+  })
+  return {
+    promise,
+    resolve(value: T) {
+      if (!resolvePending) throw new Error('deferred promise has no resolver')
+      resolvePending(value)
+    },
+  }
+}
+
 describe('Login', () => {
   afterEach(() => {
     state.login.mockReset()
@@ -54,6 +68,37 @@ describe('Login', () => {
 
     await waitFor(() => expect(state.login).toHaveBeenCalledWith('admin@example.com', 'password'))
     expect(await screen.findByText('Organizations')).toBeVisible()
+  })
+
+  it('leaves empty fields disabled and lets browser validation reject an invalid email', async () => {
+    const user = userEvent.setup()
+    renderLogin()
+
+    const submit = screen.getByRole('button', { name: 'ログイン' })
+    expect(submit).toBeDisabled()
+
+    await user.type(screen.getByLabelText('メールアドレス'), 'not-an-email')
+    await user.type(screen.getByLabelText('パスワード'), 'password')
+    expect(submit).toBeEnabled()
+    expect(screen.getByLabelText('メールアドレス')).toBeInvalid()
+    await user.click(submit)
+
+    expect(state.login).not.toHaveBeenCalled()
+  })
+
+  it('disables repeat submission and exposes loading while login is pending', async () => {
+    const user = userEvent.setup()
+    const pending = deferred<void>()
+    state.login.mockReturnValue(pending.promise)
+    renderLogin()
+
+    await user.type(screen.getByLabelText('メールアドレス'), 'admin@example.com')
+    await user.type(screen.getByLabelText('パスワード'), 'password')
+    await user.click(screen.getByRole('button', { name: 'ログイン' }))
+
+    expect(screen.getByRole('button', { name: 'ログイン中…' })).toBeDisabled()
+    pending.resolve()
+    expect(await screen.findByRole('button', { name: 'ログイン' })).toBeEnabled()
   })
 
   it.each([
@@ -86,5 +131,20 @@ describe('Login', () => {
     await user.click(screen.getByRole('button', { name: 'ログイン' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent('ネットワークエラー')
+  })
+
+  it('allows a retry after a failed login and navigates on the later success', async () => {
+    const user = userEvent.setup()
+    state.login.mockRejectedValueOnce(new state.LoginError(401)).mockResolvedValueOnce(undefined)
+    renderLogin({ from: '/organizations' })
+
+    await user.type(screen.getByLabelText('メールアドレス'), 'admin@example.com')
+    await user.type(screen.getByLabelText('パスワード'), 'password')
+    await user.click(screen.getByRole('button', { name: 'ログイン' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('メールアドレスまたはパスワード')
+
+    await user.click(screen.getByRole('button', { name: 'ログイン' }))
+
+    expect(await screen.findByText('Organizations')).toBeVisible()
   })
 })
