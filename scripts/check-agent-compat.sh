@@ -14,6 +14,15 @@ fail() {
 [[ "$(readlink CLAUDE.md)" == "AGENTS.md" ]] || fail "CLAUDE.md must point to AGENTS.md"
 [[ -r CLAUDE.md ]] || fail "CLAUDE.md link is broken"
 
+for service in admin example_service notifier ops; do
+  agents="services/$service/AGENTS.md"
+  claude="services/$service/CLAUDE.md"
+  [[ -f "$agents" && ! -L "$agents" ]] || fail "$agents must be the canonical regular file"
+  [[ -L "$claude" ]] || fail "$claude must be a symbolic link"
+  [[ "$(readlink "$claude")" == "AGENTS.md" ]] || fail "$claude must point to AGENTS.md"
+  [[ -r "$claude" ]] || fail "$claude link is broken"
+done
+
 if [[ -e .agents/skills || -e .claude/skills || -L .claude/skills ]]; then
   [[ -d .agents/skills ]] || fail ".agents/skills must be the canonical skill directory"
   [[ -L .claude/skills ]] || fail ".claude/skills must be a symbolic link"

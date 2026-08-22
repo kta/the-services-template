@@ -5,6 +5,8 @@ on:
     paths:
       - 'AGENTS.md'
       - 'CLAUDE.md'
+      - 'services/*/AGENTS.md'
+      - 'services/*/CLAUDE.md'
       - '.agents/**'
       - '.claude/skills'
       - '.claude/skills/**'
@@ -19,6 +21,8 @@ on:
     paths:
       - 'AGENTS.md'
       - 'CLAUDE.md'
+      - 'services/*/AGENTS.md'
+      - 'services/*/CLAUDE.md'
       - '.agents/**'
       - '.claude/skills'
       - '.claude/skills/**'
