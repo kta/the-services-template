@@ -1,12 +1,36 @@
 import { describe, expect, it } from 'vitest'
 import {
   AuthTokenPayload,
+  AuthUser,
+  CreateItem,
   InviteRequest,
   IssueTokenRequest,
   LoginRequest,
   NotificationJob,
   Organization,
 } from '../src/index'
+
+describe('Zod 4 migration semantics', () => {
+  it.each([
+    ['AuthUser.id', AuthUser, { email: 'a@example.com', role: 'staff' }],
+    ['CreateItem.title', CreateItem, { body: '' }],
+    ['NotificationJob.to', NotificationJob, { id: 'job-1', type: 'user.invited' }],
+  ])('%s は省略できない', (_name, schema, input) => {
+    expect(schema.safeParse(input).success).toBe(false)
+  })
+
+  it('default と optionality を適用した出力キーを固定する', () => {
+    expect(CreateItem.parse({ title: 'Item' })).toEqual({ title: 'Item', body: '' })
+    expect(
+      NotificationJob.parse({ id: 'job-1', type: 'user.invited', to: 'a@example.com' }),
+    ).toEqual({
+      id: 'job-1',
+      type: 'user.invited',
+      to: 'a@example.com',
+      payload: {},
+    })
+  })
+})
 
 describe('AuthTokenPayload(旧クレームとの互換)', () => {
   it('新形クレームをパースできる', () => {
