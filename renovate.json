@@ -2,7 +2,9 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended", ":dependencyDashboard", ":semanticCommits"],
   "timezone": "Asia/Tokyo",
-  "schedule": ["after 10pm and before 5am every weekday", "every weekend"],
+  "minimumReleaseAge": "1 day",
+  "internalChecksFilter": "strict",
+  "schedule": ["after 10pm every weekday", "before 5am every weekday", "every weekend"],
   "lockFileMaintenance": {
     "enabled": true,
     "automerge": true,
@@ -13,12 +15,24 @@
       "description": "Auto-merge non-major devDependencies on green CI",
       "matchDepTypes": ["devDependencies"],
       "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "matchCurrentVersion": "!/^0\\./",
       "groupName": "dev dependencies (non-major)",
       "automerge": true
     },
     {
+      "description": "0.x releases may break on minor or patch updates",
+      "matchCurrentVersion": "/^0\\./",
+      "automerge": false
+    },
+    {
       "description": "Production deps: human review only",
       "matchDepTypes": ["dependencies", "peerDependencies"],
+      "automerge": false
+    },
+    {
+      "description": "Keep packageManager and mise pnpm pins in one review",
+      "matchPackageNames": ["pnpm"],
+      "groupName": "pnpm toolchain",
       "automerge": false
     },
     {
