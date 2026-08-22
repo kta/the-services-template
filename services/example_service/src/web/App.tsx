@@ -16,7 +16,17 @@ const timeFormat = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyl
 
 export function App() {
   const [org, setOrg] = useState(() => auth.getOrganization())
-  return org ? <Ledger org={org} onSignOut={() => setOrg(null)} /> : <SignIn onSignedIn={setOrg} />
+  return org ? (
+    <Ledger
+      org={org}
+      onSignOut={() => {
+        auth.logout()
+        setOrg(null)
+      }}
+    />
+  ) : (
+    <SignIn onSignedIn={setOrg} />
+  )
 }
 
 function Masthead({ org, onSignOut }: { org?: string; onSignOut?: () => void }) {
