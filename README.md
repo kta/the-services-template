@@ -51,10 +51,14 @@ make dev/admin  # → http://localhost:5174 が管理コンソール
 
 ```sh
 make dev/example_service   # → http://localhost:5173 サンプルの業務画面
-make dev/all               # admin と example_service を同時に起動
+make dev/all               # Makefile の DEV_ALL_SERVICES に登録されたSPA+APIを同時に起動
 make check                 # 壊れていないか全部確認する（緑ならOK）
 make help                  # コマンド一覧
 ```
+
+新サービスを追加するときは、`.agents/skills/new-service` の手順に従って root `Makefile` の
+サービス一覧も更新します。これにより `make init`、`make dev/<service>`、`make dev/all`、
+`make deploy/<service>` の導線が揃います。
 
 ### テストを実行する
 
