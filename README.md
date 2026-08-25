@@ -91,7 +91,7 @@ React web coverage は各 60% 以上です。新しい production behavior は f
    pnpm --filter @app/admin exec wrangler login
    ```
    ※ Claude Code のセッション中なら、行頭に `!` を付けて `! pnpm --filter @app/admin exec wrangler login` と打てばその場で実行できます。
-3. **API トークンを 1 枚発行する**（自動デプロイを使う場合のみ。ダッシュボードの My Profile → API Tokens → Create Token）。必要な権限はエージェントに聞けば教えてくれます。
+3. **API トークンを 1 枚発行し、GitHub の `prd` Environment に登録する**（自動デプロイを使う場合のみ）。画面操作、必要権限、`gh secret set --env prd` の安全なコピペ例は、[Cloudflare 初期設定ガイド](./docs/howto/cloudflare-setup.md#2-ci-用の-api-トークンを発行する)の手順 2〜3 に従ってください。
 
 そのうえで、エージェントに**このまま貼って**ください:
 
@@ -109,7 +109,7 @@ docs/howto/deploy.md に従って、順番に実行して。
 
 終わると `https://admin.<あなたのサブドメイン>.workers.dev` で管理コンソールが動きます。
 
-自分で手を動かしたい場合の手順書 → [`docs/howto/cloudflare-setup.md`](./docs/howto/cloudflare-setup.md)。運用時のデプロイ手順 → [`docs/howto/deploy.md`](./docs/howto/deploy.md)。
+自分で手を動かしたい場合は、まず [Cloudflare 初期設定ガイド](./docs/howto/cloudflare-setup.md) の手順 1〜3 を完了してください。運用時のデプロイ手順 → [`docs/howto/deploy.md`](./docs/howto/deploy.md)。
 
 > 💡 **お金の話**: このテンプレートは Cloudflare の無料枠で全部動くように作られています（有料プランが必要な機能は使っていません）。上限と、上限に近づいたときの対処は [`docs/howto/free-tier-limits.md`](./docs/howto/free-tier-limits.md)。
 
