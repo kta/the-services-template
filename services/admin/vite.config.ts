@@ -11,5 +11,9 @@ const persistState = e2eStatePath ? { path: e2eStatePath } : true
 // example_service dev server too when exercising the org sync locally.
 export default defineConfig({
   plugins: [react(), tailwindcss(), cloudflare({ persistState })],
-  server: { port: 5174 },
+  server: {
+    port: 5174,
+    strictPort: true,
+    watch: { ignored: ['**/src-tauri/**'] },
+  },
 })

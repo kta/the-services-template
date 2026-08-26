@@ -1,0 +1,52 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Admin",
+  "version": "0.0.0",
+  "identifier": "com.kta.admin",
+  "build": {
+    "beforeDevCommand": "pnpm run dev",
+    "beforeBuildCommand": "pnpm run build:tauri",
+    "devUrl": "http://localhost:5174",
+    "frontendDist": "../dist/tauri"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Admin",
+        "width": 1280,
+        "height": 800,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "capabilities": ["default"],
+      "csp": {
+        "default-src": "'self'",
+        "base-uri": "'self'",
+        "object-src": "'none'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' data:",
+        "font-src": "'self'",
+        "connect-src": "'self' ipc: http://ipc.localhost"
+      },
+      "devCsp": {
+        "default-src": "'self'",
+        "base-uri": "'self'",
+        "object-src": "'none'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' data:",
+        "font-src": "'self'",
+        "connect-src": "'self' ipc: http://ipc.localhost http://localhost:5174"
+      },
+      "freezePrototype": true
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": []
+  }
+}

@@ -4,7 +4,8 @@ import { authFetch } from './auth/session'
 
 /**
  * 型付き Hono RPC クライアント。API は同一オリジン(1 Worker が SPA + API を配信)
- * なので base は '/'。`authFetch` が bearer 付与と 401→refresh を担う。
+ * なので base は '/'。`authFetch` が bearer 付与と 401→refresh を担い、最終的な
+ * Web/Tauri の送信は platform transport に委譲する。
  */
 export const client = hc<AppType>('/', { fetch: authFetch })
 

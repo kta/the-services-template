@@ -1,8 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 const shared = vi.hoisted(() => ({ stretchPassword: vi.fn() }))
+const invoke = vi.hoisted(() => vi.fn())
 
 vi.mock('@app/shared', () => shared)
+vi.mock('@tauri-apps/api/core', () => ({ invoke }))
+
+type TauriWindow = Window & { __TAURI_INTERNALS__?: unknown }
+
+function tauriWindow(): TauriWindow {
+  return window as TauriWindow
+}
 
 async function loadSession() {
   vi.resetModules()
@@ -23,6 +31,8 @@ function jwt(exp?: number): string {
 
 describe('admin browser session', () => {
   afterEach(() => {
+    invoke.mockReset()
+    delete tauriWindow().__TAURI_INTERNALS__
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
     vi.useRealTimers()
@@ -158,5 +168,88 @@ describe('admin browser session', () => {
     await expect(session.login('admin@example.com', 'password')).rejects.toMatchObject({
       status: 403,
     })
+  })
+
+  it('uses the Tauri transport for native login requests', async () => {
+    tauriWindow().__TAURI_INTERNALS__ = {}
+    shared.stretchPassword.mockResolvedValue('stretched')
+    invoke.mockResolvedValue({
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: 'native-token' }),
+    })
+    const session = await loadSession()
+
+    await session.login('admin@example.com', 'password')
+
+    expect(invoke).toHaveBeenCalledWith('api_request', {
+      method: 'POST',
+      path: '/api/auth/login',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'admin@example.com', stretched: 'stretched' }),
+    })
+    expect(session.isAuthenticated()).toBe(true)
+  })
+
+  it('uses the Tauri transport for native refresh and hides refresh cookies from JS', async () => {
+    tauriWindow().__TAURI_INTERNALS__ = {}
+    invoke.mockResolvedValue({
+      status: 200,
+      headers: { 'set-cookie': 'refresh=secret; HttpOnly' },
+      body: JSON.stringify({ token: 'refreshed-native-token' }),
+    })
+    const session = await loadSession()
+
+    await expect(session.bootstrap()).resolves.toBe(true)
+
+    expect(invoke).toHaveBeenCalledWith('api_request', {
+      method: 'POST',
+      path: '/api/auth/refresh',
+      headers: {},
+      body: null,
+    })
+    expect(session.isAuthenticated()).toBe(true)
+  })
+
+  it('uses native IPC for invite, development login, and logout failure clears memory', async () => {
+    tauriWindow().__TAURI_INTERNALS__ = {}
+    shared.stretchPassword.mockResolvedValue('stretched')
+    invoke
+      .mockResolvedValueOnce({
+        status: 200,
+        headers: { 'set-cookie': 'refresh=invite-secret; HttpOnly' },
+        body: JSON.stringify({ token: 'invite-native-token' }),
+      })
+      .mockResolvedValueOnce({
+        status: 200,
+        headers: {},
+        body: JSON.stringify({ token: 'dev-native-token' }),
+      })
+      .mockRejectedValueOnce(new Error('offline'))
+    const session = await loadSession()
+
+    await session.acceptInvite('invite', 'staff@example.com', 'password')
+    await expect(session.devLogin('org-admin')).resolves.toBe(true)
+    await session.logout()
+
+    expect(invoke).toHaveBeenNthCalledWith(1, 'api_request', {
+      method: 'POST',
+      path: '/api/auth/accept-invite',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: 'invite', email: 'staff@example.com', stretched: 'stretched' }),
+    })
+    expect(invoke).toHaveBeenNthCalledWith(2, 'api_request', {
+      method: 'POST',
+      path: '/api/auth/token',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ organizationId: 'org-admin', role: 'admin' }),
+    })
+    expect(invoke).toHaveBeenNthCalledWith(3, 'api_request', {
+      method: 'POST',
+      path: '/api/auth/logout',
+      headers: {},
+      body: null,
+    })
+    expect(session.isAuthenticated()).toBe(false)
   })
 })

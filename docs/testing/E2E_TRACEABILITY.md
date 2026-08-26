@@ -40,10 +40,13 @@ idempotency ID を検証するためだけに使う。production Worker にテ�
 
 ## 現在の基準線
 
-Approved かつ UC/AC を持つ spec は item feature のみである。`admin` の service spec と
-infrastructure-only の文書には UC/AC がないため、分母には入らない（機械的な免除ではなく、
-そもそも product behavior を定義していない）。新しい production behavior は Approved spec
-に UC/AC を付け、この表と E2E mapping を同じ変更で追加する。
+Approved かつ UC/AC を持つ spec は item feature と admin の browser-observable な Tauri
+feature である。Tauri feature の native shell、Rust core、protected store、artifact build は
+Playwright suite の対象ではないため、spec 内で `NATIVE-*` / `WEB-*` / `CI-*` の検証要件として
+Rust unit、Vitest、CI workflow に割り当てる。これらを `@e2e-covers` で主張してはならない。
+`admin` の service spec と infrastructure-only の文書には UC/AC がないため、分母には入らない
+（機械的な免除ではなく、そもそも product behavior を定義していない）。新しい browser
+behavior は Approved spec に UC/AC を付け、この表と E2E mapping を同じ変更で追加する。
 
 | Spec ID | Playwright scenario |
 |---|---|
@@ -52,6 +55,7 @@ infrastructure-only の文書には UC/AC がないため、分母には入ら�
 | AC-ITEM-03 | `services/example_service/e2e/smoke.spec.ts` — item API rejects empty and overlong titles |
 | AC-ITEM-04 | `services/example_service/e2e/smoke.spec.ts` — an organization cannot list an item created by another organization |
 | AC-ITEM-05 | `services/example_service/e2e/smoke.spec.ts` — service binding records an `item.created` job despite the local notifier's 418, while creation remains successful |
+| AC-TAURI-02 | `services/admin/e2e/smoke.spec.ts` — an unauthenticated browser is redirected to `/login` and sees the login UI |
 
 validator 自体は `scripts/check-e2e-traceability.test.mjs` で unit test する。通常の実行は次の
 とおり。
