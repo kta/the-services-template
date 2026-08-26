@@ -1,6 +1,6 @@
 import type { AppType } from '@app/example_service'
-import { auth } from '@app/shared'
 import { hc } from 'hono/client'
+import { auth } from './auth/session'
 
 // Typed Hono RPC client. The API lives on this same origin (one Worker serves
 // SPA + API), so the base is simply '/'. `authFetch` attaches the bearer token.

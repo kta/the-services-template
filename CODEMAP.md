@@ -23,7 +23,7 @@ topology and ownership boundary.
 | Area | Owner and entry point | Responsibility |
 |---|---|---|
 | [`services/admin`](./services/admin) | [`src/worker/index.ts`](./services/admin/src/worker/index.ts) | Operator SPA/API, organization source of truth, authentication, invitations, and organization reconciliation. |
-| [`services/example_service`](./services/example_service) | [`src/worker/index.ts`](./services/example_service/src/worker/index.ts) | Template domain Worker: same-origin SPA/API, tenant-scoped items, and received organization records. |
+| [`services/example_service`](./services/example_service) | [`src/worker/index.ts`](./services/example_service/src/worker/index.ts), [`src-tauri/src/lib.rs`](./services/example_service/src-tauri/src/lib.rs) | Template domain Worker: same-origin SPA/API, tenant-scoped items, received organization records, and the optional Tauri v2 native shell. |
 | [`services/notifier`](./services/notifier) | [`src/index.ts`](./services/notifier/src/index.ts) | Internal notification endpoint, KV deduplication, and Resend delivery. |
 | [`services/ops`](./services/ops) | [`src/index.ts`](./services/ops/src/index.ts) | Cron and Workflow entry points for D1 backup, freshness/capacity checks, and service health checks. |
 | [`packages/contracts`](./packages/contracts) | [`src/index.ts`](./packages/contracts/src/index.ts) | Zod API contracts shared by Workers and web clients. |
@@ -55,6 +55,12 @@ not depend on services.
   and handles its `/api/*` routes on the same origin. The Hono route chain
   exports `AppType` for the typed client, with contracts defined in
   `packages/contracts`.
+- **Native to application:** example_service's Tauri React bundle sends API
+  requests through the Rust `api_request` command. The command uses a
+  build-time fixed API origin and an `/api/` method/header allowlist; it does
+  not expose response cookies. Native access tokens are memory-only because
+  the example service has no refresh endpoint. See
+  [`docs/howto/tauri-example-service.md`](./docs/howto/tauri-example-service.md).
 - **Organizations and authorization:** `admin` manages organizations and
   credentials. It synchronizes organization records to a domain Worker through
   an internal service binding; that Worker applies tenant scope to its own D1
@@ -82,6 +88,7 @@ not depend on services.
 | Change notification delivery | [`services/notifier`](./services/notifier) and [`packages/contracts/src/notification.ts`](./packages/contracts/src/notification.ts). |
 | Change backup, monitoring, or scheduled operations | [`services/ops/src/index.ts`](./services/ops/src/index.ts) and [`services/ops/wrangler.jsonc`](./services/ops/wrangler.jsonc). |
 | Change shared visual language or UI primitives | [`packages/ui/src/theme.css`](./packages/ui/src/theme.css) and [`packages/ui/src`](./packages/ui/src). |
+| Change example_service's native shell or Web/native transport boundary | [`services/example_service/src/web/platform/transport.ts`](./services/example_service/src/web/platform/transport.ts), [`services/example_service/src-tauri/src/api.rs`](./services/example_service/src-tauri/src/api.rs), and [`scripts/check-tauri-boundary.mjs`](./scripts/check-tauri-boundary.mjs). |
 | Change Cloudflare resources, bindings, or deployment configuration | [`infra/terraform`](./infra/terraform), affected `wrangler.jsonc`, then [`docs/architecture/infra.md`](./docs/architecture/infra.md). |
 
 ### Development and verification

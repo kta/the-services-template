@@ -1,32 +1,56 @@
 #!/usr/bin/env node
 
 import { lstat, readdir, readFile } from 'node:fs/promises'
-import { extname, relative, resolve } from 'node:path'
+import { basename, extname, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as ts from 'typescript/unstable/ast'
 import { API as TypeScriptAPI } from 'typescript/unstable/sync'
 
-const WEB_DIRECTORY = 'services/admin/src/web'
-const TAURI_DIRECTORY = 'services/admin/src-tauri'
-const TAURI_CONFIG = 'services/admin/src-tauri/tauri.conf.json'
-const CAPABILITIES_DIRECTORY = 'services/admin/src-tauri/capabilities'
-const SOURCE_EXTENSIONS = new Set(['.cjs', '.cts', '.js', '.jsx', '.mjs', '.mts', '.ts', '.tsx'])
-const FORBIDDEN_WEB_PLUGINS = [
-  '@tauri-apps/plugin-http',
-  '@tauri-apps/plugin-store',
-  '@tauri-apps/plugin-stronghold',
+const TAURI_TARGETS = [
+  {
+    name: 'admin',
+    webDirectory: 'services/admin/src/web',
+    tauriDirectory: 'services/admin/src-tauri',
+    tauriConfig: 'services/admin/src-tauri/tauri.conf.json',
+    capabilitiesDirectory: 'services/admin/src-tauri/capabilities',
+    devPort: 5174,
+    storageAllowlist: new Map([
+      [
+        'services/admin/src/web/auth/session.ts',
+        {
+          key: 'app.admin.dev.token',
+          reason: 'development-only fallback token; native sessions never use browser storage',
+        },
+      ],
+    ]),
+  },
+  {
+    name: 'example_service',
+    webDirectory: 'services/example_service/src/web',
+    tauriDirectory: 'services/example_service/src-tauri',
+    tauriConfig: 'services/example_service/src-tauri/tauri.conf.json',
+    capabilitiesDirectory: 'services/example_service/src-tauri/capabilities',
+    devPort: 5173,
+    storageAllowlist: new Map([
+      [
+        'services/example_service/src/web/auth/session.ts',
+        {
+          key: 'app.auth.token',
+          organizationKey: 'app.auth.org',
+          reason: 'Web-only dev session; native sessions never use browser storage',
+        },
+      ],
+    ]),
+  },
 ]
+const SOURCE_EXTENSIONS = new Set(['.cjs', '.cts', '.js', '.jsx', '.mjs', '.mts', '.ts', '.tsx'])
+const FORBIDDEN_WEB_PLUGIN_IMPORT =
+  /(?:\bimport\s*(?:\(\s*)?|\bfrom\s+|\brequire\s*\(\s*)['"](@tauri-apps\/plugin-[^'"]+)['"]/g
+const FORBIDDEN_TAURI_PLUGIN_REFERENCE =
+  /(?:@tauri-apps\/plugin-[A-Za-z0-9_-]+|tauri-plugin-[A-Za-z0-9_-]+)/g
+const ALLOWED_CAPABILITY_PERMISSIONS = new Set(['allow-api-request'])
+const CAPABILITY_EXTENSIONS = new Set(['.json', '.toml'])
 const SECRET_NAMES = ['JWT_SECRET', 'AUTH_PEPPER', 'INTERNAL_KEY', 'RESEND']
-const STORAGE_ALLOWLIST = new Map([
-  [
-    'services/admin/src/web/auth/session.ts',
-    {
-      key: 'app.admin.dev.token',
-      reason: 'development-only fallback token; native sessions never use browser storage',
-    },
-  ],
-])
-
 async function filesUnder(directory, includeSymlinks = false) {
   let entries
   try {
@@ -65,8 +89,8 @@ function isProductionWebSource(path) {
   return SOURCE_EXTENSIONS.has(extname(path)) && !isTestSource(path)
 }
 
-function isTransportSource(root, path) {
-  return relativePath(root, path) === `${WEB_DIRECTORY}/platform/transport.ts`
+function isTransportSource(root, path, target) {
+  return relativePath(root, path) === `${target.webDirectory}/platform/transport.ts`
 }
 
 function unwrapExpression(node) {
@@ -253,12 +277,6 @@ function collectBoundaryAliases(sourceFile) {
     }
   }
   return { globals, fetches, storages, storageMethods, shape }
-}
-
-function pushMatchViolations(violations, root, path, source, pattern, message) {
-  for (const match of source.matchAll(pattern)) {
-    violations.push(`${relativePath(root, path)}:${lineAt(source, match.index)}: ${message}`)
-  }
 }
 
 /* Legacy lexer retained below temporarily during the AST migration. */
@@ -458,24 +476,15 @@ function fetchBoundaryReferences(sourceFile) {
   return references
 }
 
-function checkWebSource(violations, root, path, source, sourceFile, checker) {
-  for (const plugin of FORBIDDEN_WEB_PLUGINS) {
-    const escaped = plugin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const importPattern = new RegExp(
-      `(?:\\bimport\\s*(?:\\(\\s*)?|\\bfrom\\s+|\\brequire\\s*\\(\\s*)['"]${escaped}['"]`,
-      'g',
-    )
-    pushMatchViolations(
-      violations,
-      root,
-      path,
-      source,
-      importPattern,
-      `forbidden Tauri plugin import: ${plugin}`,
+function checkWebSource(violations, root, path, source, sourceFile, checker, target) {
+  FORBIDDEN_WEB_PLUGIN_IMPORT.lastIndex = 0
+  for (const match of source.matchAll(FORBIDDEN_WEB_PLUGIN_IMPORT)) {
+    violations.push(
+      `${relativePath(root, path)}:${lineAt(source, match.index)}: forbidden Tauri plugin import: ${match[1]}`,
     )
   }
 
-  if (!isTransportSource(root, path)) {
+  if (!isTransportSource(root, path, target)) {
     // A dynamic property read from the global object may resolve to fetch;
     // there is no safe static proof for a user-controlled key, so fail closed.
     if (/\b(?:globalThis|window)\s*\[/.test(source)) {
@@ -490,7 +499,7 @@ function checkWebSource(violations, root, path, source, sourceFile, checker) {
     }
   }
 
-  checkStorageWrites(violations, root, path, source, sourceFile, checker)
+  checkStorageWrites(violations, root, path, source, sourceFile, checker, target)
 }
 
 function _tokenText(source, tokens, start, end) {
@@ -622,7 +631,7 @@ function _legacyFindDevLoginBody(tokens) {
 }
 
 function _legacyIsDocumentedDevFallback(pathName, tokens, write) {
-  const allow = STORAGE_ALLOWLIST.get(pathName)
+  const allow = TAURI_TARGETS.map((target) => target.storageAllowlist.get(pathName)).find(Boolean)
   if (!allow || write.shape !== 'sessionStorage.setItem') return false
   if (write.keyArgument !== 'DEV_TOKEN_KEY' || write.valueArgument !== 'token') return false
   const keyDeclaration = tokens.filter(
@@ -762,19 +771,25 @@ function resolveTokenBinding(identifier, bindings, checker) {
     .sort((a, b) => b.name.getStart() - a.name.getStart())[0]
 }
 
-function isDocumentedDevFallbackAst(pathName, sourceFile, write, checker) {
-  const allow = STORAGE_ALLOWLIST.get(pathName)
+function isDocumentedDevFallbackAst(pathName, sourceFile, write, checker, target) {
+  const allow = target.storageAllowlist.get(pathName)
   if (!allow || write.shape !== 'sessionStorage.setItem') return false
-  if (
-    write.keyArgument !== 'DEV_TOKEN_KEY' ||
-    !ts.isIdentifier(write.valueNode) ||
-    write.valueArgument !== 'token'
-  )
-    return false
+  const isTokenWrite =
+    write.keyArgument === 'DEV_TOKEN_KEY' &&
+    ts.isIdentifier(write.valueNode) &&
+    write.valueArgument === 'token'
+  const isOrganizationWrite =
+    allow.organizationKey !== undefined &&
+    write.keyArgument === 'DEV_ORG_KEY' &&
+    ts.isIdentifier(write.valueNode) &&
+    write.valueArgument === 'organizationId'
+  if (!isTokenWrite && !isOrganizationWrite) return false
+
   const body = findDevLoginBodyAst(sourceFile)
   const platformFetchSymbol = platformFetchImportSymbol(sourceFile, checker)
   if (!body || !platformFetchSymbol || !isWithin(write.node, body)) return false
   let keyDeclarations = 0
+  let organizationKeyDeclarations = 0
   let responseSymbol
   let responseToken
   function visit(node) {
@@ -785,6 +800,13 @@ function isDocumentedDevFallbackAst(pathName, sourceFile, write, checker) {
         stringValue(node.initializer) === allow.key
       )
         keyDeclarations += 1
+      if (
+        isOrganizationWrite &&
+        ts.isIdentifier(node.name) &&
+        node.name.text === 'DEV_ORG_KEY' &&
+        stringValue(node.initializer) === allow.organizationKey
+      )
+        organizationKeyDeclarations += 1
       const initializer = unwrapExpression(node.initializer)
       if (
         isWithin(node, body) &&
@@ -828,9 +850,11 @@ function isDocumentedDevFallbackAst(pathName, sourceFile, write, checker) {
     keyDeclarations !== 1 ||
     !responseToken ||
     !responseSymbol ||
-    responseToken.getStart() >= write.valueNode.getStart()
+    responseToken.getStart() >= write.valueNode.getStart() ||
+    (isOrganizationWrite && organizationKeyDeclarations !== 1)
   )
     return false
+  if (isOrganizationWrite) return true
   const bindings = tokenBindings(sourceFile)
   const responseBinding = resolveTokenBinding(responseToken, bindings, checker)
   const writeBinding = resolveTokenBinding(write.valueNode, bindings, checker)
@@ -862,18 +886,18 @@ function isDocumentedDevFallbackAst(pathName, sourceFile, write, checker) {
   return !reassigned
 }
 
-function checkStorageWrites(violations, root, path, source, sourceFile, checker) {
+function checkStorageWrites(violations, root, path, source, sourceFile, checker, target) {
   const pathName = relativePath(root, path)
   const { writes } = storageWrites(sourceFile)
   for (const write of writes) {
-    if (isDocumentedDevFallbackAst(pathName, sourceFile, write, checker)) continue
+    if (isDocumentedDevFallbackAst(pathName, sourceFile, write, checker, target)) continue
     violations.push(
       `${pathName}:${lineAt(source, write.index)}: browser storage write is forbidden (${write.keyArgument}); allowlist only permits the exact devLogin grant-token fallback`,
     )
   }
 }
 
-function checkCsp(violations, config) {
+function checkCsp(violations, config, target) {
   const security = config?.app?.security
   const required = {
     'default-src': ["'self'"],
@@ -887,16 +911,16 @@ function checkCsp(violations, config) {
   for (const name of ['csp', 'devCsp']) {
     const csp = security?.[name]
     if (!csp || typeof csp !== 'object' || Array.isArray(csp)) {
-      violations.push(`${TAURI_CONFIG}: ${name} must be a non-empty object of CSP directives`)
+      violations.push(`${target.tauriConfig}: ${name} must be a non-empty object of CSP directives`)
       continue
     }
     const directives = { ...required, 'connect-src': ["'self'", 'ipc:', 'http://ipc.localhost'] }
-    if (name === 'devCsp') directives['connect-src'].push('http://localhost:5174')
+    if (name === 'devCsp') directives['connect-src'].push(`http://localhost:${target.devPort}`)
     for (const directive of Object.keys(directives)) {
       const value = csp[directive]
       if (typeof value !== 'string' || value.trim() === '') {
         violations.push(
-          `${TAURI_CONFIG}: ${name} directive ${directive} must be a non-empty string`,
+          `${target.tauriConfig}: ${name} directive ${directive} must be a non-empty string`,
         )
         continue
       }
@@ -904,42 +928,165 @@ function checkCsp(violations, config) {
       const allowed = new Set(directives[directive])
       const unsafe = tokens.find((token) => !allowed.has(token))
       if (unsafe) {
-        violations.push(`${TAURI_CONFIG}: ${name} contains an unsafe CSP source ${unsafe}`)
+        violations.push(`${target.tauriConfig}: ${name} contains an unsafe CSP source ${unsafe}`)
       }
     }
     for (const directive of Object.keys(csp)) {
       if (!(directive in directives)) {
         violations.push(
-          `${TAURI_CONFIG}: ${name} contains an unsupported CSP directive ${directive}`,
+          `${target.tauriConfig}: ${name} contains an unsupported CSP directive ${directive}`,
         )
       }
     }
   }
 }
 
-function permissionValues(value, key = '') {
-  if (Array.isArray(value))
-    return key === 'permissions' ? value.flatMap((item) => permissionValues(item, key)) : []
-  if (!value || typeof value !== 'object')
-    return key === 'permissions' && typeof value === 'string' ? [value] : []
-  return Object.entries(value).flatMap(([childKey, child]) =>
-    childKey === 'permissions' ||
-    childKey.endsWith('permission') ||
-    childKey.endsWith('permissions')
-      ? permissionValues(child, 'permissions')
-      : [],
+function jsonCapabilityPermissions(value) {
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    Array.isArray(value) ||
+    !Array.isArray(value.permissions) ||
+    value.permissions.some((permission) => typeof permission !== 'string')
   )
+    return null
+  return value.permissions
 }
 
-function checkCapability(violations, path, capability) {
-  for (const permission of permissionValues(capability)) {
-    if (
-      /^(?:fs|filesystem|shell|opener|http)(?::|$)/i.test(permission) ||
-      /plugin[-:]?http/i.test(permission)
-    ) {
-      violations.push(
-        `${path}: capability permission ${permission} is forbidden (filesystem, shell, opener, and HTTP plugins are not allowed)`,
-      )
+function tomlCapabilityPermissions(source) {
+  const assignment = /(?:^|\n)[ \t]*permissions[ \t]*=/m.exec(source)
+  if (!assignment) return null
+  const equals = source.indexOf('=', assignment.index)
+  const arrayStart = source.slice(equals + 1).search(/\[/)
+  if (arrayStart < 0) return null
+  const start = equals + 1 + arrayStart
+  let depth = 0
+  let quote = ''
+  let escaped = false
+  let comment = false
+  let end = -1
+  for (let index = start; index < source.length; index += 1) {
+    const char = source[index]
+    if (comment) {
+      if (char === '\n') comment = false
+      continue
+    }
+    if (quote) {
+      if (quote === '"' && escaped) {
+        escaped = false
+      } else if (quote === '"' && char === '\\') {
+        escaped = true
+      } else if (char === quote) {
+        quote = ''
+      }
+      continue
+    }
+    if (char === '#') {
+      comment = true
+    } else if (char === '"' || char === "'") {
+      quote = char
+    } else if (char === '[') {
+      depth += 1
+    } else if (char === ']') {
+      depth -= 1
+      if (depth === 0) {
+        end = index
+        break
+      }
+    }
+  }
+  if (end < 0 || quote) return null
+
+  const content = source.slice(start + 1, end)
+  const values = []
+  const strings = /"(?:\\.|[^"\\])*"|'[^']*'/g
+  let cursor = 0
+  for (const match of content.matchAll(strings)) {
+    const gap = content
+      .slice(cursor, match.index)
+      .replace(/#[^\n]*/g, '')
+      .replace(/[\s,]/g, '')
+    if (gap !== '') return null
+    const literal = match[0]
+    if (literal.startsWith('"')) {
+      try {
+        values.push(JSON.parse(literal))
+      } catch {
+        return null
+      }
+    } else {
+      values.push(literal.slice(1, -1))
+    }
+    cursor = match.index + literal.length
+  }
+  const tail = content
+    .slice(cursor)
+    .replace(/#[^\n]*/g, '')
+    .replace(/[\s,]/g, '')
+  return tail === '' ? values : null
+}
+
+function capabilityPermissions(source, extension) {
+  try {
+    if (extension === '.json') return jsonCapabilityPermissions(JSON.parse(source))
+    return extension === '.toml' ? tomlCapabilityPermissions(source) : null
+  } catch {
+    return null
+  }
+}
+
+function checkCapability(violations, path, permissions) {
+  if (!permissions) {
+    violations.push(
+      `${path}: capability must declare permissions as a TOML/JSON array containing only allow-api-request`,
+    )
+    return
+  }
+  for (const permission of permissions) {
+    if (!ALLOWED_CAPABILITY_PERMISSIONS.has(permission)) {
+      violations.push(`${path}: capability permission ${permission} is not allowed`)
+    }
+  }
+  if (
+    permissions.length !== ALLOWED_CAPABILITY_PERMISSIONS.size ||
+    !permissions.every((permission) => ALLOWED_CAPABILITY_PERMISSIONS.has(permission))
+  ) {
+    violations.push(`${path}: capability must contain exactly allow-api-request`)
+  }
+}
+
+function checkTauriConfigPlugins(violations, path, config) {
+  const app = config?.app
+  if (
+    config &&
+    typeof config === 'object' &&
+    ('plugins' in config || (app && typeof app === 'object' && 'plugins' in app))
+  ) {
+    violations.push(`${path}: plugins configuration is forbidden for this Tauri shell`)
+  }
+}
+
+function checkTauriPluginReferences(violations, path, source, checkConfig) {
+  FORBIDDEN_TAURI_PLUGIN_REFERENCE.lastIndex = 0
+  for (const match of source.matchAll(FORBIDDEN_TAURI_PLUGIN_REFERENCE)) {
+    violations.push(
+      `${path}:${lineAt(source, match.index)}: forbidden Tauri plugin reference: ${match[0]}`,
+    )
+  }
+  if (/\.\s*plugin\s*\(/.test(source)) {
+    violations.push(`${path}: Tauri plugin builder calls are forbidden (.plugin())`)
+  }
+  if (checkConfig && extname(path).toLowerCase() === '.json') {
+    try {
+      checkTauriConfigPlugins(violations, path, JSON.parse(source))
+    } catch {
+      // JSON syntax errors are reported by the Tauri CLI; this checker only
+      // needs to fail closed for a valid plugin configuration here.
+    }
+  }
+  if (checkConfig && extname(path).toLowerCase() === '.toml') {
+    if (/(?:^|\n)[ \t]*plugins[ \t]*=/m.test(source)) {
+      violations.push(`${path}: plugins configuration is forbidden for this Tauri shell`)
     }
   }
 }
@@ -948,10 +1095,9 @@ async function readJson(path) {
   return JSON.parse(await readFile(path, 'utf8'))
 }
 
-async function validateTauriBoundary(root = process.cwd()) {
-  const workspace = resolve(root)
+async function validateTarget(workspace, target) {
   const violations = []
-  const webRoot = resolve(workspace, WEB_DIRECTORY)
+  const webRoot = resolve(workspace, target.webDirectory)
   const webSources = (await filesUnder(webRoot, true)).filter(isProductionWebSource)
   const typeScriptApi = new TypeScriptAPI({ cwd: workspace })
   const typeScriptSnapshot = typeScriptApi.updateSnapshot({ openFiles: webSources })
@@ -979,6 +1125,7 @@ async function validateTauriBoundary(root = process.cwd()) {
         await readFile(path, 'utf8'),
         sourceFile,
         project?.checker,
+        target,
       )
     }
   } finally {
@@ -986,31 +1133,39 @@ async function validateTauriBoundary(root = process.cwd()) {
     typeScriptApi.close()
   }
 
-  const configPath = resolve(workspace, TAURI_CONFIG)
+  const configPath = resolve(workspace, target.tauriConfig)
   try {
-    checkCsp(violations, await readJson(configPath))
+    const config = await readJson(configPath)
+    checkCsp(violations, config, target)
+    checkTauriConfigPlugins(violations, target.tauriConfig, config)
   } catch (error) {
     if (error?.code === 'ENOENT') {
-      violations.push(`${TAURI_CONFIG}: required Tauri config file is missing`)
+      violations.push(`${target.tauriConfig}: required Tauri config file is missing`)
     } else throw error
   }
 
-  const capabilityPath = resolve(workspace, CAPABILITIES_DIRECTORY, 'default.json')
-  try {
-    await readJson(capabilityPath)
-  } catch (error) {
-    if (error?.code === 'ENOENT') {
-      violations.push(
-        `${relativePath(workspace, capabilityPath)}: required default capability file is missing`,
-      )
-    } else throw error
+  const capabilitiesRoot = resolve(workspace, target.capabilitiesDirectory)
+  const capabilityFiles = (await filesUnder(capabilitiesRoot)).filter((path) =>
+    CAPABILITY_EXTENSIONS.has(extname(path).toLowerCase()),
+  )
+  const defaultCapability = capabilityFiles.find((path) =>
+    ['default.json', 'default.toml'].includes(basename(path).toLowerCase()),
+  )
+  if (!defaultCapability) {
+    violations.push(
+      `${relativePath(workspace, capabilitiesRoot)}/default.json or default.toml: required default capability file is missing`,
+    )
   }
-  for (const path of await filesUnder(resolve(workspace, CAPABILITIES_DIRECTORY))) {
-    if (extname(path).toLowerCase() !== '.json') continue
-    checkCapability(violations, relativePath(workspace, path), await readJson(path))
+  for (const path of capabilityFiles) {
+    const extension = extname(path).toLowerCase()
+    checkCapability(
+      violations,
+      relativePath(workspace, path),
+      capabilityPermissions(await readFile(path, 'utf8'), extension),
+    )
   }
 
-  for (const path of await filesUnder(resolve(workspace, TAURI_DIRECTORY))) {
+  for (const path of await filesUnder(resolve(workspace, target.tauriDirectory))) {
     const pathName = relativePath(workspace, path)
     if (
       pathName.includes('/target/') ||
@@ -1019,6 +1174,7 @@ async function validateTauriBoundary(root = process.cwd()) {
     )
       continue
     const source = await readFile(path, 'utf8')
+    checkTauriPluginReferences(violations, pathName, source, pathName !== target.tauriConfig)
     for (const secret of SECRET_NAMES) {
       const pattern = new RegExp(`\\b${secret}\\b`, 'g')
       for (const match of source.matchAll(pattern)) {
@@ -1030,6 +1186,14 @@ async function validateTauriBoundary(root = process.cwd()) {
   }
 
   return violations.sort()
+}
+
+async function validateTauriBoundary(root = process.cwd()) {
+  const workspace = resolve(root)
+  const violations = await Promise.all(
+    TAURI_TARGETS.map((target) => validateTarget(workspace, target)),
+  )
+  return violations.flat().sort()
 }
 
 export { validateTauriBoundary }

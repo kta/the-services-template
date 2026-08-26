@@ -318,6 +318,9 @@ importers:
       '@hono/zod-validator':
         specifier: 'catalog:'
         version: 0.9.0(hono@4.13.3)(zod@4.4.3)
+      '@tauri-apps/api':
+        specifier: 'catalog:'
+        version: 2.11.1
       drizzle-orm:
         specifier: 'catalog:'
         version: 0.45.2(@cloudflare/workers-types@5.20260822.1)
@@ -349,6 +352,9 @@ importers:
       '@tailwindcss/vite':
         specifier: 'catalog:'
         version: 4.3.3(vite@8.2.2(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+      '@tauri-apps/cli':
+        specifier: 'catalog:'
+        version: 2.11.4
       '@testing-library/dom':
         specifier: 'catalog:'
         version: 10.4.1

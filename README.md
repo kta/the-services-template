@@ -60,6 +60,8 @@ make help                  # コマンド一覧
 サービス一覧も更新します。これにより `make init`、`make dev/<service>`、`make dev/all`、
 `make deploy/<service>` の導線が揃います。
 
+example_service は Tauri v2 の native shell も雛形として含みます。`pnpm --filter @app/example_service tauri dev` が Worker/Vite dev server と native window をまとめて起動します。desktop / iOS / Android の前提と unsigned artifact の手順は [`docs/howto/tauri-example-service.md`](./docs/howto/tauri-example-service.md) を参照してください。
+
 ### テストを実行する
 
 `pnpm test` は全 package の Worker/unit test、React service の `test:web`、coverage gate、

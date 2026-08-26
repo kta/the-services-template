@@ -1,0 +1,31 @@
+use std::env;
+
+#[path = "src/origin.rs"]
+mod origin;
+
+fn main() {
+    println!("cargo:rerun-if-env-changed=TAURI_EXAMPLE_API_ORIGIN");
+
+    let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_owned());
+    let raw_origin = env::var("TAURI_EXAMPLE_API_ORIGIN").unwrap_or_else(|_| {
+        if profile == "debug" {
+            "http://localhost:5173".to_owned()
+        } else {
+            panic!(
+                "TAURI_EXAMPLE_API_ORIGIN must be set for a release build and use an HTTPS origin"
+            )
+        }
+    });
+
+    let origin = origin::parse(&raw_origin, profile != "debug")
+        .unwrap_or_else(|error| panic!("TAURI_EXAMPLE_API_ORIGIN: {error}"));
+
+    // The API origin is compiled into the native binary. Transport code must
+    // not accept a runtime or JavaScript-provided replacement.
+    println!("cargo:rustc-env=TAURI_EXAMPLE_API_ORIGIN={origin}");
+    tauri_build::try_build(
+        tauri_build::Attributes::new()
+            .app_manifest(tauri_build::AppManifest::new().commands(&["api_request"])),
+    )
+    .expect("failed to generate Tauri ACL");
+}

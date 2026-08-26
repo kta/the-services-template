@@ -10,6 +10,7 @@
 - サービス専用D1がitemと同期済みorganizationを所有する。
 - adminからorganizationをservice bindingで受信し、notifierをservice bindingで同期呼び出しする。
 - Zod契約、Hono RPC、Drizzle、tenant scope、共有UI tokenの正しい組み合わせを示す。
+- 既存Web SPAをTauri v2 desktop/iOS/Android shellからも使える。native APIはRust bridgeの固定origin/allowlist経由に限定する。
 
 本番へこのサービス自体をdeployしない。新サービス作成時はリポジトリの `new-service` skillでコピーし、名前、binding、DB、契約、entity、テストを置換する。
 
@@ -21,6 +22,9 @@
 | `src/worker/db/schema.ts` | item domainのDrizzle schema |
 | `src/web/main.tsx` / `App.tsx` | SPA entryと代表画面 |
 | `src/web/client.ts` | `hc<AppType>` typed client |
+| `src/web/platform/transport.ts` / `auth/session.ts` | Web fetchとTauri IPCの切替、example dev session（nativeはmemory-only） |
+| `src-tauri/` | Tauri v2 Rust shell、固定API origin、`api_request` command、platform config |
+| `vite.tauri.config.ts` | Worker bundleと分離したnative static bundle |
 | `migrations/` | D1 migration履歴 |
 | `test/` | Workers integration、契約、権限、tenant isolation |
 | `e2e/` | 実workerd + SPA smoke |
@@ -35,6 +39,9 @@
 - organizationはadminが源泉。このD1の行は同期コピーであり、このサービスから運営情報を独自変更しない。
 - 通知は `@app/shared` のinternal helperからNOTIFIER bindingへ同期送信する。通知失敗でdomain writeを巻き戻すかbest-effortにするかは既存仕様を確認し、握りつぶす経路はログと戻り値をテストする。
 - CORSや別API originを追加しない。SPA/APIは同一Worker・同一originを維持する。
+- Tauriのnative requestはRust `api_request` commandだけを使う。`/api/`、GET/POST/PATCH/DELETE、`authorization`/`content-type`以外を許可しない。外部origin、redirect、`set-cookie`をrendererへ渡さない。
+- Tauri release originは`TAURI_EXAMPLE_API_ORIGIN`からbuild-timeに固定し、HTTPS以外を拒否する。secret、runtime設定画面、任意の`VITE_*` originは使わない。
+- WebのsessionStorageは互換のため許可されたdev login fallbackだけで使う。Tauriではaccess tokenとorganization IDをmemory-onlyにし、再起動時の自動復元を実装しない。
 - 色、font、radiusは `@app/ui` とtheme token経由だけを使う。
 
 ## コマンド
@@ -42,6 +49,9 @@
 ```sh
 pnpm --filter @app/example_service dev
 pnpm --filter @app/example_service build
+pnpm --filter @app/example_service build:tauri
+pnpm --filter @app/example_service tauri info
+pnpm --filter @app/example_service tauri dev
 pnpm --filter @app/example_service typecheck
 pnpm --filter @app/example_service test       # Worker/integration coverage (各4指標 80%以上)
 pnpm --filter @app/example_service test:web   # React/jsdom coverage (各4指標 60%以上)
@@ -51,6 +61,7 @@ pnpm --filter @app/example_service e2e
 pnpm --filter @app/example_service cf-typegen
 pnpm --filter @app/example_service db:generate
 pnpm --filter @app/example_service db:migrate:local
+cargo test --manifest-path services/example_service/src-tauri/Cargo.toml
 ```
 
 通常のローカル起動はルートで `make dev/example_service`。adminとのbinding連携も確認する場合は `make dev/all`。
@@ -63,6 +74,7 @@ pnpm --filter @app/example_service db:migrate:local
 - Worker flow: `items.integration.test.ts` でD1結果、status、通知成功/失敗を検証する。
 - 時刻を使う機能: `*.time.test.ts` を分け、実時刻でなく引数注入する。
 - UI変更: `src/web/App.test.tsx`（workspace sign-in/out、loading、validation、create/error/401、表示とaccessibility）と `client.test.ts`（bearer/logout）を対象に応じて先に失敗させ、`test:web` と e2e を実行する。新しい production behavior は frontend も例外なく test-first。
+- Tauri変更: `src/web/platform/transport.test.ts`、`src/web/auth/session.test.ts`、Rustの`origin.rs`/`api.rs` unit testでWeb fallback、native memory session、allowlist、cookie redactionを先に固定する。対応するdesktop/mobile CLI検証も行う。
 - Approved UC/AC: `e2e/smoke.spec.ts` の `@e2e-covers` を各scenario直前に置き、`docs/testing/E2E_TRACEABILITY.md` の100%対応を維持する。
 
 ## コピー時の確認
@@ -72,10 +84,11 @@ pnpm --filter @app/example_service db:migrate:local
 3. admin側のbindingとorganization sync先を人間承認済み設計に合わせる。
 4. `packages/contracts/src/index.ts` と新サービスの `AppType` exportを接続する。
 5. `pnpm -r cf-typegen`、migration、seed、`pnpm check`、対象e2eを通す。
-6. CODEMAP、deploy/infra文書、サービス固有AGENTSを新しい責務へ更新する。
+6. Tauriを使う場合はidentifier、固定API origin、platform overlay、署名方針を人間承認してから設定する。
+7. CODEMAP、deploy/infra文書、サービス固有AGENTSを新しい責務へ更新する。
 
 ## 文書と完了
 
-binding、data ownership、entry、port、deploy方針が変われば `CODEMAP.md` と関連how-toを更新する。package scriptや検証方法を変えればこのファイルも同じ変更で更新する。
+binding、data ownership、entry、port、deploy方針、Tauri shellの責務が変われば `CODEMAP.md` と関連how-toを更新する。package scriptや検証方法を変えればこのファイルも同じ変更で更新する。
 
 完了前に、対象テスト、`pnpm --filter @app/example_service typecheck`、必要なe2e、`pnpm run test:traceability`、最後にルート `pnpm check` をgreenにする。secret、deploy、pushはルートの承認規則に従う。
