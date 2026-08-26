@@ -1,7 +1,16 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
+# SPA + API services started together by `make dev/all`.
+# Add each new domain service here; notifier and ops are Worker-only services.
+DEV_ALL_SERVICES := admin example_service
+
+# Services that may be deployed with `make deploy/<service>`.
+# example_service is the scaffold and must remain excluded.
+DEPLOYABLE_SERVICES := admin notifier ops
+
 ## init: install deps + generate types + apply local DB migrations + seed
+# `pnpm -r` and the services wildcard intentionally discover newly added services.
 init:
 	pnpm install
 	$(MAKE) dev-vars
@@ -20,24 +29,17 @@ dev-vars:
 db/seed/local:
 	pnpm -r --if-present db:seed:local
 
-## dev/example_service: run example_service — SPA + API in one dev server (:5173)
-dev/example_service:
-	pnpm --filter @app/example_service dev
+## dev/<service>: run one service's dev server (SPA + API or Worker)
+dev/%: FORCE
+	pnpm --filter @app/$* dev
 
-## dev/admin: run admin — SPA + API in one dev server (:5174)
-dev/admin:
-	pnpm --filter @app/admin dev
-
-## dev/notifier: run the notifier Worker (sync send API)
-dev/notifier:
-	pnpm --filter @app/notifier dev
-
-## dev/all: run admin (:5174) + example_service (:5173) together — service bindings resolve across dev servers
+## dev/all: run all SPA + API services listed in DEV_ALL_SERVICES together
 dev/all:
-	@echo "starting admin (:5174) + example_service (:5173); Ctrl-C stops both"
+	@echo "starting $(DEV_ALL_SERVICES); Ctrl-C stops all"
 	@trap 'kill 0' EXIT; \
-		pnpm --filter @app/admin dev & \
-		pnpm --filter @app/example_service dev & \
+		for service in $(DEV_ALL_SERVICES); do \
+			$(MAKE) --no-print-directory dev/$$service & \
+		done; \
 		wait
 
 ## db/generate: generate Drizzle migrations from schemas
@@ -72,18 +74,14 @@ lint:
 check:
 	pnpm run check
 
-# NOTE: example_service は雛形なので本番 deploy ターゲットを持たない(CI matrix からも除外)。
-## deploy/admin: build + deploy the admin Worker (SPA + API)
-deploy/admin:
-	pnpm --filter @app/admin run deploy
-
-## deploy/notifier: deploy the notifier Worker (sync send API)
-deploy/notifier:
-	pnpm --filter @app/notifier run deploy
-
-## deploy/ops: deploy the ops Worker (backup + monitoring)
-deploy/ops:
-	pnpm --filter @app/ops run deploy
+# NOTE: example_service は雛形なので DEPLOYABLE_SERVICES に含めない。
+## deploy/<service>: build + deploy one service listed in DEPLOYABLE_SERVICES
+deploy/%: FORCE
+	@case " $(DEPLOYABLE_SERVICES) " in \
+		*" $* "*) ;; \
+		*) echo "error: $* is not in DEPLOYABLE_SERVICES"; exit 2 ;; \
+	esac
+	pnpm --filter @app/$* run deploy
 
 ## worktree/new: isolated worktree for a parallel agent (name=<branch>)
 worktree/new:
@@ -98,6 +96,7 @@ worktree/rm:
 help:
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed 's/## //' | awk -F': ' '{printf "  \033[36m%-26s\033[0m %s\n", $$1, $$2}'
 
-.PHONY: init dev/example_service dev/admin dev/all dev/notifier db/generate db/migrate/local db/migrate/remote db/seed/local \
-	build test typecheck lint check dev-vars deploy/admin deploy/notifier deploy/ops \
-	worktree/new worktree/rm help
+.PHONY: FORCE init dev/all db/generate db/migrate/local db/migrate/remote db/seed/local \
+	build test typecheck lint check dev-vars worktree/new worktree/rm help
+
+FORCE:

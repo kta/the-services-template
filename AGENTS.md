@@ -13,7 +13,7 @@ Cloudflare-only の SDD/TDD モノレポ **テンプレート**。**1 サービ�
 ## セットアップ / コマンド
 - 必要: Node ≥ 22 / pnpm 11（`mise install` でピン）。
 - `make init` — install + `.dev.vars` 生成 + 型生成 + ローカル D1 マイグレーション + seed（admin ユーザー等）。
-- dev: `make dev/example_service`（:5173）/ `make dev/admin`（:5174）/ `make dev/notifier` / `make dev/all`（admin + example_service 併走。service binding が dev サーバ間でも解決される）。**1 コマンドで SPA + Worker**（`@cloudflare/vite-plugin`、実 workerd、proxy 無し）。
+- dev: `make dev/<service>`（サービス単体）/ `make dev/notifier` / `make dev/all`（`Makefile` の `DEV_ALL_SERVICES` に登録した SPA+API サービスを併走。service binding が dev サーバ間でも解決される）。**1 コマンドで SPA + Worker**（`@cloudflare/vite-plugin`、実 workerd、proxy 無し）。
 - DB: スキーマ編集 → `pnpm --filter <pkg> db:generate` → `db:migrate:local`。
 - バインディング / `wrangler.jsonc` 変更後は `pnpm -r cf-typegen`。
 - ターゲット一覧は `make help`。
@@ -85,6 +85,7 @@ Lefthook は開発中の早期フィードバック、CI `verify` は迂回で�
 ## エージェント固有メモ
 - **Claude Code**: 次の場合は **plan mode** で計画してから着手 — ①新サービス追加 ②DB スキーマ変更 ③ライブラリ追加・置換 ④仕様外/横断的なリファクタ ⑤認証・通知・service binding に触れる変更。
 - **リポジトリ内スキル**（`.agents/skills/`）: `check`（`pnpm check` を緑まで）/ `new-service <name>`（サービス雛形）/ `design-select`（デザイン候補を HTML でブラウザ提示→クリックで選択）。Claude Code は `.claude/skills` の symlink から同じスキルを利用する。
+- **新サービス追加時**: root `Makefile` の `DEV_ALL_SERVICES` と `DEPLOYABLE_SERVICES` を更新し、`make init` / `make dev/<service>` / `make dev/all` / `make deploy/<service>` で導線を確認する。root `package.json` の test chain と CI の service matrices も更新する。
 - **新規画面・見た目の大幅変更**では、コードの前に `docs/frontend/DESIGN_RULE.md` のパス 1（トークン計画）をテキストで出し、`design-select` スキルで候補 2〜3 案を見せてから実装する。
 - **新 API は当て推量しない**: Cloudflare は Claude Code の `.mcp.json` または Codex の `.codex/config.toml` にある `cloudflare-docs` MCP、ライブラリ全般は `context7` MCP（**導入している場合**。未導入ならインストール済みパッケージの型定義・公式 docs で確認）。
 - 並行作業は `make worktree/new name=<branch>` / `make worktree/rm name=<branch>`（`.wrangler/state` が worktree ごとに隔離される）。
@@ -94,7 +95,7 @@ Lefthook は開発中の早期フィードバック、CI `verify` は迂回で�
 |---|---|
 | UI を作る・変える | `docs/frontend/DESIGN_RULE.md`（**AI っぽい見た目の禁止事項と 2 パス設計**） |
 | 新機能（挙動が変わる変更） | `docs/spec-workflow/SPEC_WORKFLOW.md` → `specs/<service>/features/<NNN>-<slug>/spec.md` |
-| 新サービス追加 | `specs/README.md` + `.agents/skills/new-service` |
+| 新サービス追加 | `specs/README.md` + `.agents/skills/new-service` + root `Makefile` のサービス一覧 |
 | API 追加 | `docs/api/API_RULE.md` |
 | DB スキーマ変更 | `docs/database/DATABASE_RULE.md` |
 | テスト | `docs/testing/TEST_RULE.md` |

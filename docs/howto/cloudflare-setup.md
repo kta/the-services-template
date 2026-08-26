@@ -16,23 +16,90 @@ pnpm --filter @app/example_service exec wrangler whoami  # Account ID を控え�
 
 wrangler は各サービスの devDependency なので**個別インストール不要**。
 
-## 2. CI 用の API トークン（GitHub Actions で自動デプロイする場合）
+## 2. CI 用の API トークンを発行する
 
-ダッシュボード → My Profile → API Tokens → **Create Token**（ここだけ手作業）。
+GitHub Actions で `main` から本番（`prd`）へ自動デプロイする場合だけ必要である。ブラウザで [API Tokens](https://dash.cloudflare.com/profile/api-tokens) を開き、次の順で作成する。
 
-必要権限: `Workers Scripts:Edit` / `D1:Edit` / `Workers KV Storage:Edit` / `Workers R2 Storage:Edit` / `Account Settings:Read`（**Queues 権限は不要** — 使わない設計）。
+1. **Create Token** → **Edit Cloudflare Workers** を選ぶ。このテンプレートには Worker の CI/CD に必要な標準権限が入るため、空の Custom Token から作らない。
+2. 名前は `github-actions-prd-deploy` のように用途が分かるものにする。
+3. テンプレートの既存権限を残したまま、次の 2 つを追加する。
 
-GitHub Actions の secrets は `gh` で登録する:
+| Resource group | Permission | このテンプレートで必要な理由 |
+|---|---|---|
+| Account | `D1:Edit` | Terraform による D1 作成と、CI でのリモート migration |
+| Account | `Account Rulesets:Read` | Wrangler が配信対象アカウントの ruleset 情報を照会するため |
+
+最終的な権限セットは次のとおり。Cloudflare の画面によって `Edit` が `Write` と表示されることがあるが、同じ書込み権限を指す。
+
+| Resource group | Permission | 用途 |
+|---|---|---|
+| Account | `Account Settings:Read` | Worker 配信時のアカウント情報照会 |
+| Account | `Account Rulesets:Read` | 配信前の ruleset 情報照会 |
+| Account | `D1:Edit` | D1 の作成・更新と migration |
+| Account | `Workers KV Storage:Edit` | Terraform による KV namespace 作成・更新 |
+| Account | `Workers R2 Storage:Edit` | R2 バケットと lifecycle の作成・更新 |
+| Account | `Workers Scripts:Edit` | Worker 本体、static assets、Worker secrets の配信 |
+| Zone | `Workers Routes:Edit` | カスタムドメインを Worker route で接続するときだけ必要（Worker template が付与） |
+| User | `User Details:Read` / `Memberships:Read` | user token を使う Wrangler CI/CD の標準照会（Worker template が付与） |
+
+4. **Account Resources** は、初回設定では **All accounts** を選ぶ。複数アカウントを運用する場合は、動作確認後にデプロイ先の 1 アカウントだけへ絞る。カスタムドメインを使う場合は **Zone Resources** も対象ゾーンに限定する。
+5. **Continue to summary** → 内容を確認 → **Create Token**。表示されたトークンを直ちにコピーする。
+
+トークンの値は発行時に一度しか表示されない。コード、`wrangler.jsonc`、Terraform の state、シェルスクリプトには保存しない。Queues、Workers Analytics、Billing、DNS の権限は、このテンプレートの標準デプロイには不要である。
+
+## 3. GitHub の `prd` Environment に登録する
+
+GitHub リポジトリの **Settings** → **Environments** → **New environment** で `prd` を作成する。必要ならデプロイ前の承認者もこの Environment に設定する。
+
+次に **`prd` Environment の Secrets** として、以下を登録する。
+
+| Secret | 値 |
+|---|---|
+| `CLOUDFLARE_API_TOKEN` | 手順 2 で発行した API トークン |
+| `CLOUDFLARE_ACCOUNT_ID` | `wrangler whoami` で確認した Account ID |
+
+### ターミナルから登録する（推奨）
+
+GitHub CLI でログイン済みであることを確認してから、トークンは対話入力で登録する。トークンをコマンド引数や履歴に残さない。
 
 ```sh
-gh secret set CLOUDFLARE_API_TOKEN     # 値はプロンプトで聞かれる（シェル履歴に残らない）
-gh secret set CLOUDFLARE_ACCOUNT_ID --body "<wrangler whoami で出た Account ID>"
-gh secret list                         # 登録確認
+gh auth status
+gh secret set --repo "OWNER/REPO" --env prd CLOUDFLARE_API_TOKEN
+# プロンプトに API トークンを貼り付けて Enter
+gh secret set --repo "OWNER/REPO" --env prd CLOUDFLARE_ACCOUNT_ID
+# プロンプトに Account ID を貼り付けて Enter
+gh secret list --repo "OWNER/REPO" --env prd
 ```
 
-`--body` に直接値を書くのは Account ID のような非機密のみ。トークンは引数に書かずプロンプト入力（またはパイプ `pbpaste | gh secret set ...`）にする。
+現在のシェルに値を一時的に持たせる場合は、登録直後に必ず消す。値を表示する `echo` は使わない。
 
-## 3. リソースを作る — Terraform か wrangler 単体か
+```sh
+export CF_API_TOKEN=""
+export CF_ACCOUNT_ID=""
+
+print -rn -- "$CF_API_TOKEN" | gh secret set --repo "OWNER/REPO" --env prd CLOUDFLARE_API_TOKEN
+print -rn -- "$CF_ACCOUNT_ID" | gh secret set --repo "OWNER/REPO" --env prd CLOUDFLARE_ACCOUNT_ID
+
+unset CF_API_TOKEN CF_ACCOUNT_ID
+```
+
+`OWNER/REPO` は対象リポジトリに置き換える。同じリポジトリの中で実行する場合は `--repo "OWNER/REPO"` を省略できる。以降に必要となる R2 用キーや Worker runtime secrets は、デプロイ手順の指示に従って同じ `prd` Environment に追加する。
+
+### Terraform state 用の R2 アクセスキーも発行する
+
+上記の `CLOUDFLARE_API_TOKEN` は Cloudflare API（Worker、D1、KV、R2 バケット管理）用である。Terraform のリモート state は S3 互換 API を使うため、**別の R2 API token** が必要になる。
+
+R2 → **Manage R2 API Tokens** → **Create API Token** で、次のように発行する。
+
+| 項目 | 設定 |
+|---|---|
+| Permission | `Object Read & Write` |
+| Bucket scope | Terraform state 用に作成した 1 バケットのみ |
+| GitHub `prd` secrets | `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` |
+
+この token から表示される Access Key ID と Secret Access Key も一度しか表示されない。state バケットの作成時だけは R2 の bucket 管理権限が必要だが、作成後の Terraform backend にはこのバケット限定のアクセスキーを使う。
+
+## 4. リソースを作る — Terraform か wrangler 単体か
 
 **Terraform**（D1 / KV / R2 をまとめて作成。推奨。state 用 R2 バケットが先に必要 → [`../architecture/infra.md`](../architecture/infra.md)）:
 
@@ -52,7 +119,7 @@ pnpm --filter @app/example_service exec wrangler d1 create example_service
 # KV / R2 は wrangler kv namespace create / wrangler r2 bucket create
 ```
 
-## 4. id を wrangler.jsonc に貼る
+## 5. id を wrangler.jsonc に貼る
 
 `services/<name>/wrangler.jsonc` の placeholder を実値に:
 
@@ -75,7 +142,7 @@ pnpm --filter @app/example_service exec wrangler d1 create example_service
 
 貼り替え後は `pnpm -r cf-typegen`。
 
-## 5. secrets → マイグレーション → デプロイ
+## 6. secrets → マイグレーション → デプロイ
 
 ```sh
 openssl rand -hex 32   # 高エントロピー値の生成例
@@ -95,7 +162,7 @@ pnpm --filter @app/admin run db:migrate:remote && pnpm --filter @app/admin run d
 - notifier は `RESEND_API_KEY` 未設定かつ `MAIL_DEV_LOG` 未設定なら**送信が fail close（502）**。`MAIL_FROM` は Resend 検証済みドメインのアドレスに。
 - example_service は雛形なので本番にデプロイしない（CI の deploy matrix 対象外）。
 
-## 6. 費用の話
+## 7. 費用の話
 
 このテンプレートは **Workers Free プランの範囲内**で全機能（Workers / D1 / KV / R2 / Cron / Workflows）が動くよう設計してある。Queues など Paid 限定の機能は使っていない。上限に近づいたときの挙動と設計対処は [`free-tier-limits.md`](./free-tier-limits.md)。
 
