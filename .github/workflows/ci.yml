@@ -34,7 +34,7 @@ jobs:
       - name: Check agent compatibility
         run: bash scripts/check-agent-compat.sh
       - name: Lint + format
-        run: pnpm exec biome check .
+        run: pnpm run lint
       - name: Dependency audit
         run: pnpm run deps:check
       - name: Typecheck

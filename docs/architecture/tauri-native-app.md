@@ -1,5 +1,7 @@
 # admin Tauri ネイティブアプリ設計
 
+この文書は refresh cookie と OS protected store を持つ `services/admin` の設計である。`services/example_service` の雛形向け native shell は refresh API を持たないため、別の memory-only auth 方針を採用する。導入手順と境界は [`../howto/tauri-example-service.md`](../howto/tauri-example-service.md) と [`../../specs/example_service/features/002-tauri-native-app/spec.md`](../../specs/example_service/features/002-tauri-native-app/spec.md) を参照する。
+
 ## 目的と不変条件
 
 `services/admin` の React UI を macOS、iOS、Android のインストール型アプリとして配布する。一方で、業務データ・認証の正典は既存の Cloudflare Worker + D1 のままである。端末に D1、Worker secret、パスワード、長期 access token を複製しない。

@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Minimal API bridge for the example service",
+  "windows": ["main"],
+  "permissions": ["allow-api-request"]
+}

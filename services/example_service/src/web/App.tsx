@@ -1,7 +1,8 @@
 import { CreateItem, type Item } from '@app/contracts'
-import { ANALYTICS_EVENTS, auth, trackEvent } from '@app/shared'
+import { ANALYTICS_EVENTS, trackEvent } from '@app/shared'
 import { Button, Field, Notice, TextInput } from '@app/ui'
 import { type FormEvent, useCallback, useEffect, useState } from 'react'
+import { auth } from './auth/session'
 import { client } from './client'
 
 /*
