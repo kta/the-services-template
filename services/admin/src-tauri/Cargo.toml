@@ -1,0 +1,37 @@
+[package]
+name = "admin"
+version = "0.0.0"
+description = "Admin native shell"
+authors = ["the-services-template"]
+edition = "2021"
+rust-version = "1.88.0"
+build = "build.rs"
+
+[lib]
+name = "admin_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+url = "2.5.8"
+
+[dependencies]
+tauri = { version = "2.11.5", features = [] }
+reqwest = { version = "0.13.4", default-features = true }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+url = "2.5.8"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
+keyring-core = "1.0.0"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+# iOS has no legacy keychain module in this provider. `protected` selects the
+# Apple protected-data keychain accessibility implementation required on iOS.
+apple-native-keyring-store = { version = "1.0.2", features = ["protected"] }
+keyring-core = "1.0.0"
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-native-keyring-store = "1.0.0"
+keyring-core = "1.0.0"

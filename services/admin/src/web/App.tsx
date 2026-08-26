@@ -1,10 +1,19 @@
 import { useEffect, useState } from 'react'
-import { BrowserRouter, Navigate, Outlet, Route, Routes, useLocation } from 'react-router'
+import {
+  BrowserRouter,
+  HashRouter,
+  Navigate,
+  Outlet,
+  Route,
+  Routes,
+  useLocation,
+} from 'react-router'
 import { bootstrap } from './auth/session'
 import { useAuthenticated } from './auth/useSession'
 import { AppShell } from './components/AppShell'
 import { Toaster } from './components/Toaster'
 import { Spinner } from './components/ui'
+import { isTauriRuntime } from './platform/transport'
 import { Invite } from './routes/Invite'
 import { Login } from './routes/Login'
 import { Orgs } from './routes/Orgs'
@@ -15,8 +24,9 @@ import { Orgs } from './routes/Orgs'
  * (招待メールのリンク先)。
  */
 export function App() {
+  const Router = isTauriRuntime() ? HashRouter : BrowserRouter
   return (
-    <BrowserRouter>
+    <Router>
       {/* 全ルート共通のトースト表示点(Login も含む)。 */}
       <Toaster />
       <Routes>
@@ -29,7 +39,7 @@ export function App() {
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-    </BrowserRouter>
+    </Router>
   )
 }
 

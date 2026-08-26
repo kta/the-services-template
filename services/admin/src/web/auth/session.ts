@@ -1,4 +1,5 @@
 import { stretchPassword } from '@app/shared'
+import { platformFetch } from '../platform/transport'
 
 /**
  * admin SPA の認証セッション。
@@ -38,7 +39,7 @@ async function doRefresh(): Promise<boolean> {
   for (let attempt = 0; ; attempt++) {
     let res: Response
     try {
-      res = await fetch('/api/auth/refresh', { method: 'POST' })
+      res = await platformFetch('/api/auth/refresh', { method: 'POST' })
     } catch {
       // ネットワーク断はセッション破棄の根拠にしない — cookie は生きており、
       // 次の試行で復帰できる。ここで setToken(null) するとフォーム入力中の
@@ -123,7 +124,7 @@ export async function bootstrap(): Promise<boolean> {
 
 export async function login(email: string, password: string): Promise<void> {
   const stretched = await stretchPassword(password, email)
-  const res = await fetch('/api/auth/login', {
+  const res = await platformFetch('/api/auth/login', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ email, stretched }),
@@ -145,7 +146,7 @@ export async function acceptInvite(
   const stretched = await stretchPassword(password, email)
   // email も送る: サーバが招待の宛先と突合する(typo のまま受諾すると別 salt の
   // ハッシュが保存され、正しい email でのログインが永久に失敗するため)。
-  const res = await fetch('/api/auth/accept-invite', {
+  const res = await platformFetch('/api/auth/accept-invite', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ token: inviteToken, email, stretched }),
@@ -157,7 +158,7 @@ export async function acceptInvite(
 
 export async function logout(): Promise<void> {
   try {
-    await fetch('/api/auth/logout', { method: 'POST' })
+    await platformFetch('/api/auth/logout', { method: 'POST' })
   } catch {
     // best-effort
   }
@@ -171,7 +172,7 @@ export async function logout(): Promise<void> {
 
 /** dev グラント(AUTH_DEV_GRANT)。admin 実 DB 不在のローカル開発用(role=admin)。 */
 export async function devLogin(organizationId: string): Promise<boolean> {
-  const res = await fetch('/api/auth/token', {
+  const res = await platformFetch('/api/auth/token', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ organizationId, role: 'admin' }),
@@ -209,5 +210,5 @@ export async function authFetch(
 function sendWithToken(input: RequestInfo | URL, init: RequestInit): Promise<Response> {
   const headers = new Headers(init.headers)
   if (accessToken) headers.set('authorization', `Bearer ${accessToken}`)
-  return fetch(input, { ...init, headers })
+  return platformFetch(input, { ...init, headers })
 }

@@ -60,6 +60,7 @@ describe('admin application routes', () => {
     await logout()
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
+    delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
     window.history.replaceState({}, '', '/')
   })
 
@@ -94,6 +95,18 @@ describe('admin application routes', () => {
     const fetch = vi.fn()
     vi.stubGlobal('fetch', fetch)
     visit('/invite?token=invite-token')
+
+    expect(screen.getByLabelText('招待メールの宛先アドレス')).toBeVisible()
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('uses a hash route for the packaged Tauri invitation screen', () => {
+    const fetch = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+    ;(window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {}
+    window.location.hash = '#/invite?token=invite-token'
+
+    render(<App />)
 
     expect(screen.getByLabelText('招待メールの宛先アドレス')).toBeVisible()
     expect(fetch).not.toHaveBeenCalled()

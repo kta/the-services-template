@@ -61,6 +61,8 @@ catalog:
   react-router: ^8.3.0
   '@types/react': ^19.2.18
   '@types/react-dom': ^19.2.4
+  '@tauri-apps/api': ^2.11.0
 
   # Tooling
   '@biomejs/biome': ^2.5.10
+  '@tauri-apps/cli': ^2.11.4

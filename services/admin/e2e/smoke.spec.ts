@@ -27,6 +27,7 @@ function unique(value: string): string {
   return `${value}-${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
 
+// @e2e-covers AC-TAURI-02
 test('未認証はログインへ誘導される', async ({ page }) => {
   await page.goto('/')
   await page.waitForURL(/\/login$/)
