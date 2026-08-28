@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter, Route, Routes } from 'react-router'
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 const state = vi.hoisted(() => {
@@ -19,15 +19,21 @@ vi.mock('../auth/session', () => ({
 
 import { Invite } from './Invite'
 
-function renderInvite(search = '') {
+function renderInvite(suffix = '') {
   return render(
-    <MemoryRouter initialEntries={[`/invite${search}`]}>
+    <MemoryRouter initialEntries={[`/invite${suffix}`]}>
       <Routes>
         <Route path="/invite" element={<Invite />} />
         <Route path="/" element={<p>Home</p>} />
       </Routes>
+      <SearchProbe />
     </MemoryRouter>,
   )
+}
+
+function SearchProbe() {
+  const location = useLocation()
+  return <span data-testid="location-search">{location.search}</span>
 }
 
 describe('Invite', () => {
@@ -68,6 +74,34 @@ describe('Invite', () => {
       ),
     )
     expect(await screen.findByText('Home')).toBeVisible()
+  })
+
+  it('removes the bearer token from router history after capturing it', async () => {
+    renderInvite('?token=invite-token&from=mail')
+
+    await waitFor(() =>
+      expect(screen.getByTestId('location-search')).toHaveTextContent('?from=mail'),
+    )
+    expect(screen.getByRole('button', { name: 'パスワードを設定してはじめる' })).toBeVisible()
+  })
+
+  it('captures a fragment token and removes it from router history', async () => {
+    const user = userEvent.setup()
+    renderInvite('#token=fragment-token&from=mail')
+
+    await waitFor(() => expect(screen.getByTestId('location-search')).toHaveTextContent(''))
+    expect(screen.getByRole('button', { name: 'パスワードを設定してはじめる' })).toBeVisible()
+    await user.type(screen.getByLabelText('招待メールの宛先アドレス'), 'staff@example.com')
+    await user.type(screen.getByLabelText('パスワード（12 文字以上）'), 'long-password')
+    await user.type(screen.getByLabelText('パスワード（確認）'), 'long-password')
+    await user.click(screen.getByRole('button', { name: 'パスワードを設定してはじめる' }))
+    await waitFor(() =>
+      expect(state.acceptInvite).toHaveBeenCalledWith(
+        'fragment-token',
+        'staff@example.com',
+        'long-password',
+      ),
+    )
   })
 
   it('keeps the setup action busy until a valid invitation is accepted', async () => {

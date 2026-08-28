@@ -1,18 +1,30 @@
 /**
- * admin↔ドメイン(example_service)org 同期の日次照合。副作用を注入する純ロジックで、
+ * admin↔ドメイン(example_service)org 同期の hourly 照合。副作用を注入する純ロジックで、
  * scheduled ハンドラと unit テストが同じ関数を使う。ドメイン側のミラーが admin の正と
  * ずれている(欠落・plan/isDisabled/name 相違)org を再 upsert し、ずれがあれば
  * 1 通だけ `ops.sync_drift` を送る。
  */
 
-export type AdminOrgRow = { id: string; name: string; plan: string; isDisabled: boolean }
+export type AdminOrgRow = {
+  id: string
+  name: string
+  plan: string
+  isDisabled: boolean
+  version: number
+}
 
 /** ドメイン側同期行の比較対象フィールド(Organization のサブセット)。 */
-export type DomainOrgRow = { id: string; name: string; plan: string; isDisabled: boolean }
+export type DomainOrgRow = {
+  id: string
+  name: string
+  plan: string
+  isDisabled: boolean
+  version: number
+}
 
 /**
  * 1 回の照合で再 upsert する上限。Workers 無料枠は 1 呼び出し 50 サブリクエストで、
- * 一覧取得 + 通知も同じ枠を使うため余裕を残す。超過分(truncated)は翌日の照合が
+ * 一覧取得 + 通知も同じ枠を使うため余裕を残す。超過分(truncated)は次の照合が
  * 拾う(通知 payload で truncated を報せる)。
  */
 export const MAX_RESYNC_PER_RUN = 40
@@ -51,7 +63,8 @@ export async function reconcileOrgs<A extends AdminOrgRow>(
       !mirror ||
       mirror.plan !== a.plan ||
       mirror.isDisabled !== a.isDisabled ||
-      mirror.name !== a.name
+      mirror.name !== a.name ||
+      mirror.version !== a.version
     if (!mismatched) continue
     drift.push(a.id)
     if (resynced >= MAX_RESYNC_PER_RUN) {

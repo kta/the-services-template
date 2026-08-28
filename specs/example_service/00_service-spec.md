@@ -11,7 +11,7 @@
 | エンティティ | 主な属性 | 備考 |
 |---|---|---|
 | `item` | id(UUID, アプリ生成) / organization_id / title / body / created_at | FK なし・テナントスコープ必須 |
-| `organization`（同期コピー） | id / name / created_at | 源泉は admin。`/api/internal/organizations` で upsert |
+| `organization`（同期コピー） | id / name / plan / is_disabled / synced_at / created_at | 源泉は admin。`/api/internal/organizations` で upsert。`synced_at` が 2 時間を超えた行は有効テナントとして扱わない |
 
 ## API 面（Hono RPC + Zod）
 | メソッド/パス | 認証 | 概要 |
@@ -27,7 +27,7 @@
 ## 非機能・横断
 - 全 item クエリは `organization_id`（JWT の `org`）でスコープ。
 - `POST /api/items` は通知ジョブを notifier の同期送信 API（service binding）へ best-effort POST（`services/notifier`）。
-- 認証: 自前 JWT（HS256）。`/api/auth/token` は dev グラント＝本番前に実認証へ。
+- 認証: 自前 JWT（RS256）。domain Worker は `JWT_PUBLIC_KEY` だけで検証し、`/api/auth/token` の dev グラントはローカル専用 `AUTH_DEV_PRIVATE_KEY` と `AUTH_DEV_GRANT=true` が揃ったときだけ有効。本番前に実認証へ置換する。
 
 ## features
 - [`001-create-item`](./features/001-create-item/spec.md) — item の作成・一覧（実装済み）。

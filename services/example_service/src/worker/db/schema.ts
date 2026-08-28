@@ -1,4 +1,4 @@
-import { index, sqliteTable, text } from 'drizzle-orm/sqlite-core'
+import { index, integer, sqliteTable, text } from 'drizzle-orm/sqlite-core'
 
 // D1 is SQLite. Conventions:
 // - No foreign keys; integrity is enforced in the app layer.
@@ -19,14 +19,19 @@ export const items = sqliteTable(
 
 // Synced copy of organizations (source of truth is the admin domain). Kept
 // here because D1 has no cross-database joins — reconcile in app code.
-// plan / is_disabled are read on every tenant request (requireActiveOrg), so
-// admin-side changes take effect immediately. Nullable on purpose (no DDL
-// defaults per convention; ALTER TABLE ADD COLUMN can't be NOT NULL without
-// one) — the app layer treats null plan as 'free', null is_disabled as '0'.
+// plan / is_disabled are read on every tenant request (requireActiveOrg). The
+// sync timestamp is a lease: if the admin→domain reconciliation stops, the
+// domain fails closed instead of trusting an indefinitely stale enabled row.
+// Legacy rows are backfilled by the generated migrations before the final
+// schema makes the replay fence non-null; incomplete rows are rejected by the
+// app layer rather than receiving a permissive default.
 export const organizations = sqliteTable('organizations', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
-  plan: text('plan'), // 'free' | 'contracted'(null は 'free' 扱い)
-  isDisabled: text('is_disabled'), // '0' | '1'(null は '0' 扱い)
+  plan: text('plan'), // 'free' | 'contracted'
+  isDisabled: text('is_disabled'), // '0' | '1'
+  // Monotonic admin-source revision; stale sync payloads must never win.
+  version: integer('version').notNull(),
+  syncedAt: text('synced_at'), // admin sync receipt time; stale/null rows fail closed
   createdAt: text('created_at').notNull(),
 })

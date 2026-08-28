@@ -1,19 +1,20 @@
 /**
  * サービス間(service binding)内部 API の共有部品。
- * - `internalAuth()`: `x-internal-key` ガード(secret 未設定は fail close)
+ * - `internalAuth(keyNames)`: caller-specific `x-internal-key` ガード(secret 未設定は fail close)
  * - `sendNotification()`: notifier の同期送信 API への best-effort POST
  * 3 サービス以上で同じコードが増殖しないよう、ここが単一ソース。
  */
 import type { NotificationJob } from '@app/contracts'
 import type { MiddlewareHandler } from 'hono'
 
-type InternalEnv = { Bindings: { INTERNAL_KEY: string } }
-
 const enc = new TextEncoder()
+const MIN_INTERNAL_KEY_BYTES = 32
+
+export type NotificationCaller = 'admin' | 'domain' | 'ops'
 
 /**
  * 定数時間比較。`/api/internal/*` は service binding 経由が正規経路だが Worker の
- * 公開 URL からも到達できるため、共有 secret の照合を `!==`(早期 return)にしない。
+ * 公開 URL からも到達できるため、caller-specific secret の照合を `!==`(早期 return)にしない。
  * 長さ不一致の早期 return は長さ以外を漏らさないので許容。
  */
 function timingSafeEqualStr(a: string, b: string): boolean {
@@ -26,14 +27,23 @@ function timingSafeEqualStr(a: string, b: string): boolean {
 }
 
 /**
- * `/api/internal/*` を守る共有キーガード。secret 未設定なら全拒否(fail close —
- * 未設定の env と欠落ヘッダが undefined 同士で一致して素通りするのを防ぐ)。
+ * `/api/internal/*` を守る caller-specific key ガード。受信側が複数の caller を
+ * 持つ場合は key name の配列を渡す。secret 未設定なら全拒否(fail close — 未設定の
+ * env と欠落ヘッダが undefined 同士で一致して素通りするのを防ぐ)。
  */
-export function internalAuth(): MiddlewareHandler<InternalEnv> {
+export function internalAuth<Env extends { Bindings: object }>(
+  keyNames: string | readonly string[],
+): MiddlewareHandler<Env> {
+  const names = Array.isArray(keyNames) ? keyNames : [keyNames]
   return async (c, next) => {
-    const expected = c.env.INTERNAL_KEY
     const got = c.req.header('x-internal-key')
-    if (!expected || !got || !timingSafeEqualStr(got, expected)) {
+    const expectedKeys = names
+      .map((name) => (c.env as Record<string, unknown>)[name])
+      .filter(
+        (value): value is string =>
+          typeof value === 'string' && enc.encode(value).byteLength >= MIN_INTERNAL_KEY_BYTES,
+      )
+    if (!got || !expectedKeys.some((expected) => timingSafeEqualStr(got, expected))) {
       return c.json({ error: 'unauthorized' }, 401)
     }
     await next()
@@ -62,13 +72,15 @@ const NOTIFY_TIMEOUT_MS = 10_000
  * notifier へ NotificationJob を同期 POST する(best-effort)。2xx で true。
  * 失敗しても throw しない — 呼び出し側の本処理を止めないのが規約。
  *
- * **冪等キーの規約**: `job.id` が notifier 側の KV dedupe キー(TTL 24h)。
+ * **冪等キーの規約**: notifier 側で `caller:job.id` が KV の dedupe キー(TTL 24h)、
+ * Resend へはその SHA-256 固定長値を渡す。caller 間の id 衝突は相互に抑制されない。
  * 再検知 Cron など繰り返し発火するものは時間スロットキーを渡すこと
  * (ランダム UUID を毎回渡すと dedupe が効かず連打になる)。
  */
 export async function sendNotification(
   notifier: FetcherLike,
   internalKey: string,
+  caller: NotificationCaller,
   job: NotificationJob,
 ): Promise<boolean> {
   try {
@@ -78,7 +90,11 @@ export async function sendNotification(
     // にだけ渡す(このキャストはその型の穴を局所化するためのもの)。
     const init = {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-internal-key': internalKey },
+      headers: {
+        'content-type': 'application/json',
+        'x-internal-key': internalKey,
+        'x-internal-caller': caller,
+      },
       body: JSON.stringify(job),
       signal: AbortSignal.timeout(NOTIFY_TIMEOUT_MS),
     }

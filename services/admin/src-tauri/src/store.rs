@@ -2,22 +2,39 @@ use std::sync::{Arc, Mutex};
 
 pub type StoreResult<T> = Result<T, String>;
 
+// This value is a deny marker, not a credential. It lets the native session
+// remain signed out across an app restart when keychain deletion fails but a
+// protected write still succeeds.
+const SIGNED_OUT_MARKER: &[u8] = b"__app_signed_out_v1__";
+
 /// Native refresh-cookie persistence boundary. Access JWTs and passwords are
 /// deliberately not represented by this trait.
 pub trait SessionStore: Clone + Send + Sync + 'static {
     fn load(&self) -> StoreResult<Option<String>>;
     fn save(&self, cookie: &str) -> StoreResult<()>;
     fn clear(&self) -> StoreResult<()>;
+
+    /// Persist a deny marker when deleting an existing credential is not
+    /// available. Stores that cannot distinguish a marker may use clear as a
+    /// best-effort fallback.
+    fn mark_signed_out(&self) -> StoreResult<()> {
+        self.clear()
+    }
 }
 
-fn validate_refresh_cookie(cookie: &str) -> StoreResult<()> {
+const MAX_REFRESH_COOKIE_VALUE_BYTES: usize = 512;
+
+pub(crate) fn validate_refresh_cookie(cookie: &str) -> StoreResult<()> {
     let value = cookie
         .strip_prefix("rt=")
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "session store accepts only a non-empty rt cookie".to_owned())?;
-    if value
+    if value.len() > MAX_REFRESH_COOKIE_VALUE_BYTES {
+        return Err("refresh cookie is too large".to_owned());
+    }
+    if !value
         .bytes()
-        .any(|byte| byte.is_ascii_whitespace() || byte == b';')
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
         return Err("refresh cookie contains invalid characters".to_owned());
     }
@@ -63,21 +80,23 @@ impl SessionStore for MemoryStore {
     }
 }
 
-/// Platform adapter. Apple uses Keychain Services and Android uses the
-/// Android-native keyring provider, whose value is encrypted by Android
-/// Keystore. Other targets fail closed instead of silently writing plaintext.
+/// Platform adapter. Release Apple builds use the app-scoped Protected Data
+/// store; unsigned macOS debug builds use the legacy keychain only so local
+/// development remains usable. Android uses the Android-native keyring
+/// provider, whose value is encrypted by Android Keystore. Other targets fail
+/// closed instead of silently writing plaintext.
 #[derive(Clone, Default)]
 pub struct PlatformStore;
 
 #[allow(dead_code)]
-const IOS_ACCESS_POLICY: &str = "when-unlocked-this-device-only";
+const APPLE_ACCESS_POLICY: &str = "when-unlocked-this-device-only";
 
 #[allow(dead_code)]
-fn ios_keychain_modifiers() -> std::collections::HashMap<&'static str, &'static str> {
-    std::collections::HashMap::from([("access-policy", IOS_ACCESS_POLICY)])
+fn apple_protected_modifiers() -> std::collections::HashMap<&'static str, &'static str> {
+    std::collections::HashMap::from([("access-policy", APPLE_ACCESS_POLICY)])
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", debug_assertions))]
 fn native_entry() -> StoreResult<keyring_core::Entry> {
     use apple_native_keyring_store::keychain::Store;
     use keyring_core::api::CredentialStoreApi;
@@ -93,6 +112,21 @@ fn native_entry() -> StoreResult<keyring_core::Entry> {
         .map_err(|error| format!("keychain entry unavailable: {error}"))
 }
 
+#[cfg(all(target_os = "macos", not(debug_assertions)))]
+fn native_entry() -> StoreResult<keyring_core::Entry> {
+    use apple_native_keyring_store::protected::Store;
+    use keyring_core::api::CredentialStoreApi;
+
+    let store = Store::new().map_err(|error| format!("protected keychain unavailable: {error}"))?;
+    store
+        .build(
+            "com.kta.admin",
+            "refresh-cookie",
+            Some(&apple_protected_modifiers()),
+        )
+        .map_err(|error| format!("protected keychain entry unavailable: {error}"))
+}
+
 #[cfg(target_os = "ios")]
 fn native_entry() -> StoreResult<keyring_core::Entry> {
     use apple_native_keyring_store::protected::Store;
@@ -103,7 +137,7 @@ fn native_entry() -> StoreResult<keyring_core::Entry> {
         .build(
             "com.kta.admin",
             "refresh-cookie",
-            Some(&ios_keychain_modifiers()),
+            Some(&apple_protected_modifiers()),
         )
         .map_err(|error| format!("protected keychain entry unavailable: {error}"))
 }
@@ -134,16 +168,22 @@ impl SessionStore for PlatformStore {
         #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
         {
             match native_entry()?.get_secret() {
-                Ok(secret) => String::from_utf8(secret)
-                    .map(Some)
-                    .map_err(|_| "stored refresh cookie is not valid UTF-8".to_owned()),
-                Err(error) if matches!(error, keyring_core::Error::NoEntry) => Ok(None),
+                Ok(secret) => {
+                    if secret == SIGNED_OUT_MARKER {
+                        return Ok(None);
+                    }
+                    let cookie = String::from_utf8(secret)
+                        .map_err(|_| "stored refresh cookie is not valid UTF-8".to_owned())?;
+                    validate_refresh_cookie(&cookie)?;
+                    Ok(Some(cookie))
+                }
+                Err(keyring_core::Error::NoEntry) => Ok(None),
                 Err(error) => Err(format!("session load failed: {error}")),
             }
         }
         #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "android")))]
         {
-            native_entry().map(|never| never)
+            Err("protected session storage is unavailable on this target".to_owned())
         }
     }
 
@@ -166,8 +206,25 @@ impl SessionStore for PlatformStore {
         {
             match native_entry()?.delete_credential() {
                 Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
-                Err(error) => Err(format!("session clear failed: {error}")),
+                Err(error) => self.mark_signed_out().map_err(|marker_error| {
+                    format!(
+                        "session clear failed: {error}; signed-out marker failed: {marker_error}"
+                    )
+                }),
             }
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "android")))]
+        {
+            native_entry()
+        }
+    }
+
+    fn mark_signed_out(&self) -> StoreResult<()> {
+        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
+        {
+            native_entry()?
+                .set_secret(SIGNED_OUT_MARKER)
+                .map_err(|error| format!("session signed-out marker failed: {error}"))
         }
         #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "android")))]
         {
@@ -178,7 +235,7 @@ impl SessionStore for PlatformStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{ios_keychain_modifiers, MemoryStore, SessionStore, IOS_ACCESS_POLICY};
+    use super::{apple_protected_modifiers, MemoryStore, SessionStore, APPLE_ACCESS_POLICY};
 
     #[test]
     fn memory_store_round_trips_only_refresh_cookie() {
@@ -193,7 +250,16 @@ mod tests {
     #[test]
     fn memory_store_rejects_values_that_are_not_refresh_cookie_pairs() {
         let store = MemoryStore::default();
-        for value in ["password", "access-token", "refresh=secret", "rt="] {
+        for value in [
+            "password",
+            "access-token",
+            "refresh=secret",
+            "rt=",
+            "rt=with space",
+            "rt=with:semicolon;",
+            "rt=with/slash",
+            "rt=with+plus",
+        ] {
             assert!(
                 store.save(value).is_err(),
                 "accepted sensitive value: {value}"
@@ -202,10 +268,17 @@ mod tests {
     }
 
     #[test]
-    fn ios_keychain_uses_this_device_only_accessibility_policy() {
+    fn memory_store_rejects_overlong_refresh_cookie_values() {
+        let store = MemoryStore::default();
+        assert!(store.save(&format!("rt={}", "a".repeat(513))).is_err());
+        assert!(store.save(&format!("rt={}", "a".repeat(512))).is_ok());
+    }
+
+    #[test]
+    fn apple_protected_store_uses_this_device_only_accessibility_policy() {
         assert_eq!(
-            ios_keychain_modifiers().get("access-policy"),
-            Some(&IOS_ACCESS_POLICY)
+            apple_protected_modifiers().get("access-policy"),
+            Some(&APPLE_ACCESS_POLICY)
         );
     }
 }

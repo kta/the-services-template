@@ -2,18 +2,24 @@ import type { NotificationJob } from '@app/contracts'
 
 // Provider-agnostic sender interface (swap implementations per environment).
 export interface Sender {
-  send(job: NotificationJob): Promise<void>
+  /**
+   * The caller-scoped key is mandatory. `NotificationJob.id` is only unique
+   * within a caller, so using it as a provider key would allow unrelated
+   * callers to suppress one another's messages.
+   */
+  send(job: NotificationJob, idempotencyKey: string): Promise<void>
 }
 
 /**
  * dev 専用: メールを送らずログに出す。**明示オプトイン(MAIL_DEV_LOG=true)でのみ
  * 選ばれる** — RESEND_API_KEY 忘れの本番が黙ってこれに落ちると、招待が「送信済み」
  * と報告されながら誰にも届かず、しかも payload の acceptUrl(ワンタイム資格情報)が
- * 観測ログに平文で残る。dev では acceptUrl をログから拾えるのが利便なので全文を出す。
+ * 観測ログに平文で残る。LogSender でも payload は出さず、監査に必要な種別と job id
+ * だけを記録する。
  */
 export class LogSender implements Sender {
-  async send(job: NotificationJob): Promise<void> {
-    console.log(`[notify] ${job.type} → ${job.to}`, job.payload)
+  async send(job: NotificationJob, _idempotencyKey: string): Promise<void> {
+    console.log(`[notify] type=${job.type} id=${job.id}`)
   }
 }
 
@@ -21,6 +27,7 @@ export class LogSender implements Sender {
 // the `from` domain to be verified in your account, so prod must set MAIL_FROM to
 // a verified operational domain (see docs/howto/deploy.md).
 const DEFAULT_MAIL_FROM = 'notifications@example.com'
+const RESEND_REQUEST_TIMEOUT_MS = 10_000
 
 /**
  * 種別ごとの件名と本文。**受信者が読んで行動できる文面**にする — JSON をそのまま
@@ -64,6 +71,11 @@ export function formatJob(job: NotificationJob): { subject: string; text: string
         subject: '[ops] 死活監視: 応答異常',
         text: `ヘルスチェックに失敗したサービスがあります。詳細:\n\n${detail()}`,
       }
+    case 'ops.monitor_failed':
+      return {
+        subject: '[ops] 監視処理の取得失敗',
+        text: `監視データの取得自体に失敗しました。監視が正常に完了していないため確認してください。詳細:\n\n${detail()}`,
+      }
     case 'ops.sync_drift':
       return {
         subject: '[ops] org 同期ドリフト検知',
@@ -92,7 +104,13 @@ export class ResendSender implements Sender {
     this.from = from || DEFAULT_MAIL_FROM
   }
 
-  async send(job: NotificationJob): Promise<void> {
+  async send(job: NotificationJob, idempotencyKey: string): Promise<void> {
+    if (idempotencyKey.trim().length === 0) {
+      throw new Error('idempotency_key_required')
+    }
+    if (!/^[\x21-\x7e]{1,256}$/.test(idempotencyKey)) {
+      throw new Error('idempotency_key_invalid')
+    }
     const { subject, text } = formatJob(job)
     const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
@@ -100,9 +118,11 @@ export class ResendSender implements Sender {
         authorization: `Bearer ${this.apiKey}`,
         'content-type': 'application/json',
         // Lets Resend dedupe if the consumer redelivers (at-least-once).
-        'idempotency-key': job.id,
+        'idempotency-key': idempotencyKey,
       },
       body: JSON.stringify({ from: this.from, to: job.to, subject, text }),
+      redirect: 'error',
+      signal: AbortSignal.timeout(RESEND_REQUEST_TIMEOUT_MS),
     })
     if (!res.ok) throw new Error(`resend failed: ${res.status}`)
   }
@@ -115,11 +135,17 @@ export class ResendSender implements Sender {
  * 落ちて送信成功を偽装する」事故を塞ぐ。
  */
 export function pickSender(env: {
+  APP_ENV?: string
   RESEND_API_KEY?: string
   MAIL_FROM?: string
   MAIL_DEV_LOG?: string
 }): Sender {
   if (env.RESEND_API_KEY) return new ResendSender(env.RESEND_API_KEY, env.MAIL_FROM)
-  if (env.MAIL_DEV_LOG === 'true') return new LogSender()
+  if (env.MAIL_DEV_LOG === 'true') {
+    if (env.APP_ENV !== 'development') {
+      throw new Error('MAIL_DEV_LOG is development-only')
+    }
+    return new LogSender()
+  }
   throw new Error('no_sender_configured (set RESEND_API_KEY, or MAIL_DEV_LOG=true for dev)')
 }

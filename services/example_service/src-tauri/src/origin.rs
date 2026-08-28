@@ -1,7 +1,9 @@
 use url::{Origin, Url};
 
+const APPROVED_RELEASE_ORIGINS: [&str; 1] = ["https://example.example.com"];
+
 /// Parse and canonicalize the API origin embedded into the native binary.
-/// Debug accepts only HTTP loopback; release accepts only HTTPS.
+/// Debug accepts only HTTP loopback; release accepts one exact HTTPS origin.
 pub fn parse(raw: &str, release: bool) -> Result<String, String> {
     let url = Url::parse(raw).map_err(|error| format!("invalid API origin: {error}"))?;
     let has_userinfo_delimiter = raw
@@ -41,14 +43,82 @@ pub fn parse(raw: &str, release: bool) -> Result<String, String> {
     }
 
     match url.origin() {
-        Origin::Tuple(_, _, _) => Ok(url.origin().ascii_serialization()),
+        Origin::Tuple(_, _, _) => {
+            let canonical = url.origin().ascii_serialization();
+            if release && !APPROVED_RELEASE_ORIGINS.contains(&canonical.as_str()) {
+                return Err("release API origin is not approved for this application".to_owned());
+            }
+            Ok(canonical)
+        }
         Origin::Opaque(_) => Err("API origin must have a network authority".to_owned()),
     }
 }
 
+/// Keep top-level WebView navigation inside the Tauri asset origin. In debug,
+/// the one exact loopback Vite origin compiled by build.rs is also allowed.
+/// API requests do not use WebView navigation; they go through the Rust
+/// bridge, so the production API origin is intentionally not a navigable page.
+#[allow(dead_code)]
+pub fn navigation_allowed(url: &Url, debug_origin: &str) -> bool {
+    let local_asset = (url.scheme() == "tauri" && url.host_str() == Some("localhost"))
+        || (matches!(url.scheme(), "http" | "https")
+            && url.host_str() == Some("tauri.localhost")
+            && url.port().is_none());
+    if local_asset && url.username().is_empty() && url.password().is_none() && url.port().is_none()
+    {
+        return true;
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        url.username().is_empty()
+            && url.password().is_none()
+            && parse(debug_origin, false)
+                .map(|origin| url.origin().ascii_serialization() == origin)
+                .unwrap_or(false)
+    }
+
+    #[cfg(not(debug_assertions))]
+    false
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse;
+    use super::{navigation_allowed, parse};
+
+    #[test]
+    fn navigation_allows_only_the_embedded_app_or_debug_origin() {
+        for raw in [
+            "tauri://localhost/",
+            "http://tauri.localhost/",
+            "https://tauri.localhost/",
+            "http://localhost:5173/items",
+        ] {
+            assert!(
+                navigation_allowed(
+                    &url::Url::parse(raw).unwrap(),
+                    env!("TAURI_EXAMPLE_API_ORIGIN")
+                ),
+                "rejected app navigation: {raw}"
+            );
+        }
+        for raw in [
+            "https://attacker.example/",
+            "https://example.example.com/",
+            "http://localhost:5174/",
+            "http://tauri.localhost:8443/",
+            "https://user:pass@tauri.localhost/",
+            "http://user:pass@localhost:5173/",
+        ] {
+            assert!(
+                !navigation_allowed(
+                    &url::Url::parse(raw).unwrap(),
+                    env!("TAURI_EXAMPLE_API_ORIGIN")
+                ),
+                "accepted external navigation: {raw}"
+            );
+        }
+    }
 
     #[test]
     fn accepts_localhost_debug_origin_without_a_trailing_slash() {
@@ -61,14 +131,16 @@ mod tests {
     #[test]
     fn accepts_https_release_origin() {
         assert_eq!(
-            parse("https://example.test", true).unwrap(),
-            "https://example.test"
+            parse("https://example.example.com", true).unwrap(),
+            "https://example.example.com"
         );
     }
 
     #[test]
     fn rejects_release_http_and_debug_remote_origins() {
         assert!(parse("http://example.test", true).is_err());
+        assert!(parse("https://example.test", true).is_err());
+        assert!(parse("https://example.example.com:8443", true).is_err());
         assert!(parse("http://192.0.2.10:5173", false).is_err());
     }
 

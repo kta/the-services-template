@@ -7,7 +7,19 @@ export default defineConfig({
       wrangler: { configPath: './wrangler.jsonc' },
       miniflare: {
         // wrangler vars から機密を撤去したぶん、テストは自前で dev 値を供給する
-        bindings: { INTERNAL_KEY: 'dev-internal-key', D1_EXPORT_API_TOKEN: 'dev-d1-export-token' },
+        bindings: {
+          OPS_TO_NOTIFIER_KEY: 'dev-ops-to-notifier-key',
+          D1_EXPORT_API_TOKEN: 'dev-d1-export-token',
+          R2_POLICY_CHECK_API_TOKEN: 'dev-r2-policy-check-token',
+          APP_ENV: 'development',
+          OPS_ALERT_EMAIL: 'ops@example.com',
+          // Keep tests independent from the intentionally invalid production
+          // placeholders in wrangler.jsonc. These are valid-shaped fixtures so
+          // metadata binding checks exercise the success path as well.
+          CF_ACCOUNT_ID: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          ADMIN_DB_ID: '12345678-1234-4234-8234-123456789abc',
+          BACKUP_BUCKET_NAME: 'app-backups',
+        },
         // Stub the cross-service bindings so the isolate starts; tests spy on
         // env.NOTIFIER.fetch / env.ADMIN.fetch to assert calls.
         serviceBindings: {

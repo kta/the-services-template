@@ -29,6 +29,27 @@
       "when": 1784295107222,
       "tag": "0003_cultured_gressill",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1787804088339,
+      "tag": "0004_solid_nightcrawler",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1787807172401,
+      "tag": "0005_chief_vance_astro",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1787807295988,
+      "tag": "0006_equal_warhawk",
+      "breakpoints": true
     }
   ]
 }

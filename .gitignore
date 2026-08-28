@@ -3,6 +3,9 @@ node_modules/
 
 # Build output
 dist/
+production-worker-manifest.json
+production-worker-bundles.tar.gz
+production-bootstrap-worker-bundles.tar.gz
 
 # Cloudflare / Wrangler
 .wrangler/
@@ -14,6 +17,12 @@ dist/
 .env
 .env.*
 !.env.*.example
+
+# Terraform inputs/state may contain account identifiers or credentials.
+*.tfvars
+*.tfvars.json
+*.tfstate
+*.tfstate.*
 
 # Generated worker binding types
 worker-configuration.d.ts

@@ -1,13 +1,13 @@
 /**
  * 認証コアの**時刻依存**ふるまいを、実時刻に頼らず固定時刻(`AuthConfig.now`)で
- * 検証する。実 D1 + 実 KV(workerd)。
+ * 検証する。実 D1(workerd)。
  *
  * ここで守りたい不変条件:
  *  - access/refresh の寿命が定数どおり(勝手に伸びない・縮まない)
- *  - refresh は期限ちょうどまで有効、1 秒でも過ぎたら 401
+ *  - refresh は期限の直前まで有効、期限ちょうどから 401
  *  - ローテーション猶予は「ちょうど 30 秒」まで多タブ競合、超えたら盗難扱いで全 revoke
  *  - 明示ログアウト(revoke)済みトークンには猶予が無い
- *  - 招待は 72h ちょうどまで有効
+ *  - 招待は期限の直前まで有効、72h ちょうどから 410
  *  - ロックアウトは email+IP 単位で、成功すると解除される
  *
  * integration テスト(admin.integration.test.ts)は HTTP 経路の代表ケースを見る。
@@ -19,6 +19,7 @@ import { ACCESS_TTL_SECONDS, hashStretched, hashToken, REFRESH_TTL_SECONDS } fro
 import { and, eq } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/d1'
 import { beforeEach, describe, expect, it } from 'vitest'
+import { JWT_TEST_PRIVATE_KEY } from '../../../packages/shared/test/jwt-keys'
 import {
   type AuthDeps,
   acceptInvite,
@@ -32,7 +33,6 @@ import {
 import { invitations, organizations, refreshTokens, users } from '../src/worker/db/schema'
 
 const PEPPER = 'dev-auth-pepper-change-me'
-const JWT_SECRET = 'dev-jwt-secret-change-me'
 /** 基準時刻(固定)。2026-07-10T00:00:00Z。 */
 const T0 = 1_783_641_600
 const INVITE_TTL_SECONDS = 72 * 60 * 60
@@ -42,7 +42,12 @@ const db = () => drizzle(env.DB)
 
 /** 固定時刻 `now` の deps を作る。 */
 function depsAt(now: number): AuthDeps {
-  return { db: db(), kv: env.AUTH_RL as never, pepper: PEPPER, jwtSecret: JWT_SECRET, now }
+  return {
+    db: db(),
+    pepper: PEPPER,
+    jwtPrivateKey: JWT_TEST_PRIVATE_KEY,
+    now,
+  }
 }
 
 /** JWT の payload を署名検証せずに読む(期限切れトークンも観測したいため)。 */
@@ -65,6 +70,7 @@ async function seedUser(opts: { email: string; orgDisabled?: boolean } = { email
       plan: 'free',
       isDisabled: opts.orgDisabled ? '1' : '0',
       isOperator: '0',
+      version: 1,
       createdAt: iso(T0),
     })
   await db()
@@ -112,18 +118,33 @@ describe('セッション発行の寿命(定数どおりか)', () => {
 })
 
 describe('refresh の有効期限の境界', () => {
-  it('期限ちょうど(expiresAt == now)はまだ有効', async () => {
+  it('期限の 1 秒前は有効', async () => {
     await seedUser({ email: 'exp-edge@org.test' })
     const first = await login(depsAt(T0), { email: 'exp-edge@org.test', stretched: STRETCHED })
     if (!first.ok) throw new Error('login failed')
 
-    const out = await refresh(depsAt(T0 + REFRESH_TTL_SECONDS), {
+    const out = await refresh(depsAt(T0 + REFRESH_TTL_SECONDS - 1), {
       refreshToken: first.response.refreshToken,
     })
     expect(out.ok).toBe(true)
   })
 
-  it('期限を 1 秒でも過ぎたら expired_token(401)', async () => {
+  it('期限ちょうど(expiresAt == now)から expired_token(401)', async () => {
+    await seedUser({ email: 'expired-edge@org.test' })
+    const first = await login(depsAt(T0), { email: 'expired-edge@org.test', stretched: STRETCHED })
+    if (!first.ok) throw new Error('login failed')
+
+    const out = await refresh(depsAt(T0 + REFRESH_TTL_SECONDS), {
+      refreshToken: first.response.refreshToken,
+    })
+    expect(out.ok).toBe(false)
+    if (!out.ok) {
+      expect(out.status).toBe(401)
+      expect(out.error).toBe('expired_token')
+    }
+  })
+
+  it('期限を 1 秒過ぎても expired_token(401)', async () => {
     await seedUser({ email: 'expired@org.test' })
     const first = await login(depsAt(T0), { email: 'expired@org.test', stretched: STRETCHED })
     if (!first.ok) throw new Error('login failed')
@@ -212,6 +233,31 @@ describe('ローテーション猶予(多タブ競合 vs 盗難)の境界', () =
     expect(out.ok).toBe(false)
     if (!out.ok) expect(out.error).toBe('token_reuse')
   })
+
+  it('同じ refresh token の同時ローテーションは成功 1 件・後継 1 件だけ', async () => {
+    await seedUser({ email: 'concurrent-rotation@org.test' })
+    const first = await login(depsAt(T0), {
+      email: 'concurrent-rotation@org.test',
+      stretched: STRETCHED,
+    })
+    if (!first.ok) throw new Error('login failed')
+
+    const outcomes = await Promise.all(
+      Array.from({ length: 2 }, () =>
+        refresh(depsAt(T0 + 10), { refreshToken: first.response.refreshToken }),
+      ),
+    )
+    expect(outcomes.filter((outcome) => outcome.ok)).toHaveLength(1)
+    expect(
+      outcomes.filter((outcome) => !outcome.ok && outcome.error === 'rotation_race'),
+    ).toHaveLength(1)
+
+    const rows = await db().select().from(refreshTokens)
+    const related = rows.filter((row) => row.userId !== '')
+    expect(related).toHaveLength(2)
+    expect(related.filter((row) => row.rotatedTo !== null)).toHaveLength(1)
+    expect(related.filter((row) => row.rotatedTo === null)).toHaveLength(1)
+  })
 })
 
 describe('ローテーション時の期限切れ行の掃除(認証ホットパスの rows_read 対策)', () => {
@@ -256,6 +302,7 @@ describe('招待の有効期限(72h)の境界', () => {
         plan: 'free',
         isDisabled: '0',
         isOperator: '0',
+        version: 1,
         createdAt: iso(T0),
       })
     await db()
@@ -282,10 +329,10 @@ describe('招待の有効期限(72h)の境界', () => {
     return { token, orgId }
   }
 
-  it('期限ちょうど(72h 後)はまだ受諾できる', async () => {
+  it('期限の 1 秒前は受諾できる', async () => {
     const expiresAt = T0 + INVITE_TTL_SECONDS
     const { token } = await seedInvite('inv-edge@org.test', expiresAt)
-    const out = await acceptInvite(depsAt(expiresAt), {
+    const out = await acceptInvite(depsAt(expiresAt - 1), {
       token,
       email: 'inv-edge@org.test',
       stretched: STRETCHED,
@@ -293,12 +340,42 @@ describe('招待の有効期限(72h)の境界', () => {
     expect(out.ok).toBe(true)
   })
 
-  it('1 秒過ぎたら 410 invite_expired', async () => {
+  it('期限ちょうど(72h 後)から 410 invite_expired', async () => {
+    const expiresAt = T0 + INVITE_TTL_SECONDS
+    const { token } = await seedInvite('inv-expired-edge@org.test', expiresAt)
+    const out = await acceptInvite(depsAt(expiresAt), {
+      token,
+      email: 'inv-expired-edge@org.test',
+      stretched: STRETCHED,
+    })
+    expect(out.ok).toBe(false)
+    if (!out.ok) {
+      expect(out.status).toBe(410)
+      expect(out.error).toBe('invite_expired')
+    }
+  })
+
+  it('1 秒過ぎても 410 invite_expired', async () => {
     const expiresAt = T0 + INVITE_TTL_SECONDS
     const { token } = await seedInvite('inv-late@org.test', expiresAt)
     const out = await acceptInvite(depsAt(expiresAt + 1), {
       token,
       email: 'inv-late@org.test',
+      stretched: STRETCHED,
+    })
+    expect(out.ok).toBe(false)
+    if (!out.ok) {
+      expect(out.status).toBe(410)
+      expect(out.error).toBe('invite_expired')
+    }
+  })
+
+  it('期限切れの招待は同時受諾でも確定しない', async () => {
+    const expiresAt = T0 + INVITE_TTL_SECONDS
+    const { token } = await seedInvite('inv-expired-race@org.test', expiresAt)
+    const out = await acceptInvite(depsAt(expiresAt), {
+      token,
+      email: 'inv-expired-race@org.test',
       stretched: STRETCHED,
     })
     expect(out.ok).toBe(false)
@@ -334,6 +411,22 @@ describe('招待の有効期限(72h)の境界', () => {
     })
     expect(second.ok).toBe(false)
     if (!second.ok) expect(second.error).toBe('invite_expired')
+  })
+
+  it('同一秒の並行受諾でも一方だけが password と session を確定する', async () => {
+    const { token } = await seedInvite('inv-race@org.test', T0 + INVITE_TTL_SECONDS)
+    const input = {
+      token,
+      email: 'inv-race@org.test',
+      stretched: STRETCHED,
+    }
+    const results = await Promise.all([
+      acceptInvite(depsAt(T0 + 120), input),
+      acceptInvite(depsAt(T0 + 120), input),
+    ])
+
+    expect(results.filter((result) => result.ok)).toHaveLength(1)
+    expect(results.filter((result) => !result.ok)).toHaveLength(1)
   })
 
   it('期限内でも email が招待と違えば 400 email_mismatch(アカウント破壊の防止)', async () => {
@@ -441,5 +534,20 @@ describe('ログインのロックアウト(email+IP 単位)', () => {
       ip: '203.0.113.7',
     })
     expect(withIp.ok).toBe(true)
+  })
+
+  it('並行した失敗も原子的に数え、5 回を超えて検証処理を通さない', async () => {
+    await seedUser({ email: 'lock-concurrent@org.test' })
+    const outcomes = await Promise.all(
+      Array.from({ length: MAX_LOGIN_FAILURES + 3 }, () =>
+        login(depsAt(T0), {
+          email: 'lock-concurrent@org.test',
+          stretched: 'WRONG',
+          ip: '192.0.2.44',
+        }),
+      ),
+    )
+    expect(outcomes.filter((out) => !out.ok && out.status === 401)).toHaveLength(MAX_LOGIN_FAILURES)
+    expect(outcomes.filter((out) => !out.ok && out.status === 429)).toHaveLength(3)
   })
 })

@@ -15,10 +15,10 @@
 - Tauri v2 の desktop / iOS / Android 用 shell と設定を持つ。
 - Tauri 用静的 bundle は既存 Worker dev bundle と分離し、相対 asset で読み込む。
 - native request は Rust command 経由とし、`/api/` path、GET/POST/PATCH/DELETE、Authorization/Content-Type のみを許可する。
-- release build は HTTPS の compile-time API origin を要求し、debug build は localhost / loopback のみ許可する。
+- release build は HTTPS の compile-time API origin を要求し、debug build は localhost / loopback のみ許可する。Vite の `TAURI_DEV_HOST` は dev server/HMR の到達性だけを変え、Rust の API origin allowlist を広げない。
 - Tauri access token は memory-only とし、アプリ再起動後はログイン画面から開始する。
-- Web の relative fetch、sessionStorage、既存の `AUTH_DEV_GRANT` 認証契約を壊さない。
-- admin の認証実装、example_service の API / DB / 本番デプロイ範囲は変更しない。
+- Web の relative fetch、sessionStorage、既存の `AUTH_DEV_GRANT` 認証 API 契約を壊さない。dev grant の署名鍵はローカル専用 `AUTH_DEV_PRIVATE_KEY` とする。
+- admin の認証 route、example_service の API / DB / 本番デプロイ範囲は変更しない。access JWT の RS256 鍵境界は横断仕様に従い、domain Worker に `JWT_PRIVATE_KEY` を置かない。
 
 ## Native Acceptance Requirements
 

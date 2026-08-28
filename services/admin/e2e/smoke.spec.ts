@@ -13,7 +13,9 @@ async function mintAdminToken(request: APIRequestContext, organizationId: string
   const res = await request.post('/api/auth/token', {
     data: { organizationId, role: 'admin' },
   })
-  expect(res.ok()).toBeTruthy()
+  if (!res.ok()) {
+    throw new Error(`dev token grant failed: ${res.status()} ${await res.text()}`)
+  }
   return ((await res.json()) as { token: string }).token
 }
 
@@ -24,7 +26,7 @@ async function signIn(page: Page, token: string): Promise<void> {
 }
 
 function unique(value: string): string {
-  return `${value}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  return `${value}-${crypto.randomUUID()}`
 }
 
 // @e2e-covers AC-TAURI-02
@@ -71,11 +73,14 @@ test('組織作成 → notifier unavailable fallback → プラン切替 → 無
   expect(response.status()).toBe(201)
   const invitation = (await response.json()) as { emailed: boolean; acceptUrl?: string }
   expect(invitation.emailed).toBe(false)
-  expect(invitation.acceptUrl).toMatch(/^http:\/\/localhost:4174\/invite\?token=/)
+  const acceptUrl = new URL(invitation.acceptUrl ?? '')
+  expect(`${acceptUrl.origin}${acceptUrl.pathname}`).toBe('http://localhost:4174/invite')
+  expect(acceptUrl.search).toBe('')
+  expect(new URLSearchParams(acceptUrl.hash.slice(1)).get('token')).toMatch(/^\S+$/)
   await expect(inviteDialog.getByRole('alert')).toContainText(
     'メール送信に失敗しました。以下のリンクを手動で共有してください',
   )
-  await expect(inviteDialog.getByText(invitation.acceptUrl ?? '', { exact: true })).toBeVisible()
+  await expect(inviteDialog.getByText(/http:\/\/localhost:4174\/invite#token=/)).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(inviteDialog).toBeVisible()
   await inviteDialog.getByRole('button', { name: '閉じる', exact: true }).click()
