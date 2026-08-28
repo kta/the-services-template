@@ -1,7 +1,8 @@
 import { cp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const root = new URL('..', import.meta.url).pathname
+const root = fileURLToPath(new URL('..', import.meta.url))
 const androidRoot = join(root, 'services/admin/src-tauri/gen/android')
 const configPath = join(root, 'services/admin/src-tauri/tauri.conf.json')
 const config = JSON.parse(await readFile(configPath, 'utf8'))

@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - 日本語の既存リポジトリ規約、SDD/TDD、Zod/Hono RPC、Cloudflare-only のサービス境界を維持する。
-- example_service の Worker API、D1 schema、認証契約、production deploy matrix は変更しない。
+- example_service の Worker API、D1 schema、認証契約、production deploy chain には変更を加えない。
 - raw fetch は platform transport に限定し、Tauri capability は `api_request` のみとする。
 - release origin は HTTPS のみ、secret や API key は追加しない。
 - コミット、push、deploy は行わない。

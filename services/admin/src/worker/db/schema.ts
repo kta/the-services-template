@@ -1,4 +1,4 @@
-import { index, sqliteTable, text } from 'drizzle-orm/sqlite-core'
+import { index, integer, sqliteTable, text } from 'drizzle-orm/sqlite-core'
 
 // admin D1 は認証・組織(テナント)・プランの源泉。
 // 規約: FK は宣言しない / ID はアプリ生成(crypto.randomUUID)/ DDL DEFAULT 禁止
@@ -15,6 +15,9 @@ export const organizations = sqliteTable('organizations', {
   // /api/organizations* 等の管理 API を使える(テナント admin は不可)。
   // 既定 '0' はアプリ層で設定(DDL DEFAULT 禁止の規約)。
   isOperator: text('is_operator').notNull(), // '0' | '1'
+  // Admin source revision. D1 migrations backfill legacy rows to 1; every
+  // mutation increments it so domain mirrors can reject out-of-order updates.
+  version: integer('version').notNull(),
   createdAt: text('created_at').notNull(),
 })
 
@@ -39,6 +42,7 @@ export const invitations = sqliteTable(
     tokenHash: text('token_hash').notNull(), // SHA-256 hex
     expiresAt: text('expires_at').notNull(),
     consumedAt: text('consumed_at'), // 受諾時刻(未受諾は null)
+    consumedNonce: text('consumed_nonce'), // 同秒の並行受諾を識別する claim nonce
     createdAt: text('created_at').notNull(),
   },
   // 受諾時の token 照合が唯一のホットな検索(全走査を防ぐ)。
@@ -80,4 +84,21 @@ export const authEvents = sqliteTable(
   },
   // 日次 Cron の保持期間掃除(created_at < cutoff の DELETE)用。
   (t) => [index('auth_events_created_at_idx').on(t.createdAt)],
+)
+
+/**
+ * Login attempt reservations. D1 is the source of truth because KV's
+ * read-modify-write sequence is not atomic and would let concurrent failures
+ * bypass the lockout threshold. `key` is a one-way hash of email + client IP.
+ */
+export const loginRateLimits = sqliteTable(
+  'login_rate_limits',
+  {
+    key: text('key').primaryKey(),
+    failures: integer('failures').notNull(),
+    expiresAt: text('expires_at').notNull(),
+  },
+  // The Cron cleanup orders its bounded DELETE by the expiry predicate. Keep
+  // that maintenance path independent of the number of spray-created keys.
+  (t) => [index('login_rate_limits_expires_at_idx').on(t.expiresAt)],
 )

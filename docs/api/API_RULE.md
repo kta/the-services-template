@@ -9,7 +9,8 @@
 - **認可の層**（実装は `packages/shared/src/auth-server.ts`。自前で JWT を検証し直さない）:
   - **default-deny**: `app.use('/api/*', except(['/api/health', '/api/auth/*', '/api/internal/*'], ...))` で `/api/*` 全体にゲートを掛ける。**ルートを足しただけで保護される**のが要件 — 個別ルートに認証を足して回らない。
   - `tenantAuth()` — access JWT を検証し `c.var.auth`（`sub`/`org`/`email`/`role`）を確立。無 / 不正 / **期限切れは 401**。以後のクエリは `c.get('auth').org` でテナントスコープ。
-  - `requireActiveOrg(resolver)` — org 同期行を毎リクエスト解決。行が無ければ **503 `not_synced`**（リトライで回復し得る）、無効化は **403 `org_disabled`**。`plan` はここで載せる（JWT クレームに入れない = 変更が即時反映）。
+  - domain は `requireLiveDomainSession()` を `tenantAuth()` の直後に置く。access JWT の `sid/sub/org` を admin の refresh session と現行 user/org に service binding で照合し、logout・rotation・user/org 無効化を即時反映する。admin 障害・timeout・不正応答は **503 `auth_unavailable`** で fail close。ローカルの明示的 `APP_ENV=development` + `AUTH_DEV_GRANT=true` だけは binding 不在のため例外とする。
+  - `requireActiveOrg(resolver)` — org 同期行を毎リクエスト解決。行が無ければ **503 `not_synced`**（リトライで回復し得る）、同期 lease が切れた行も fail closed で同じ 503、無効化は **403 `org_disabled`**。`plan` はここで載せる（JWT クレームに入れない = 変更が即時反映）。これは live session の代替ではない。
   - `requireRole(role)` / `requirePlan(plan)` — 権限不足は **403**。`requirePlan` は role による免除をしない（テナント管理者に課金機能を素通りさせない）。
   - Worker 間内部 API → `/api/internal/*` + `x-internal-key`（service binding 経由。**キー未設定時は fail close**）。テナントの JWT では越えられない。
   - 401（未認証・期限切れ）と 403（権限不足）を**取り違えない** — クライアントの再ログイン判定がこの区別に依存する。テストは `docs/testing/TEST_RULE.md` の権限マトリクスに従う。

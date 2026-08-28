@@ -6,20 +6,30 @@ import { hc } from 'hono/client'
 /**
  * admin → example_service の service binding ヘルパ。
  * admin は organization(テナント)の源泉で、ドメイン Worker(example_service)の
- * 同期コピーへ upsert する。日次照合(reconcile)はドメイン側の同期行一覧を
+ * 同期コピーへ upsert する。hourly 照合(reconcile)はドメイン側の同期行一覧を
  * internal GET で読む。TYPED な Hono RPC クライアント(hc)を binding の fetch
  * 経由で使う(internet hop 無し)。
  */
 
-export type SyncEnv = { EXAMPLE_SERVICE: Fetcher; INTERNAL_KEY: string }
+export type SyncEnv = { EXAMPLE_SERVICE: Fetcher; ADMIN_TO_EXAMPLE_SERVICE_KEY: string }
+
+/** A hung service binding must not pin an admin request or hourly Cron forever. */
+const SYNC_TIMEOUT_MS = 5_000
 
 function domainClient(env: SyncEnv) {
   return hc<ExampleAppType>('http://example_service', {
     // hc のリクエストを service binding 経由にルーティングする。
     // 二重アサーション: Workers の Fetcher.fetch と、(SPA が AppType を import する
     // 経路で同時に型検査される)DOM の `fetch` は構造的に重ならないため。
-    fetch: env.EXAMPLE_SERVICE.fetch.bind(env.EXAMPLE_SERVICE) as unknown as typeof fetch,
-    headers: { 'x-internal-key': env.INTERNAL_KEY },
+    fetch: (input: string | Request | URL, init?: RequestInit) =>
+      env.EXAMPLE_SERVICE.fetch(
+        input as never,
+        {
+          ...init,
+          signal: AbortSignal.timeout(SYNC_TIMEOUT_MS),
+        } as never,
+      ) as unknown as Promise<Response>,
+    headers: { 'x-internal-key': env.ADMIN_TO_EXAMPLE_SERVICE_KEY },
   })
 }
 

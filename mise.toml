@@ -4,3 +4,4 @@
 [tools]
 node = "22"
 pnpm = "11.22.0"
+terraform = "1.10.5"

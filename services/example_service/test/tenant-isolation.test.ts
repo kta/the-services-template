@@ -7,14 +7,22 @@
  * D1 はテストファイル内で共有されるため、org id は毎回ユニークにする。
  */
 
-import { SELF } from 'cloudflare:test'
+import { env, SELF } from 'cloudflare:test'
+import { DOMAIN_ACCESS_TOKEN_AUDIENCE } from '@app/contracts'
 import { signAccessToken } from '@app/shared'
+import { sign as signJwt } from 'hono/jwt'
 import { describe, expect, it } from 'vitest'
+import { JWT_TEST_PRIVATE_KEY } from '../../../packages/shared/test/jwt-keys'
 
 const BASE = 'https://example-service.test'
 const JSON_HEADERS = { 'content-type': 'application/json' }
-const INTERNAL = { ...JSON_HEADERS, 'x-internal-key': 'dev-internal-key' }
-const JWT_SECRET = 'dev-jwt-secret-change-me'
+const INTERNAL = {
+  ...JSON_HEADERS,
+  'x-internal-key': 'dev-admin-to-example-service-key-000000000000',
+}
+const TEST_PRIVATE_KEY =
+  (env as typeof env & { AUTH_DEV_PRIVATE_KEY?: string }).AUTH_DEV_PRIVATE_KEY ||
+  JWT_TEST_PRIVATE_KEY
 
 const orgId = () => `org-${crypto.randomUUID()}`
 
@@ -94,11 +102,17 @@ describe('複数テナントの相互不可視', () => {
     const [a, b] = [orgId(), orgId()]
     const ta = await signAccessToken(
       { sub: 'same-user', org: a, email: 'same@person.test', role: 'staff' },
-      JWT_SECRET,
+      TEST_PRIVATE_KEY,
+      undefined,
+      undefined,
+      DOMAIN_ACCESS_TOKEN_AUDIENCE,
     )
     const tb = await signAccessToken(
       { sub: 'same-user', org: b, email: 'same@person.test', role: 'staff' },
-      JWT_SECRET,
+      TEST_PRIVATE_KEY,
+      undefined,
+      undefined,
+      DOMAIN_ACCESS_TOKEN_AUDIENCE,
     )
     // 同期行を作る(dev グラント経由)
     await tokenFor(a)
@@ -132,18 +146,21 @@ describe('トークンの状態による拒否', () => {
     await tokenFor(org) // 同期行は作っておく(401 が期限由来だと確定させる)
     const expired = await signAccessToken(
       { sub: 'u', org, email: 'e@x.test', role: 'staff' },
-      JWT_SECRET,
+      TEST_PRIVATE_KEY,
       -1,
+      undefined,
+      DOMAIN_ACCESS_TOKEN_AUDIENCE,
     )
     expect((await listItems(expired)).status).toBe(401)
   })
 
-  it('別 secret で署名されたトークンは 401(JWT_SECRET 不一致のサービスは通さない)', async () => {
+  it('旧 HS256 で署名されたトークンは 401', async () => {
     const org = orgId()
     await tokenFor(org)
-    const foreign = await signAccessToken(
+    const foreign = await signJwt(
       { sub: 'u', org, email: 'e@x.test', role: 'staff' },
       'another-services-secret',
+      'HS256',
     )
     expect((await listItems(foreign)).status).toBe(401)
   })
@@ -177,6 +194,7 @@ describe('org の状態変化に追従する(毎リクエスト判定)', () => {
         name: 'Acme',
         plan: 'free',
         isDisabled: false,
+        version: 1,
         createdAt: new Date().toISOString(),
         ...over,
       }),
@@ -195,11 +213,27 @@ describe('org の状態変化に追従する(毎リクエスト判定)', () => {
     expect((await listItems(token)).status).toBe(200)
   })
 
+  it('古い同期バージョンが遅れて到着しても新しい無効化状態を戻せない', async () => {
+    const org = orgId()
+    const token = await tokenFor(org)
+    expect((await listItems(token)).status).toBe(200)
+
+    expect((await upsertOrg(org, { version: 3, isDisabled: true })).status).toBe(200)
+    expect((await listItems(token)).status).toBe(403)
+
+    const stale = await upsertOrg(org, { version: 2, isDisabled: false })
+    expect(stale.status).toBe(409)
+    expect((await listItems(token)).status).toBe(403)
+  })
+
   it('未同期の org は 503 not_synced(無効化 403 と区別する)', async () => {
     const unsynced = orgId()
     const token = await signAccessToken(
       { sub: 'u', org: unsynced, email: 'e@x.test', role: 'staff' },
-      JWT_SECRET,
+      TEST_PRIVATE_KEY,
+      undefined,
+      undefined,
+      DOMAIN_ACCESS_TOKEN_AUDIENCE,
     )
     const { status } = await listItems(token)
     expect(status).toBe(503)
@@ -227,13 +261,14 @@ describe('内部 API の鍵ゲート(テナントトークンでは越えられ�
         name: 'Hijack',
         plan: 'contracted',
         isDisabled: false,
+        version: 1,
         createdAt: new Date().toISOString(),
       }),
     })
     expect(res.status).toBe(401)
   })
 
-  it('内部鍵があれば同期一覧を読める(admin の日次照合が使う経路)', async () => {
+  it('内部鍵があれば同期一覧を読める(admin の hourly 照合が使う経路)', async () => {
     const org = orgId()
     await tokenFor(org)
     const res = await SELF.fetch(`${BASE}/api/internal/organizations`, { headers: INTERNAL })
@@ -245,6 +280,13 @@ describe('内部 API の鍵ゲート(テナントトークンでは越えられ�
   it('誤った内部鍵は 401(長さ違いでも一致でもない)', async () => {
     const res = await SELF.fetch(`${BASE}/api/internal/organizations`, {
       headers: { ...JSON_HEADERS, 'x-internal-key': 'wrong-key' },
+    })
+    expect(res.status).toBe(401)
+  })
+
+  it('notifier 向けの鍵でも内部 org API を呼べない', async () => {
+    const res = await SELF.fetch(`${BASE}/api/internal/organizations`, {
+      headers: { ...JSON_HEADERS, 'x-internal-key': 'dev-domain-to-notifier-key-000000000000' },
     })
     expect(res.status).toBe(401)
   })

@@ -1,0 +1,467 @@
+import assert from 'node:assert/strict'
+import { createSign, generateKeyPairSync } from 'node:crypto'
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import test from 'node:test'
+import {
+  canonicalJson,
+  createPreRestoreArtifact,
+  parseRestoreOptions,
+  productionRestoreCommand,
+  retainPreRestoreArtifact,
+  TIME_TRAVEL_RETENTION_SECONDS,
+  validateBackupKey,
+  validateLocalManifestAgainstRemote,
+  validateRestoreCloudflareAccount,
+  validateRestoreConfirmation,
+  validateRestoreDatabaseBindings,
+  validateRestoreDatabaseId,
+  validateRestoreDatabaseInfo,
+  validateRestoreDatabaseName,
+  validateRestoreOperationOptions,
+  validateRestoreProvenance,
+  validateRestoreSha256,
+  validateRestoreSigningPublicKey,
+  validateRestoreTarget,
+  validateRestoreTimestamp,
+  verifyRestoreDatabase,
+} from './restore-d1.mjs'
+
+const { privateKey: manifestPrivateKey, publicKey: manifestPublicKey } = generateKeyPairSync(
+  'rsa',
+  {
+    modulusLength: 2048,
+  },
+)
+const manifestPublicKeyPem = manifestPublicKey.export({ type: 'spki', format: 'pem' })
+
+function signedManifest(manifest) {
+  const signer = createSign('RSA-SHA256')
+  signer.update(canonicalJson(manifest))
+  signer.end()
+  return {
+    ...manifest,
+    signatureAlgorithm: 'RSASSA-PKCS1-v1_5-SHA256',
+    signature: signer.sign(manifestPrivateKey).toString('base64url'),
+  }
+}
+
+test('retains the pre-restore artifact until the operator removes it', async () => {
+  const sql = `${'-- retained pre-restore export\n'.repeat(40)}CREATE TABLE users (id);\nINSERT INTO users VALUES (1);\n`
+  const artifact = await createPreRestoreArtifact('admin', 'admin', {}, (_service, args) => {
+    const output = args.find((arg) => arg.startsWith('--output='))?.slice('--output='.length)
+    if (!output) throw new Error('missing output')
+    writeFileSync(output, sql, { mode: 0o600 })
+  })
+  try {
+    assert.equal(existsSync(artifact.path), true)
+    assert.equal(readFileSync(artifact.path, 'utf8'), sql)
+    assert.match(artifact.sha256, /^[0-9a-f]{64}$/)
+  } finally {
+    rmSync(artifact.directory, { recursive: true, force: true })
+  }
+})
+
+test('accepts the manifest provenance option for import-backup', () => {
+  const options = parseRestoreOptions([
+    '--confirm',
+    'RESTORE_PRODUCTION',
+    '--database',
+    'admin-restore',
+    '--database-id',
+    '01234567-89ab-4cde-8123-456789abcdef',
+    '--file',
+    '/tmp/restore/backup.sql',
+    '--manifest',
+    '/tmp/restore/latest.json',
+    '--key',
+    'admin/2026-08-22T00-00-00.sql',
+    '--service',
+    'admin',
+    '--sha256',
+    'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+    '--target',
+    'admin',
+  ])
+  assert.equal(validateRestoreOperationOptions('import-backup', options), true)
+  assert.deepEqual(options, {
+    '--confirm': 'RESTORE_PRODUCTION',
+    '--database': 'admin-restore',
+    '--database-id': '01234567-89ab-4cde-8123-456789abcdef',
+    '--file': '/tmp/restore/backup.sql',
+    '--manifest': '/tmp/restore/latest.json',
+    '--key': 'admin/2026-08-22T00-00-00.sql',
+    '--service': 'admin',
+    '--sha256': 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+    '--target': 'admin',
+  })
+})
+
+test('rejects restore options that belong to another operation', () => {
+  assert.throws(
+    () =>
+      validateRestoreOperationOptions('import-backup', {
+        '--database': 'admin-restore',
+        '--timestamp': '2026-08-22T00:00:00.000Z',
+      }),
+    /invalid restore options/,
+  )
+  assert.throws(
+    () =>
+      validateRestoreOperationOptions('time-travel-info', {
+        '--service': 'admin',
+        '--database-id': '01234567-89ab-4cde-8123-456789abcdef',
+      }),
+    /invalid restore options/,
+  )
+})
+
+test('builds fixed remote commands without accepting Wrangler overrides', () => {
+  assert.deepEqual(productionRestoreCommand('time-travel-info', { database: 'admin' }), [
+    'd1',
+    'time-travel',
+    'info',
+    'admin',
+  ])
+  assert.deepEqual(
+    productionRestoreCommand('time-travel-restore', {
+      database: 'admin',
+      timestamp: '2026-08-22T00:00:00.000Z',
+    }),
+    ['d1', 'time-travel', 'restore', 'admin', '--timestamp=2026-08-22T00:00:00.000Z'],
+  )
+  assert.deepEqual(
+    productionRestoreCommand('export-before-restore', {
+      database: 'admin',
+      databaseId: '01234567-89ab-4cde-8123-456789abcdef',
+      output: '/tmp/restore/pre.sql',
+    }),
+    [
+      'd1',
+      'export',
+      '01234567-89ab-4cde-8123-456789abcdef',
+      '--remote',
+      '--skip-confirmation',
+      '--output=/tmp/restore/pre.sql',
+    ],
+  )
+  assert.deepEqual(
+    productionRestoreCommand('download-backup', {
+      bucket: 'private-backups',
+      key: 'admin/2026-08-22T00-00-00.sql',
+      output: '/tmp/restore/backup.sql',
+    }),
+    [
+      'r2',
+      'object',
+      'get',
+      'private-backups/admin/2026-08-22T00-00-00.sql',
+      '--file=/tmp/restore/backup.sql',
+      '--remote',
+    ],
+  )
+  assert.deepEqual(
+    productionRestoreCommand('upload-pre-restore', {
+      service: 'admin',
+      bucket: 'private-backups',
+      key: 'pre-restore/admin/2026-08-22T00-00-00-000Z-run.sql',
+      file: '/tmp/restore/pre.sql',
+    }),
+    [
+      'r2',
+      'object',
+      'put',
+      'private-backups/pre-restore/admin/2026-08-22T00-00-00-000Z-run.sql',
+      '--file=/tmp/restore/pre.sql',
+      '--content-type=application/sql',
+      '--remote',
+    ],
+  )
+  assert.deepEqual(productionRestoreCommand('create-restore-db', { database: 'admin-restore' }), [
+    'd1',
+    'create',
+    'admin-restore',
+  ])
+  assert.deepEqual(
+    productionRestoreCommand('import-backup', {
+      database: 'admin-restore',
+      file: '/tmp/restore/backup.sql',
+    }),
+    ['d1', 'execute', 'admin-restore', '--remote', '--file=/tmp/restore/backup.sql', '--yes'],
+  )
+  assert.throws(
+    () =>
+      productionRestoreCommand('import-backup', {
+        database: 'admin-restore',
+        databaseId: 'admin-restore-id',
+        file: '/tmp/restore/backup.sql',
+      }),
+    /reviewed UUID/,
+  )
+})
+
+test('rejects unsafe restore values before any command is built', () => {
+  assert.equal(validateRestoreConfirmation('RESTORE_PRODUCTION'), true)
+  assert.throws(() => validateRestoreConfirmation('yes'), /explicit confirmation/)
+  const nowMs = Date.parse('2026-08-28T00:00:00.000Z')
+  const retentionMs = TIME_TRAVEL_RETENTION_SECONDS * 1_000
+  assert.equal(validateRestoreTimestamp('2026-08-28T00:00:00.000Z', nowMs), true)
+  assert.equal(validateRestoreTimestamp(new Date(nowMs - retentionMs).toISOString(), nowMs), true)
+  assert.throws(() => validateRestoreTimestamp(new Date(nowMs + 1).toISOString(), nowMs), /future/)
+  assert.throws(
+    () => validateRestoreTimestamp(new Date(nowMs - retentionMs - 1).toISOString(), nowMs),
+    /7-day retention/,
+  )
+  assert.throws(() => validateRestoreTimestamp('2026-02-29T00:00:00Z'), /real RFC3339/)
+  assert.throws(() => validateRestoreTimestamp('2026-04-31T00:00:00Z'), /real RFC3339/)
+  assert.throws(() => validateRestoreTimestamp('2026-08-22T00:00:00Z && evil'), /timestamp/)
+  assert.equal(validateBackupKey('latest.json', 'admin'), true)
+  assert.equal(validateBackupKey('admin/2026-08-22T00-00-00.sql', 'admin'), true)
+  assert.throws(() => validateBackupKey('../secrets', 'admin'), /backup key/)
+  assert.throws(() => validateBackupKey('domain/2026-08-22T00-00-00.sql', 'admin'), /backup key/)
+  assert.equal(validateRestoreDatabaseName('admin-restore'), true)
+  assert.throws(() => validateRestoreDatabaseName('admin;DROP'), /database name/)
+  assert.throws(() => validateRestoreDatabaseName('admin'), /-restore/)
+  assert.equal(
+    validateRestoreDatabaseId('01234567-89AB-4CDE-8123-456789ABCDEF'),
+    '01234567-89ab-4cde-8123-456789abcdef',
+  )
+  assert.throws(() => validateRestoreDatabaseId('admin-restore'), /reviewed UUID/)
+  assert.equal(validateRestoreTarget('admin', ['admin']), true)
+  assert.throws(() => validateRestoreTarget('domain', ['admin']), /configured backup target/)
+  assert.equal(
+    validateRestoreSha256('BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD'),
+    'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+  )
+  assert.throws(() => validateRestoreSha256('not-a-sha256'), /SHA-256/)
+  assert.equal(
+    validateRestoreCloudflareAccount('0123456789abcdef0123456789abcdef', {
+      CLOUDFLARE_ACCOUNT_ID: '0123456789abcdef0123456789abcdef',
+    }),
+    true,
+  )
+  assert.throws(
+    () => validateRestoreCloudflareAccount('account-a', { CLOUDFLARE_ACCOUNT_ID: 'account-b' }),
+    /exactly match/,
+  )
+  assert.throws(() => validateRestoreCloudflareAccount('account-a', {}), /exactly match/)
+})
+
+test('restore preflight binds ops database ids and public key to reviewed values', () => {
+  assert.equal(
+    validateRestoreDatabaseBindings(
+      {
+        admin: '01234567-89ab-4cde-8123-456789abcdef',
+        booking: '11234567-89ab-4cde-8123-456789abcdef',
+      },
+      {
+        admin: '01234567-89ab-4cde-8123-456789abcdef',
+        booking: '11234567-89ab-4cde-8123-456789abcdef',
+      },
+    ),
+    true,
+  )
+  assert.throws(
+    () =>
+      validateRestoreDatabaseBindings(
+        { admin: '01234567-89ab-4cde-8123-456789abcdef' },
+        { admin: '21234567-89ab-4cde-8123-456789abcdef' },
+      ),
+    /does not match/,
+  )
+  assert.equal(validateRestoreSigningPublicKey(manifestPublicKeyPem, manifestPublicKeyPem), true)
+  assert.throws(
+    () =>
+      validateRestoreSigningPublicKey(
+        manifestPublicKeyPem,
+        generateKeyPairSync('rsa', { modulusLength: 2048 }).publicKey.export({
+          type: 'spki',
+          format: 'pem',
+        }),
+      ),
+    /does not match/,
+  )
+  assert.throws(() => validateRestoreSigningPublicKey('', manifestPublicKeyPem), /must be provided/)
+})
+
+test('restore destination verification requires the exact D1 UUID returned by Wrangler', () => {
+  assert.equal(
+    validateRestoreDatabaseInfo(
+      JSON.stringify({ database_id: '01234567-89ab-4cde-8123-456789abcdef' }),
+      '01234567-89AB-4CDE-8123-456789ABCDEF',
+    ),
+    true,
+  )
+  assert.throws(
+    () =>
+      validateRestoreDatabaseInfo(
+        JSON.stringify({ database_id: '21234567-89ab-4cde-8123-456789abcdef' }),
+        '01234567-89ab-4cde-8123-456789abcdef',
+      ),
+    /does not resolve/,
+  )
+})
+
+test('time-travel operations verify the configured source name resolves to its reviewed UUID', () => {
+  const expectedId = '01234567-89ab-4cde-8123-456789abcdef'
+  const calls = []
+  verifyRestoreDatabase('admin', 'admin', expectedId, {}, (_service, args) => {
+    calls.push(args)
+    return JSON.stringify({ database_id: expectedId })
+  })
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0], ['d1', 'info', 'admin', '--json'])
+  assert.throws(
+    () =>
+      verifyRestoreDatabase('admin', 'admin', expectedId, {}, () =>
+        JSON.stringify({ database_id: '11234567-89ab-4cde-8123-456789abcdef' }),
+      ),
+    /does not resolve/,
+  )
+})
+
+test('restore manifest must bind the requested object to the reviewed account and database', () => {
+  const manifest = signedManifest({
+    targets: {
+      admin: {
+        at: '2026-08-22T00:00:00.000Z',
+        key: 'admin/2026-08-22T00-00-00.sql',
+        sha256: 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+        accountId: 'account-a',
+        databaseId: '01234567-89ab-4cde-8123-456789abcdef',
+      },
+    },
+  })
+  assert.deepEqual(
+    validateRestoreProvenance(
+      manifest,
+      'admin',
+      'account-a',
+      '01234567-89AB-4CDE-8123-456789ABCDEF',
+      { key: 'admin/2026-08-22T00-00-00.sql', signingPublicKey: manifestPublicKeyPem },
+    ),
+    {
+      key: 'admin/2026-08-22T00-00-00.sql',
+      sha256: 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+    },
+  )
+  assert.throws(
+    () =>
+      validateRestoreProvenance(
+        manifest,
+        'admin',
+        'account-b',
+        '01234567-89ab-4cde-8123-456789abcdef',
+        { signingPublicKey: manifestPublicKeyPem },
+      ),
+    /provenance/,
+  )
+  assert.throws(
+    () =>
+      validateRestoreProvenance(
+        manifest,
+        'admin',
+        'account-a',
+        '01234567-89ab-4cde-8123-456789abcdee',
+        { signingPublicKey: manifestPublicKeyPem },
+      ),
+    /provenance/,
+  )
+})
+
+test('import provenance must match the manifest fetched from R2', () => {
+  const remote = {
+    key: 'admin/2026-08-22T00-00-00.sql',
+    sha256: 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+  }
+  const local = signedManifest({
+    targets: {
+      admin: {
+        key: remote.key,
+        sha256: remote.sha256,
+        accountId: 'account-a',
+        databaseId: '01234567-89ab-4cde-8123-456789abcdef',
+      },
+    },
+  })
+  assert.deepEqual(
+    validateLocalManifestAgainstRemote(
+      local,
+      'admin',
+      'account-a',
+      '01234567-89ab-4cde-8123-456789abcdef',
+      remote,
+      { ...remote, signingPublicKey: manifestPublicKeyPem },
+    ),
+    remote,
+  )
+  assert.throws(
+    () =>
+      validateLocalManifestAgainstRemote(
+        {
+          ...local,
+          targets: { admin: { ...local.targets.admin, key: 'admin/2026-08-21T00-00-00.sql' } },
+        },
+        'admin',
+        'account-a',
+        '01234567-89ab-4cde-8123-456789abcdef',
+        remote,
+        { ...remote, signingPublicKey: manifestPublicKeyPem },
+      ),
+    /requested object|R2 manifest|signature/,
+  )
+})
+
+test('rejects unsigned restore provenance', () => {
+  const manifest = {
+    targets: {
+      admin: {
+        at: '2026-08-22T00:00:00.000Z',
+        key: 'admin/2026-08-22T00-00-00.sql',
+        sha256: 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+        accountId: 'account-a',
+        databaseId: '01234567-89ab-4cde-8123-456789abcdef',
+      },
+    },
+  }
+  assert.throws(
+    () =>
+      validateRestoreProvenance(
+        manifest,
+        'admin',
+        'account-a',
+        '01234567-89ab-4cde-8123-456789abcdef',
+        { signingPublicKey: manifestPublicKeyPem },
+      ),
+    /signature/,
+  )
+})
+
+test('time-travel pre-restore state is uploaded and read back before proceeding', async () => {
+  const sql = `${'-- retained pre-restore export\n'.repeat(40)}CREATE TABLE users (id);\nINSERT INTO users VALUES (1);\n`
+  const artifact = await createPreRestoreArtifact('admin', 'admin', {}, (_service, args) => {
+    const output = args.find((arg) => arg.startsWith('--output='))?.slice('--output='.length)
+    if (!output) throw new Error('missing output')
+    writeFileSync(output, sql, { mode: 0o600 })
+  })
+  const calls = []
+  try {
+    const key = await retainPreRestoreArtifact(
+      artifact,
+      { bucket: 'private-backups' },
+      'admin',
+      {},
+      (_service, args) => {
+        calls.push(args)
+        if (args[1] === 'object' && args[2] === 'get') {
+          const output = args.find((arg) => arg.startsWith('--file='))?.slice('--file='.length)
+          if (!output) throw new Error('missing verification output')
+          writeFileSync(output, sql, { mode: 0o600 })
+        }
+      },
+    )
+    assert.match(key, /^pre-restore\/admin\//)
+    assert.equal(calls.length, 2)
+  } finally {
+    rmSync(artifact.directory, { recursive: true, force: true })
+  }
+})

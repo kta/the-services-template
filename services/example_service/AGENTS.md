@@ -8,11 +8,11 @@
 
 - 1つのCloudflare WorkerがReact SPAとHono APIを同一オリジンで配信する。
 - サービス専用D1がitemと同期済みorganizationを所有する。
-- adminからorganizationをservice bindingで受信し、notifierをservice bindingで同期呼び出しする。
+- adminからorganizationをservice bindingで受信し、`ADMIN_TO_EXAMPLE_SERVICE_KEY` で認証する。notifierは `x-internal-caller=domain` + `DOMAIN_TO_NOTIFIER_KEY` でservice binding同期呼び出しする。
 - Zod契約、Hono RPC、Drizzle、tenant scope、共有UI tokenの正しい組み合わせを示す。
 - 既存Web SPAをTauri v2 desktop/iOS/Android shellからも使える。native APIはRust bridgeの固定origin/allowlist経由に限定する。
 
-本番へこのサービス自体をdeployしない。新サービス作成時はリポジトリの `new-service` skillでコピーし、名前、binding、DB、契約、entity、テストを置換する。
+本番へこのサービス自体をdeployしない。新サービス作成時はリポジトリの `new-service` skillでコピーし、名前、binding、DB、契約、entity、テストを置換する。コピー先を本番へ出す前に、IdP/admin gateway と domain audience、`sid` revoke 照合を実装した `src/worker/production-auth.ts` と `test/production-auth.test.ts` を追加する。未実装の domain は `require-production-domain-auth.mjs` が fail close する。
 
 ## 構成と入口
 
@@ -36,12 +36,14 @@
 - 他tenantのitemは読めない、更新できない、存在も推測しにくい応答にする。変更時は複数tenant integration testを維持する。
 - API契約は `packages/contracts/src/example_service.ts` のZodを単一ソースとする。routeはchainを切らず `AppType` を保つ。
 - DB schema変更は `docs/database/DATABASE_RULE.md` に従い、Drizzle生成migrationを作る。FKは宣言しない。
-- organizationはadminが源泉。このD1の行は同期コピーであり、このサービスから運営情報を独自変更しない。
-- 通知は `@app/shared` のinternal helperからNOTIFIER bindingへ同期送信する。通知失敗でdomain writeを巻き戻すかbest-effortにするかは既存仕様を確認し、握りつぶす経路はログと戻り値をテストする。
+- organizationはadminが源泉。このD1の行は同期コピーであり、このサービスから運営情報を独自変更しない。`synced_at` は受信 lease で、2時間を超えた行や不完全な旧行は `not_synced` (503) として fail closed にする。admin の reconcile は hourly で動かす。production API は `tenantAuth` の後に `requireLiveDomainSession` を置き、admin の refresh session / user / org を毎リクエスト照合する。org lease はこの live 認証の代替ではない。
+- 通知は `@app/shared` のinternal helperからNOTIFIER bindingへ `x-internal-caller=domain` + `DOMAIN_TO_NOTIFIER_KEY` で同期送信する。通知失敗でdomain writeを巻き戻すかbest-effortにするかは既存仕様を確認し、握りつぶす経路はログと戻り値をテストする。
 - CORSや別API originを追加しない。SPA/APIは同一Worker・同一originを維持する。
 - Tauriのnative requestはRust `api_request` commandだけを使う。`/api/`、GET/POST/PATCH/DELETE、`authorization`/`content-type`以外を許可しない。外部origin、redirect、`set-cookie`をrendererへ渡さない。
 - Tauri release originは`TAURI_EXAMPLE_API_ORIGIN`からbuild-timeに固定し、HTTPS以外を拒否する。secret、runtime設定画面、任意の`VITE_*` originは使わない。
 - WebのsessionStorageは互換のため許可されたdev login fallbackだけで使う。Tauriではaccess tokenとorganization IDをmemory-onlyにし、再起動時の自動復元を実装しない。
+- access JWT は RS256。admin が JWT_PRIVATE_KEY で署名し、この domain Worker は JWT_PUBLIC_KEY だけで検証する。AUTH_DEV_PRIVATE_KEY と AUTH_DEV_GRANT はローカル専用で、本番へ持ち込まない。
+- Tauri の開発は `make dev/example_service/tauri`、static bundle は `make build/example_service/tauri`。通常 Web の `make dev/example_service` と同じ 5173 port を共有するため同時に起動しない。実機 HMR は `TAURI_DEV_HOST` と必要な port forwarding を使う。
 - 色、font、radiusは `@app/ui` とtheme token経由だけを使う。
 
 ## コマンド
@@ -64,7 +66,7 @@ pnpm --filter @app/example_service db:migrate:local
 cargo test --manifest-path services/example_service/src-tauri/Cargo.toml
 ```
 
-通常のローカル起動はルートで `make dev/example_service`。adminとのbinding連携も確認する場合は `make dev/all`。
+通常のローカル起動はルートで `make dev/example_service`。Tauri desktop は `make dev/example_service/tauri`、adminとのbinding連携も確認する場合は `make dev/all`。本番 deploy は行わず、fork 後の実サービスだけに protected main / production environment の deploy 設定を追加する。
 
 ## 必須テスト
 

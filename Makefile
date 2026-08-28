@@ -1,5 +1,7 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
+WORKTREE_NAME := $(name)
+export WORKTREE_NAME
 
 ## init: install deps + generate types + apply local DB migrations + seed
 init:
@@ -11,10 +13,7 @@ init:
 
 ## dev-vars: copy each service's .dev.vars.example to .dev.vars (no overwrite)
 dev-vars:
-	@for f in services/*/.dev.vars.example; do \
-		d="$${f%.example}"; \
-		[ -f "$$d" ] || { cp "$$f" "$$d"; echo "created $$d"; }; \
-	done
+	@node scripts/prepare-dev-vars.mjs
 
 ## db/seed/local: seed local D1s with dev data (services with a db:seed:local script)
 db/seed/local:
@@ -24,9 +23,25 @@ db/seed/local:
 dev/example_service:
 	pnpm --filter @app/example_service dev
 
+## dev/example_service/tauri: run example_service Tauri desktop dev (Worker + native window)
+dev/example_service/tauri:
+	pnpm --filter @app/example_service tauri dev
+
+## build/example_service/tauri: build the example_service static Tauri frontend bundle
+build/example_service/tauri:
+	pnpm --filter @app/example_service build:tauri
+
 ## dev/admin: run admin — SPA + API in one dev server (:5174)
 dev/admin:
 	pnpm --filter @app/admin dev
+
+## dev/admin/tauri: run admin Tauri desktop dev (Worker + native window)
+dev/admin/tauri:
+	pnpm --filter @app/admin tauri dev
+
+## build/admin/tauri: build the admin static Tauri frontend bundle
+build/admin/tauri:
+	pnpm --filter @app/admin build:tauri
 
 ## dev/notifier: run the notifier Worker (sync send API)
 dev/notifier:
@@ -48,10 +63,6 @@ db/generate:
 db/migrate/local:
 	pnpm -r --if-present db:migrate:local
 
-## db/migrate/remote: apply all migrations to remote D1
-db/migrate/remote:
-	pnpm -r --if-present db:migrate:remote
-
 ## build: build all packages
 build:
 	pnpm -r --if-present build
@@ -64,40 +75,30 @@ test:
 typecheck:
 	pnpm -r --if-present typecheck
 
-## lint: biome check
+## lint: Biome + native boundary check
 lint:
-	pnpm exec biome check .
+	pnpm run lint
 
 ## check: lint + dependency audit + typecheck + combined test (the "definition of done")
 check:
 	pnpm run check
 
-# NOTE: example_service は雛形なので本番 deploy ターゲットを持たない(CI matrix からも除外)。
-## deploy/admin: build + deploy the admin Worker (SPA + API)
-deploy/admin:
-	pnpm --filter @app/admin run deploy
-
-## deploy/notifier: deploy the notifier Worker (sync send API)
-deploy/notifier:
-	pnpm --filter @app/notifier run deploy
-
-## deploy/ops: deploy the ops Worker (backup + monitoring)
-deploy/ops:
-	pnpm --filter @app/ops run deploy
+## infra/check: Terraform format, provider initialization, and validation
+infra/check:
+	pnpm run infra:check
 
 ## worktree/new: isolated worktree for a parallel agent (name=<branch>)
 worktree/new:
-	git worktree add -b "$(name)" "../$(notdir $(CURDIR))-worktrees/$(name)" HEAD
-	cd "../$(notdir $(CURDIR))-worktrees/$(name)" && pnpm install
+	node scripts/worktree.mjs new
 
 ## worktree/rm: remove a worktree + its branch (name=<branch>)
 worktree/rm:
-	git worktree remove "../$(notdir $(CURDIR))-worktrees/$(name)" && git worktree prune && git branch -D "$(name)"
+	node scripts/worktree.mjs rm
 
 ## help: list targets
 help:
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed 's/## //' | awk -F': ' '{printf "  \033[36m%-26s\033[0m %s\n", $$1, $$2}'
 
-.PHONY: init dev/example_service dev/admin dev/all dev/notifier db/generate db/migrate/local db/migrate/remote db/seed/local \
-	build test typecheck lint check dev-vars deploy/admin deploy/notifier deploy/ops \
+.PHONY: init dev/example_service dev/example_service/tauri build/example_service/tauri dev/admin dev/admin/tauri build/admin/tauri dev/all dev/notifier db/generate db/migrate/local db/seed/local \
+	build test typecheck lint check infra/check dev-vars \
 	worktree/new worktree/rm help

@@ -18,6 +18,23 @@ See
 [`docs/architecture/infra.md`](./docs/architecture/infra.md) for the runtime
 topology and ownership boundary.
 
+Access JWTs use RS256: admin alone owns `JWT_PRIVATE_KEY`, while admin and each
+domain Worker receive `JWT_PUBLIC_KEY` for verification. Tauri shells receive
+neither key. Production deploy is limited to a protected `main` push and the
+GitHub `production` environment; local deploy entry points fail closed outside
+that CI context. Existing secret provisioning, seed, and restore are separate
+operator operations tied to a clean published `main` checkout. First-Worker
+secret bootstrap uses only the dedicated protected-main
+`production-bootstrap.yml` workflow and its reviewer gate. The template
+`example_service` is never a production target.
+Service-binding authentication uses a distinct secret for each direction:
+`ADMIN_TO_<DOMAIN>_KEY` (the scaffold uses `ADMIN_TO_EXAMPLE_SERVICE_KEY`),
+`ADMIN_TO_NOTIFIER_KEY`, `DOMAIN_TO_NOTIFIER_KEY`, and
+`OPS_TO_NOTIFIER_KEY`; `DOMAIN_TO_ADMIN_KEY` is the dedicated domain-to-admin
+live-session introspection credential, held only by that boundary's two ends.
+A compromised domain Worker therefore cannot reuse another caller's internal
+credential or the admin JWT signing key.
+
 ## Ownership and entry points
 
 | Area | Owner and entry point | Responsibility |
@@ -40,7 +57,7 @@ and required tests; the sibling `CLAUDE.md` is a symlink to that same source.
 
 | Service | Runtime bindings |
 |---|---|
-| `admin` | D1, `AUTH_RL` KV, `EXAMPLE_SERVICE`, `NOTIFIER`, Cron |
+| `admin` | D1, `EXAMPLE_SERVICE`, `NOTIFIER`, Cron（login lockout は D1 の原子的カウンタ） |
 | `example_service` | D1, `NOTIFIER` |
 | `notifier` | `DEDUPE` KV |
 | `ops` | `BACKUPS` R2, `BACKUP_WF`, `ADMIN`, `NOTIFIER`, Cron |
@@ -63,20 +80,30 @@ not depend on services.
   [`docs/howto/tauri-example-service.md`](./docs/howto/tauri-example-service.md).
 - **Organizations and authorization:** `admin` manages organizations and
   credentials. It synchronizes organization records to a domain Worker through
-  an internal service binding; that Worker applies tenant scope to its own D1
-  queries.
+  an internal service binding; each record carries a monotonic `version`, and the
+  receiving Worker conditionally accepts only the newest version before applying
+  tenant scope to its own D1 queries.
 - **Notifications:** application Workers call `notifier` through the internal
-  `POST /api/internal/send` service-binding endpoint. The notifier uses a KV
-  key and the Resend idempotency key for 24-hour best-effort duplicate
-  suppression; this is not exactly-once delivery. If KV is unavailable, the
-  behavior falls back toward at-least-once delivery.
+  `POST /api/internal/send` service-binding endpoint with a caller-specific
+  key and caller header. The notifier allows only the notification types owned
+  by that caller, then uses a KV key and the Resend idempotency key for
+  24-hour best-effort duplicate suppression; this is not exactly-once delivery.
+  If KV is unavailable, the behavior falls back toward at-least-once delivery.
 - **Operations:** `ops` Cron handlers start backup workflows, inspect D1 backup
   freshness and capacity, and call service `/api/health` endpoints through
-  bindings. Alerts follow the same notifier flow.
+  bindings. Backup streams are size-bounded, the private R2 bucket is checked at
+  the deployment boundary, reviewed account/bucket/D1 identities are checked
+  before credentials are used, and `latest.json` is signed with an ops-only RSA
+  key pair plus non-secret resource metadata. Alerts follow the same notifier
+  flow; failed alerts are retained in R2 when the fallback is available.
 - **Provision and deploy:** Terraform provisions D1, KV, and R2; its outputs
   are reflected in service `wrangler.jsonc` files. Wrangler deploys
   Workers, their bindings, Cron triggers, and Workflows. Details and order are
   in [`docs/howto/deploy.md`](./docs/howto/deploy.md).
+- **Local commands:** `make dev/example_service` runs the browser Worker,
+  `make dev/example_service/tauri` runs its Tauri dev window, and
+  `make build/example_service/tauri` builds the isolated native frontend
+  bundle. `make help` lists all repository targets.
 
 ## Where to change what
 
@@ -90,6 +117,7 @@ not depend on services.
 | Change shared visual language or UI primitives | [`packages/ui/src/theme.css`](./packages/ui/src/theme.css) and [`packages/ui/src`](./packages/ui/src). |
 | Change example_service's native shell or Web/native transport boundary | [`services/example_service/src/web/platform/transport.ts`](./services/example_service/src/web/platform/transport.ts), [`services/example_service/src-tauri/src/api.rs`](./services/example_service/src-tauri/src/api.rs), and [`scripts/check-tauri-boundary.mjs`](./scripts/check-tauri-boundary.mjs). |
 | Change Cloudflare resources, bindings, or deployment configuration | [`infra/terraform`](./infra/terraform), affected `wrangler.jsonc`, then [`docs/architecture/infra.md`](./docs/architecture/infra.md). |
+| Change production deploy protection or secret placement | [`scripts/check-deploy-boundary.mjs`](./scripts/check-deploy-boundary.mjs), [`.github/workflows/ci.yml`](./.github/workflows/ci.yml), [`.github/workflows/production-bootstrap.yml`](./.github/workflows/production-bootstrap.yml), and [`docs/howto/deploy.md`](./docs/howto/deploy.md). |
 
 ### Development and verification
 

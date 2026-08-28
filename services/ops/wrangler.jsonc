@@ -28,19 +28,32 @@
     { "binding": "NOTIFIER", "service": "notifier" },
     { "binding": "ADMIN", "service": "admin" }
   ],
-  // Secrets (INTERNAL_KEY / D1_EXPORT_API_TOKEN) are NOT in vars: dev values
-  // live in .dev.vars (copied from .dev.vars.example by `make init`); prod is
-  // `wrangler secret put` only (docs/howto/deploy.md).
+  "secrets": {
+    "required": [
+      "OPS_TO_NOTIFIER_KEY",
+      "D1_EXPORT_API_TOKEN",
+      "R2_POLICY_CHECK_API_TOKEN",
+      "BACKUP_SIGNING_PRIVATE_KEY"
+    ]
+  },
+  // Secrets (OPS_TO_NOTIFIER_KEY / D1_EXPORT_API_TOKEN) are NOT in vars: dev values
+  // live in .dev.vars (copied from .dev.vars.example by `make init`); production
+  // values are set only by a protected workflow (docs/howto/deploy.md).
   "vars": {
+    "APP_ENV": "production",
     // Cloudflare account id for the D1 REST export API.
     "CF_ACCOUNT_ID": "dev-account-id",
     // Target D1 database_ids to export. Prod: real UUIDs from `wrangler d1 info`.
     // Forks: add one var per additional target DB (e.g. "MYSERVICE_DB_ID") and
     // register it in opsTargets() in src/index.ts.
     "ADMIN_DB_ID": "00000000-0000-0000-0000-000000000000",
-    // Ops alert recipient (not a secret). Empty in dev (notifier LogSender).
-    // In prod set a verified address here. Empty → 'ops' placeholder (a real
-    // mail provider would reject it), so set it before relying on alerts.
+    // Runtime copy of BACKUPS.bucket_name for the R2 public-access drift check.
+    "BACKUP_BUCKET_NAME": "app-backups",
+    // Public half of the ops-only manifest signing key. The private half is
+    // provisioned as BACKUP_SIGNING_PRIVATE_KEY and never enters vars/state.
+    "BACKUP_SIGNING_PUBLIC_KEY": "",
+    // Ops alert recipient (not a secret). Production must contain a valid
+    // operational address; development may use the test fallback.
     "OPS_ALERT_EMAIL": ""
   }
 }

@@ -6,7 +6,7 @@ const job: NotificationJob = {
   id: 'user.invited:x',
   type: 'user.invited',
   to: 'staff@example.com',
-  payload: { acceptUrl: 'https://app.test/invite?token=t' },
+  payload: { acceptUrl: 'https://app.test/invite#token=t' },
 }
 
 afterEach(() => vi.restoreAllMocks())
@@ -14,7 +14,13 @@ afterEach(() => vi.restoreAllMocks())
 describe('pickSender', () => {
   it('RESEND_API_KEY 有りは ResendSender、MAIL_DEV_LOG=true は LogSender', () => {
     expect(pickSender({ RESEND_API_KEY: 'k' })).toBeInstanceOf(ResendSender)
-    expect(pickSender({ MAIL_DEV_LOG: 'true' })).toBeInstanceOf(LogSender)
+    expect(pickSender({ APP_ENV: 'development', MAIL_DEV_LOG: 'true' })).toBeInstanceOf(LogSender)
+  })
+
+  it('production では MAIL_DEV_LOG=true でも LogSender を選ばない', () => {
+    expect(() => pickSender({ APP_ENV: 'production', MAIL_DEV_LOG: 'true' })).toThrow(
+      'MAIL_DEV_LOG is development-only',
+    )
   })
 
   it('どちらも未設定なら fail close(throw)— 送信成功を偽装しない', () => {
@@ -32,7 +38,7 @@ describe('formatJob', () => {
     const { subject, text } = formatJob(job)
     expect(subject).not.toBe('[user.invited]')
     // URL が引用符に包まれていない行として現れる(メールクライアントがリンク化できる)
-    expect(text.split('\n')).toContain('https://app.test/invite?token=t')
+    expect(text.split('\n')).toContain('https://app.test/invite#token=t')
     expect(text).not.toContain('{"acceptUrl"')
   })
 
@@ -43,6 +49,7 @@ describe('formatJob', () => {
       'ops.backup_failed',
       'ops.backup_stale',
       'ops.health_check_failed',
+      'ops.monitor_failed',
       'ops.sync_drift',
       'ops.capacity_warning',
     ] as const
@@ -72,9 +79,11 @@ describe('formatJob', () => {
 })
 
 describe('LogSender', () => {
-  it('例外を投げない', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => {})
-    await expect(new LogSender().send(job)).resolves.toBeUndefined()
+  it('payload や招待 token をログへ出さず、例外も投げない', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    await expect(new LogSender().send(job, 'admin:user.invited:x')).resolves.toBeUndefined()
+    expect(JSON.stringify(log.mock.calls)).not.toContain('https://app.test/invite#token=t')
+    expect(JSON.stringify(log.mock.calls)).not.toContain('acceptUrl')
   })
 })
 
@@ -83,16 +92,27 @@ describe('ResendSender', () => {
     const spy = vi
       .spyOn(globalThis, 'fetch')
       .mockResolvedValue(new Response('{}', { status: 200 }) as never)
-    await new ResendSender('k').send(job)
+    await new ResendSender('k').send(job, 'admin:user.invited:x')
     const init = spy.mock.calls[0]?.[1] as RequestInit
-    expect((init.headers as Record<string, string>)['idempotency-key']).toBe(job.id)
+    expect((init.headers as Record<string, string>)['idempotency-key']).toBe('admin:user.invited:x')
+    expect(init.redirect).toBe('error')
+    expect(init.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('caller を含む dedupe key を provider に渡せる', async () => {
+    const spy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }) as never)
+    await new ResendSender('k').send(job, 'admin:user.invited:x')
+    const init = spy.mock.calls[0]?.[1] as RequestInit
+    expect((init.headers as Record<string, string>)['idempotency-key']).toBe('admin:user.invited:x')
   })
 
   it('from 未指定なら既定アドレスを使う', async () => {
     const spy = vi
       .spyOn(globalThis, 'fetch')
       .mockResolvedValue(new Response('{}', { status: 200 }) as never)
-    await new ResendSender('k').send(job)
+    await new ResendSender('k').send(job, 'admin:user.invited:x')
     const init = spy.mock.calls[0]?.[1]
     expect(init).toBeDefined()
     if (!init) throw new Error('missing request init')
@@ -106,7 +126,7 @@ describe('ResendSender', () => {
     const spy = vi
       .spyOn(globalThis, 'fetch')
       .mockResolvedValue(new Response('{}', { status: 200 }) as never)
-    await new ResendSender('k', 'alerts@ops.example.com').send(job)
+    await new ResendSender('k', 'alerts@ops.example.com').send(job, 'admin:user.invited:x')
     const init = spy.mock.calls[0]?.[1]
     expect(init).toBeDefined()
     if (!init) throw new Error('missing request init')
@@ -120,7 +140,7 @@ describe('ResendSender', () => {
     const spy = vi
       .spyOn(globalThis, 'fetch')
       .mockResolvedValue(new Response('{}', { status: 200 }) as never)
-    await new ResendSender('k', '').send(job)
+    await new ResendSender('k', '').send(job, 'admin:user.invited:x')
     const init = spy.mock.calls[0]?.[1]
     expect(init).toBeDefined()
     if (!init) throw new Error('missing request init')
@@ -132,7 +152,15 @@ describe('ResendSender', () => {
 
   it('非2xx は throw(呼び出し側で 502)', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('err', { status: 500 }) as never)
-    await expect(new ResendSender('k').send(job)).rejects.toThrow('resend failed')
+    await expect(new ResendSender('k').send(job, 'admin:user.invited:x')).rejects.toThrow(
+      'resend failed',
+    )
+  })
+
+  it('空の caller-scoped key は送信前に拒否する', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch')
+    await expect(new ResendSender('k').send(job, '  ')).rejects.toThrow('idempotency_key_required')
+    expect(spy).not.toHaveBeenCalled()
   })
 })
 
@@ -142,7 +170,7 @@ describe('pickSender は MAIL_FROM を ResendSender へ渡す', () => {
       .spyOn(globalThis, 'fetch')
       .mockResolvedValue(new Response('{}', { status: 200 }) as never)
     const sender = pickSender({ RESEND_API_KEY: 'k', MAIL_FROM: 'alerts@ops.example.com' })
-    await sender.send(job)
+    await sender.send(job, 'admin:user.invited:x')
     const init = spy.mock.calls[0]?.[1]
     expect(init).toBeDefined()
     if (!init) throw new Error('missing request init')

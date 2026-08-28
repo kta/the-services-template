@@ -12,6 +12,7 @@ function mirror(over: Partial<DomainOrgRow>): DomainOrgRow {
     name: 'Org 1',
     plan: 'free',
     isDisabled: false,
+    version: 1,
     ...over,
   }
 }
@@ -20,7 +21,9 @@ const okResync = () => vi.fn(async () => true)
 
 describe('reconcileOrgs', () => {
   it('一致していれば再同期も通知もしない', async () => {
-    const admins: AdminOrgRow[] = [{ id: 'o1', name: 'Org 1', plan: 'free', isDisabled: false }]
+    const admins: AdminOrgRow[] = [
+      { id: 'o1', name: 'Org 1', plan: 'free', isDisabled: false, version: 1 },
+    ]
     const resync = okResync()
     const notifyDrift = vi.fn()
     const { drift } = await reconcileOrgs({
@@ -36,10 +39,10 @@ describe('reconcileOrgs', () => {
 
   it('欠落・plan 相違・無効化相違を検出して再同期し、1 回だけ通知', async () => {
     const admins: AdminOrgRow[] = [
-      { id: 'missing', name: 'M', plan: 'free', isDisabled: false },
-      { id: 'planDrift', name: 'P', plan: 'contracted', isDisabled: false },
-      { id: 'disabledDrift', name: 'D', plan: 'free', isDisabled: true },
-      { id: 'ok', name: 'OK', plan: 'free', isDisabled: false },
+      { id: 'missing', name: 'M', plan: 'free', isDisabled: false, version: 1 },
+      { id: 'planDrift', name: 'P', plan: 'contracted', isDisabled: false, version: 2 },
+      { id: 'disabledDrift', name: 'D', plan: 'free', isDisabled: true, version: 2 },
+      { id: 'ok', name: 'OK', plan: 'free', isDisabled: false, version: 1 },
     ]
     const domain: DomainOrgRow[] = [
       mirror({ id: 'planDrift', name: 'P', plan: 'free' }),
@@ -66,7 +69,7 @@ describe('reconcileOrgs', () => {
 
   it('name 相違もドリフトとして再同期する', async () => {
     const admins: AdminOrgRow[] = [
-      { id: 'renamed', name: 'New Name', plan: 'free', isDisabled: false },
+      { id: 'renamed', name: 'New Name', plan: 'free', isDisabled: false, version: 1 },
     ]
     const resync = okResync()
     const notifyDrift = vi.fn()
@@ -82,8 +85,8 @@ describe('reconcileOrgs', () => {
 
   it('resync 失敗は failed として通知に載る(黙って握りつぶさない)', async () => {
     const admins: AdminOrgRow[] = [
-      { id: 'a', name: 'A', plan: 'free', isDisabled: false },
-      { id: 'b', name: 'B', plan: 'free', isDisabled: false },
+      { id: 'a', name: 'A', plan: 'free', isDisabled: false, version: 1 },
+      { id: 'b', name: 'B', plan: 'free', isDisabled: false, version: 1 },
     ]
     const notifyDrift = vi.fn()
     const result = await reconcileOrgs({
@@ -104,6 +107,7 @@ describe('reconcileOrgs', () => {
       name: `Org ${i}`,
       plan: 'free',
       isDisabled: false,
+      version: 1,
     }))
     const resync = okResync()
     const notifyDrift = vi.fn()
@@ -116,5 +120,20 @@ describe('reconcileOrgs', () => {
     expect(result.drift).toHaveLength(MAX_RESYNC_PER_RUN + 5)
     expect(result.truncated).toBe(true)
     expect(resync).toHaveBeenCalledTimes(MAX_RESYNC_PER_RUN)
+  })
+
+  it('同期バージョンの相違もドリフトとして再同期する', async () => {
+    const resync = okResync()
+    const notifyDrift = vi.fn()
+    const result = await reconcileOrgs({
+      listAdminOrgs: async () => [
+        { id: 'o1', name: 'Org 1', plan: 'free', isDisabled: false, version: 4 },
+      ],
+      listDomainOrgs: async () => [mirror({ version: 3 })],
+      resync,
+      notifyDrift,
+    })
+    expect(result.drift).toEqual(['o1'])
+    expect(resync).toHaveBeenCalledTimes(1)
   })
 })

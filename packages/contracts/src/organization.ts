@@ -20,6 +20,9 @@ export type CreateOrganization = z.infer<typeof CreateOrganization>
 export const Organization = z.looseObject({
   id: z.string().min(1),
   name: z.string().min(1).max(200),
+  // Monotonic source revision. Domain mirrors reject an older revision that
+  // arrives after a newer service-binding request.
+  version: z.number().int().positive(),
   plan: Plan.default('free'),
   isDisabled: z.boolean().default(false),
   createdAt: z.string().datetime(),

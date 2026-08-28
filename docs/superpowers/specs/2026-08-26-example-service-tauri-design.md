@@ -4,7 +4,7 @@
 
 ## 目的
 
-`services/example_service` を、既存の Cloudflare Worker + React SPA と同じコードベースから Tauri v2 の desktop / iOS / Android アプリとしてビルドできる状態にする。既存の Web 開発体験と `AUTH_DEV_GRANT` ベースの example 用ログイン契約は維持する。
+`services/example_service` を、既存の Cloudflare Worker + React SPA と同じコードベースから Tauri v2 の desktop / iOS / Android アプリとしてビルドできる状態にする。既存の Web 開発体験と `AUTH_DEV_GRANT` ベースの example 用ログイン契約は維持する。ただし access JWT の署名方式は横断仕様に従い RS256 とし、admin の private key と domain の public key を分離する。
 
 ## スコープ
 
@@ -14,7 +14,7 @@
 - native transport は `/api/` 配下、GET/POST/PATCH/DELETE、Authorization/Content-Type ヘッダーだけを許可する。
 - Web は従来どおり relative fetch + `sessionStorage` を使う。
 - Tauri は access token を JavaScript のメモリだけに保持し、アプリ再起動時は再ログインとする。
-- 既存の example_service の認証 API（`POST /api/auth/token`、`AUTH_DEV_GRANT`）を変更しない。
+- 既存の example_service の認証 API（`POST /api/auth/token`、`AUTH_DEV_GRANT`）の route 契約は変更しない。dev grant の署名にはローカル専用 `AUTH_DEV_PRIVATE_KEY` を使い、本番 secret にはしない。
 
 ## スコープ外
 
@@ -42,7 +42,7 @@ Tauri app
 
 ### Rust bridge
 
-`src-tauri/src/api.rs` の `api_request` は、ビルド時に `TAURI_EXAMPLE_API_ORIGIN` を正規化して埋め込む。入力 path を URL の origin として解釈せず、固定 origin に連結する。redirect は追従せず、レスポンスの `set-cookie` は renderer に返さない。
+`src-tauri/src/api.rs` の `api_request` は、ビルド時に `TAURI_EXAMPLE_API_ORIGIN` を正規化して埋め込む。入力 path を URL の origin として解釈せず、固定 origin に連結する。relative `/api/` path、許可 method/header、encoded traversal/backslash を検査する。redirect は追従せず、レスポンスの `set-cookie` は renderer に返さない。
 
 Tauri capability は `api_request` のみを公開する。filesystem、shell、任意の HTTP plugin、任意 command は追加しない。
 
@@ -52,7 +52,7 @@ example_service には admin のような refresh endpoint がないため、aut
 
 ## Origin と環境
 
-- debug: デフォルトは `http://localhost:5173`。localhost / loopback の HTTP だけを許可する。
+- debug: デフォルトは `http://localhost:5173`。localhost / loopback の HTTP だけを許可する。Vite の `TAURI_DEV_HOST` は HMR の bind を変えるだけで、Rust の API origin allowlist は広げない。
 - release: `TAURI_EXAMPLE_API_ORIGIN` を必須とし、HTTPS の origin だけを許可する。
 - origin に path、query、fragment、userinfo、末尾 slash は許可しない。
 
@@ -64,4 +64,4 @@ example_service には admin のような refresh endpoint がないため、aut
 - Rust unit test: origin parser、request path / method / header allowlist、cookie 除去。
 - 既存の example_service Worker / Web / E2E テストを維持する。
 - 境界チェッカーを admin と example_service の両方へ適用し、native source の raw fetch と未知の storage write を拒否する。
-- CI は example_service の Tauri desktop / iOS / Android build workflow を manual dispatch で実行できるようにする。
+- CI は example_service の Tauri desktop / iOS / Android build workflow を manual dispatch で実行できるようにする。workflow は Cloudflare credential を持たず、unsigned/debug artifact を保存するだけにする。

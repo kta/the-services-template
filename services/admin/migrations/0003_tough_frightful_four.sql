@@ -1,0 +1,1 @@
+ALTER TABLE `invitations` ADD `consumed_nonce` text;

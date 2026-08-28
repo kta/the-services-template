@@ -1,0 +1,511 @@
+name: Production secret bootstrap
+
+on:
+  # This is the only manual production provisioning workflow. It is limited to
+  # the protected main branch and pauses at the production environment's
+  # required reviewer gate before Cloudflare credentials are made available.
+  workflow_dispatch:
+    inputs:
+      domain_service:
+        description: "Copied domain service directory (for example: booking)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # Compile the exact protected-main commit without a production environment
+  # permission or Cloudflare credentials. The credentialed bootstrap
+  # job only installs this verified archive and deploys fixed entries.
+  build-production:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true
+    runs-on: ubuntu-latest
+    outputs:
+      bundle_sha256: ${{ steps.package-worker-artifact.outputs.bundle_sha256 }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pin checkout to the actual main branch
+        run: git checkout -B main "$GITHUB_SHA"
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Validate copied domain input before package selection
+        env:
+          DOMAIN_SERVICE: ${{ inputs.domain_service }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$DOMAIN_SERVICE" =~ ^[a-z][a-z0-9_]{0,62}$ || "$DOMAIN_SERVICE" == admin || "$DOMAIN_SERVICE" == notifier || "$DOMAIN_SERVICE" == ops || "$DOMAIN_SERVICE" == example_service ]]; then
+            echo 'domain_service must be an unreserved copied lowercase service directory' >&2
+            exit 1
+          fi
+          node scripts/require-production-domain-auth.mjs "$DOMAIN_SERVICE"
+      - name: Build notifier without Cloudflare credentials
+        run: pnpm --filter @app/notifier run build
+      - name: Build admin without Cloudflare credentials
+        run: pnpm --filter @app/admin run build
+      - name: Build ops without Cloudflare credentials
+        run: pnpm --filter @app/ops run build
+      - name: Build copied domain without Cloudflare credentials
+        env:
+          DOMAIN_SERVICE: ${{ inputs.domain_service }}
+        run: pnpm --filter "@app/$DOMAIN_SERVICE" run build
+      - name: Verify and package production Worker bundles
+        env:
+          DOMAIN_SERVICE: ${{ inputs.domain_service }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/verify-worker-artifact.mjs \
+            --service admin \
+            --service notifier \
+            --service ops \
+            --service "$DOMAIN_SERVICE"
+          tar --create --gzip --file=production-bootstrap-worker-bundles.tar.gz -- \
+            production-worker-manifest.json \
+            services/admin/dist \
+            services/notifier/dist \
+            services/ops/dist \
+            "services/$DOMAIN_SERVICE/dist"
+      - name: Record exact Worker bundle digest
+        id: package-worker-artifact
+        run: echo "bundle_sha256=$(sha256sum production-bootstrap-worker-bundles.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: upload-worker-artifact
+        with:
+          name: production-bootstrap-worker-bundles
+          path: production-bootstrap-worker-bundles.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  bootstrap:
+    needs: [build-production]
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    environment: production
+    env:
+      # The local guard requires an explicit production marker in addition to
+      # GitHub's environment selector; this prevents a copied workflow from
+      # accidentally treating another environment as production.
+      PRODUCTION_ENVIRONMENT: production
+    # Do not race the normal production deploy chain or another bootstrap
+    # against the same Worker secret set.
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pin checkout to the actual main branch
+        run: git checkout -B main "$GITHUB_SHA"
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: production-bootstrap-worker-bundles
+          path: ${{ runner.temp }}/production-bootstrap-worker-bundles
+      - name: Verify exact build artifact digest before credentials
+        env:
+          EXPECTED_BUNDLE_SHA256: ${{ needs.build-production.outputs.bundle_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_BUNDLE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          printf '%s  %s\n' "$EXPECTED_BUNDLE_SHA256" "$RUNNER_TEMP/production-bootstrap-worker-bundles/production-bootstrap-worker-bundles.tar.gz" | sha256sum --check --strict
+      - name: Capture trusted production tool paths
+        id: trusted-tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          resolve_tool() {
+            local name="$1"
+            local path resolved owner mode
+            path="$(command -v -- "$name")"
+            test -n "$path" && test -x "$path"
+            resolved="$(realpath "$path")"
+            case "$resolved" in
+              "$GITHUB_WORKSPACE"/*)
+                echo "$name resolved inside the checkout" >&2
+                return 1
+                ;;
+            esac
+            owner="$(stat -c '%u' "$resolved")"
+            mode="$(stat -c '%a' "$resolved")"
+            test "$owner" = "0" || test "$owner" = "$(id -u)"
+            (( 8#$mode & 18 == 0 ))
+            case "$name:$resolved" in
+              node:*/node|pnpm:*/pnpm|pnpm:*/pnpm.js|pnpm:*/pnpm.cjs|git:*/git) ;;
+              *)
+                echo "$name resolved to an unexpected executable" >&2
+                return 1
+                ;;
+            esac
+            printf '%s' "$resolved"
+          }
+          node_path="$(resolve_tool node)"
+          git_path="$(resolve_tool git)"
+          pnpm_path="$(resolve_tool pnpm)"
+          printf 'node=%s\n' "$node_path" >> "$GITHUB_OUTPUT"
+          printf 'pnpm=%s\n' "$pnpm_path" >> "$GITHUB_OUTPUT"
+          printf 'path=%s:%s:/usr/local/bin:/usr/bin:/bin\n' \
+            "$(dirname "$node_path")" "$(dirname "$git_path")" \
+            >> "$GITHUB_OUTPUT"
+      - name: Verify locked Wrangler before production credentials
+        env:
+          PNPM: ${{ steps.trusted-tools.outputs.pnpm }}
+        working-directory: services/admin
+        run: test "$($PNPM --config.offline=true exec wrangler --version)" = "4.125.0"
+      - name: Verify and install reviewed production Worker bundles
+        env:
+          DOMAIN_SERVICE: ${{ inputs.domain_service }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ${{ steps.trusted-tools.outputs.node }} scripts/verify-worker-artifact.mjs \
+            --archive "$RUNNER_TEMP/production-bootstrap-worker-bundles/production-bootstrap-worker-bundles.tar.gz" \
+            --install-root "$GITHUB_WORKSPACE" \
+            --service admin \
+            --service notifier \
+            --service ops \
+            --service "$DOMAIN_SERVICE"
+      - name: Require protected main bootstrap boundary
+        env:
+          PATH: ${{ steps.trusted-tools.outputs.path }}
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/require-production-bootstrap.mjs
+      - name: Verify GitHub production environment policy
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PATH: ${{ steps.trusted-tools.outputs.path }}
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/check-github-production-environment.mjs
+      - name: Verify exact-SHA CI result before production credentials
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+          PATH: ${{ steps.trusted-tools.outputs.path }}
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/require-github-verify.mjs
+      - name: Resolve reviewed production resource identities before credentials
+        id: reviewed-resources
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/production-resource-identities.mjs
+      - name: Verify reviewed production service configs before credentials
+        env:
+          DOMAIN_SERVICE: ${{ inputs.domain_service }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.reviewed-resources.outputs.account_id }}
+          PATH: ${{ steps.trusted-tools.outputs.path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ${{ steps.trusted-tools.outputs.node }} scripts/check-production-config.mjs admin
+          ${{ steps.trusted-tools.outputs.node }} scripts/check-production-config.mjs notifier
+          ${{ steps.trusted-tools.outputs.node }} scripts/check-production-config.mjs ops
+          ${{ steps.trusted-tools.outputs.node }} scripts/check-production-config.mjs "$DOMAIN_SERVICE"
+      - name: Verify Cloudflare account and D1 resource identities
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          REVIEWED_ACCOUNT_ID: ${{ steps.reviewed-resources.outputs.account_id }}
+          REVIEWED_DEDUPE_ID: ${{ steps.reviewed-resources.outputs.dedupe_id }}
+          REVIEWED_BUCKET_NAME: ${{ steps.reviewed-resources.outputs.bucket_name }}
+          REVIEWED_BACKUP_SIGNING_PUBLIC_KEY_B64: ${{ steps.reviewed-resources.outputs.backup_signing_public_key_b64 }}
+          EXPECTED_DEDUPE_ID: ${{ secrets.PRODUCTION_NOTIFIER_DEDUPE_ID }}
+          EXPECTED_BUCKET_NAME: ${{ secrets.PRODUCTION_BACKUP_BUCKET_NAME }}
+          PRODUCTION_RESOURCE_MANIFEST: ${{ secrets.PRODUCTION_RESOURCE_MANIFEST }}
+          REVIEWED_D1_IDENTITIES: ${{ steps.reviewed-resources.outputs.database_identities }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$PRODUCTION_RESOURCE_MANIFEST"
+          printf '%s' "$PRODUCTION_RESOURCE_MANIFEST" | jq -e \
+            --arg account "$REVIEWED_ACCOUNT_ID" \
+            --arg bucket "$REVIEWED_BUCKET_NAME" \
+            --arg dedupe "$REVIEWED_DEDUPE_ID" \
+            --argjson databases "$REVIEWED_D1_IDENTITIES" \
+            'type == "object" and .accountId == $account and .bucketName == $bucket and .dedupeId == $dedupe and (.databaseIdentities | type == "array") and ((.databaseIdentities | sort_by(.service)) == ($databases | sort_by(.service)))' >/dev/null
+          test "$CLOUDFLARE_ACCOUNT_ID" = "$REVIEWED_ACCOUNT_ID"
+          account="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 10 \
+            --header 'accept: application/json' \
+            --header "authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$REVIEWED_ACCOUNT_ID")"
+          printf '%s' "$account" | jq -e --arg id "$REVIEWED_ACCOUNT_ID" \
+            '.success == true and .result.id == $id' >/dev/null
+          test "$REVIEWED_DEDUPE_ID" = "$EXPECTED_DEDUPE_ID"
+          test "$REVIEWED_BUCKET_NAME" = "$EXPECTED_BUCKET_NAME"
+          kv="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 10 \
+            --header 'accept: application/json' \
+            --header "authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$REVIEWED_ACCOUNT_ID/storage/kv/namespaces/$EXPECTED_DEDUPE_ID")"
+          printf '%s' "$kv" | jq -e --arg id "$EXPECTED_DEDUPE_ID" \
+            '.success == true and .result.id == $id' >/dev/null
+          bucket="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 10 \
+            --header 'accept: application/json' \
+            --header "authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$REVIEWED_ACCOUNT_ID/r2/buckets/$EXPECTED_BUCKET_NAME")"
+          printf '%s' "$bucket" | jq -e --arg name "$EXPECTED_BUCKET_NAME" \
+            '.success == true and .result.name == $name' >/dev/null
+          while IFS= read -r identity; do
+            database_id="$(printf '%s' "$identity" | jq -er '.databaseId')"
+            database_name="$(printf '%s' "$identity" | jq -er '.databaseName')"
+            database="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 10 \
+              --header 'accept: application/json' \
+              --header "authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              "https://api.cloudflare.com/client/v4/accounts/$REVIEWED_ACCOUNT_ID/d1/database/$database_id")"
+            printf '%s' "$database" | jq -e \
+              --arg id "$database_id" --arg name "$database_name" \
+              '.success == true and .result.id == $id and .result.name == $name' >/dev/null
+          done < <(printf '%s' "$REVIEWED_D1_IDENTITIES" | jq -c '.[]')
+          echo 'Cloudflare account and D1 resource identities: verified'
+      - name: Verify R2 backup bucket privacy before provisioning
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          api="https://api.cloudflare.com/client/v4/accounts/${{ steps.reviewed-resources.outputs.account_id }}/r2/buckets/${{ steps.reviewed-resources.outputs.bucket_name }}/domains"
+          managed="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 10 \
+            --header 'accept: application/json' \
+            --header "authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "$api/managed")"
+          printf '%s' "$managed" | jq -e '.success == true and .result.enabled == false' >/dev/null
+          custom="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 10 \
+            --header 'accept: application/json' \
+            --header "authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "$api/custom")"
+          printf '%s' "$custom" | jq -e '.success == true and (.result.domains | type == "array") and all(.[]; .enabled == false)' >/dev/null
+          echo 'R2 backup bucket public access: disabled'
+      - name: Verify remote production secret names before any write
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          DOMAIN_SERVICE: ${{ inputs.domain_service }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          check_remote_secret_names() {
+            local service="$1"
+            shift
+            local raw status response expected_json worker_name
+            worker_name="${service//_/-}"
+            response="$(curl --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 10 \
+              --header 'accept: application/json' \
+              --header "authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              --write-out $'\n%{http_code}' \
+              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/$worker_name/secrets")"
+            status="${response##*$'\n'}"
+            raw="${response%$'\n'*}"
+            if [[ "$status" == 404 ]]; then
+              echo "production Worker $worker_name was not found; bootstrap may create it"
+              return 0
+            fi
+            if [[ "$status" != 200 ]]; then
+              echo "remote secret-name inspection failed for $service (HTTP $status)" >&2
+              return 1
+            fi
+            expected_json="$(printf '%s\n' "$@" | jq -R -s 'split("\n") | map(select(length > 0)) | sort')"
+            if ! printf '%s' "$raw" | jq -e --argjson expected "$expected_json" '
+              .success == true and (.result | type == "array") and
+              (.result | all(.[]; type == "object" and (.name | type == "string") and (.name | test("^[A-Z][A-Z0-9_]*$")))) and
+              (.result | map(.name) | sort) == $expected
+            ' >/dev/null; then
+              echo "remote secret names do not exactly match the reviewed policy for $service" >&2
+              return 1
+            fi
+          }
+          domain_suffix="${DOMAIN_SERVICE^^}"
+          domain_suffix="${domain_suffix//-/_}"
+          domain_secret="ADMIN_TO_${domain_suffix}_KEY"
+          check_remote_secret_names notifier \
+            ADMIN_TO_NOTIFIER_KEY DOMAIN_TO_NOTIFIER_KEY OPS_TO_NOTIFIER_KEY RESEND_API_KEY
+          check_remote_secret_names admin \
+            DOMAIN_TO_ADMIN_KEY "$domain_secret" ADMIN_TO_NOTIFIER_KEY JWT_PRIVATE_KEY JWT_PUBLIC_KEY AUTH_PEPPER
+          check_remote_secret_names "$DOMAIN_SERVICE" \
+            "$domain_secret" DOMAIN_TO_ADMIN_KEY DOMAIN_TO_NOTIFIER_KEY JWT_PUBLIC_KEY
+          check_remote_secret_names ops \
+            OPS_TO_NOTIFIER_KEY D1_EXPORT_API_TOKEN R2_POLICY_CHECK_API_TOKEN BACKUP_SIGNING_PRIVATE_KEY
+      - name: Bootstrap production Workers with fixed secret bundles
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          DOMAIN_SERVICE: ${{ inputs.domain_service }}
+          PRODUCTION_JWT_PRIVATE_KEY: ${{ secrets.PRODUCTION_JWT_PRIVATE_KEY }}
+          PRODUCTION_JWT_PUBLIC_KEY: ${{ secrets.PRODUCTION_JWT_PUBLIC_KEY }}
+          PRODUCTION_DOMAIN_TO_ADMIN_KEY: ${{ secrets.PRODUCTION_DOMAIN_TO_ADMIN_KEY }}
+          PRODUCTION_ADMIN_TO_DOMAIN_KEY: ${{ secrets.PRODUCTION_ADMIN_TO_DOMAIN_KEY }}
+          PRODUCTION_ADMIN_TO_NOTIFIER_KEY: ${{ secrets.PRODUCTION_ADMIN_TO_NOTIFIER_KEY }}
+          PRODUCTION_DOMAIN_TO_NOTIFIER_KEY: ${{ secrets.PRODUCTION_DOMAIN_TO_NOTIFIER_KEY }}
+          PRODUCTION_OPS_TO_NOTIFIER_KEY: ${{ secrets.PRODUCTION_OPS_TO_NOTIFIER_KEY }}
+          PRODUCTION_AUTH_PEPPER: ${{ secrets.PRODUCTION_AUTH_PEPPER }}
+          PRODUCTION_RESEND_API_KEY: ${{ secrets.PRODUCTION_RESEND_API_KEY }}
+          PRODUCTION_D1_EXPORT_API_TOKEN: ${{ secrets.PRODUCTION_D1_EXPORT_API_TOKEN }}
+          PRODUCTION_R2_POLICY_CHECK_API_TOKEN: ${{ secrets.PRODUCTION_R2_POLICY_CHECK_API_TOKEN }}
+          PRODUCTION_BACKUP_SIGNING_PRIVATE_KEY: ${{ secrets.PRODUCTION_BACKUP_SIGNING_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          if [[ ! "$DOMAIN_SERVICE" =~ ^[a-z][a-z0-9_]{0,62}$ || "$DOMAIN_SERVICE" == admin || "$DOMAIN_SERVICE" == notifier || "$DOMAIN_SERVICE" == ops || "$DOMAIN_SERVICE" == example_service ]]; then
+            echo 'domain_service must be an unreserved copied lowercase service directory' >&2
+            exit 1
+          fi
+          secret_vars=(
+            PRODUCTION_JWT_PRIVATE_KEY
+            PRODUCTION_JWT_PUBLIC_KEY
+            PRODUCTION_DOMAIN_TO_ADMIN_KEY
+            PRODUCTION_ADMIN_TO_DOMAIN_KEY
+            PRODUCTION_ADMIN_TO_NOTIFIER_KEY
+            PRODUCTION_DOMAIN_TO_NOTIFIER_KEY
+            PRODUCTION_OPS_TO_NOTIFIER_KEY
+            PRODUCTION_AUTH_PEPPER
+            PRODUCTION_RESEND_API_KEY
+            PRODUCTION_D1_EXPORT_API_TOKEN
+            PRODUCTION_R2_POLICY_CHECK_API_TOKEN
+            PRODUCTION_BACKUP_SIGNING_PRIVATE_KEY
+          )
+          declare -A seen_secret_digests=()
+          for variable in "${secret_vars[@]}"; do
+            value="${!variable:-}"
+            if [[ -z "$value" ]]; then
+              echo "$variable is required" >&2
+              exit 1
+            fi
+            if [[ "$value" =~ ^(dev|e2e|test)([-_]|$) || "$value" == *change-me* ]]; then
+              echo "$variable is a published development/template value" >&2
+              exit 1
+            fi
+            value_bytes="$(printf '%s' "$value" | wc -c | tr -d '[:space:]')"
+            if [[ "$variable" != PRODUCTION_JWT_PRIVATE_KEY && "$variable" != PRODUCTION_JWT_PUBLIC_KEY && "$variable" != PRODUCTION_BACKUP_SIGNING_PRIVATE_KEY && "$value_bytes" -lt 32 ]]; then
+              echo "$variable must be at least 32 bytes" >&2
+              exit 1
+            fi
+            if [[ "$variable" != PRODUCTION_JWT_PRIVATE_KEY && "$variable" != PRODUCTION_JWT_PUBLIC_KEY && "$variable" != PRODUCTION_BACKUP_SIGNING_PRIVATE_KEY ]]; then
+              if printf '%s' "$value" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+                echo "$variable contains a control character" >&2
+                exit 1
+              fi
+            fi
+            digest="$(printf '%s' "$value" | sha256sum | cut -d' ' -f1)"
+            if [[ -n "${seen_secret_digests[$digest]:-}" ]]; then
+              echo "$variable duplicates ${seen_secret_digests[$digest]}" >&2
+              exit 1
+            fi
+            seen_secret_digests[$digest]="$variable"
+          done
+          private_fingerprint="$(printf '%s' "$PRODUCTION_JWT_PRIVATE_KEY" | openssl pkey -pubout -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1)"
+          public_fingerprint="$(printf '%s' "$PRODUCTION_JWT_PUBLIC_KEY" | openssl pkey -pubin -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1)"
+          backup_fingerprint="$(printf '%s' "$PRODUCTION_BACKUP_SIGNING_PRIVATE_KEY" | openssl pkey -pubout -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1)"
+          [[ -n "$private_fingerprint" && "$private_fingerprint" == "$public_fingerprint" ]] || {
+            echo 'JWT private/public key pair mismatch' >&2
+            exit 1
+          }
+          [[ "$backup_fingerprint" != "$private_fingerprint" ]] || {
+            echo 'backup signing key must not reuse JWT key material' >&2
+            exit 1
+          }
+          reviewed_backup_public="$RUNNER_TEMP/reviewed-backup-signing-public-key.pem"
+          printf '%s' "$REVIEWED_BACKUP_SIGNING_PUBLIC_KEY_B64" | base64 --decode > "$reviewed_backup_public"
+          chmod 600 "$reviewed_backup_public"
+          printf '%s' "$PRODUCTION_BACKUP_SIGNING_PRIVATE_KEY" | openssl rsa -check -noout >/dev/null 2>&1
+          openssl rsa -pubin -in "$reviewed_backup_public" -check -noout >/dev/null 2>&1
+          reviewed_backup_fingerprint="$(openssl pkey -pubin -in "$reviewed_backup_public" -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1)"
+          [[ -n "$reviewed_backup_fingerprint" && "$backup_fingerprint" == "$reviewed_backup_fingerprint" ]] || {
+            echo 'backup signing private key does not match the reviewed ops public key' >&2
+            exit 1
+          }
+          key_dir="$RUNNER_TEMP/production-secret-bundles"
+          rm -rf -- "$key_dir"
+          mkdir -p -- "$key_dir"
+          chmod 700 "$key_dir"
+          write_secret_file() {
+            local variable="$1"
+            local value="${!variable:-}"
+            printf '%s' "$value" > "$key_dir/$variable"
+            chmod 600 "$key_dir/$variable"
+          }
+          for variable in "${secret_vars[@]}"; do write_secret_file "$variable"; done
+          domain_suffix="$(printf '%s' "$DOMAIN_SERVICE" | tr '[:lower:]' '[:upper:]')"
+          domain_secret="ADMIN_TO_${domain_suffix}_KEY"
+          jq -n \
+            --rawfile admin_key "$key_dir/PRODUCTION_ADMIN_TO_NOTIFIER_KEY" \
+            --rawfile domain_key "$key_dir/PRODUCTION_DOMAIN_TO_NOTIFIER_KEY" \
+            --rawfile ops_key "$key_dir/PRODUCTION_OPS_TO_NOTIFIER_KEY" \
+            --rawfile resend "$key_dir/PRODUCTION_RESEND_API_KEY" \
+            '{ADMIN_TO_NOTIFIER_KEY:$admin_key,DOMAIN_TO_NOTIFIER_KEY:$domain_key,OPS_TO_NOTIFIER_KEY:$ops_key,RESEND_API_KEY:$resend}' \
+            > "$key_dir/notifier.json"
+          jq -n \
+            --rawfile domain_admin "$key_dir/PRODUCTION_DOMAIN_TO_ADMIN_KEY" \
+            --rawfile admin_domain "$key_dir/PRODUCTION_ADMIN_TO_DOMAIN_KEY" \
+            --rawfile admin_notifier "$key_dir/PRODUCTION_ADMIN_TO_NOTIFIER_KEY" \
+            --rawfile jwt_private "$key_dir/PRODUCTION_JWT_PRIVATE_KEY" \
+            --rawfile jwt_public "$key_dir/PRODUCTION_JWT_PUBLIC_KEY" \
+            --rawfile pepper "$key_dir/PRODUCTION_AUTH_PEPPER" \
+            --arg dynamic_name "$domain_secret" \
+            '{DOMAIN_TO_ADMIN_KEY:$domain_admin,ADMIN_TO_NOTIFIER_KEY:$admin_notifier,JWT_PRIVATE_KEY:$jwt_private,JWT_PUBLIC_KEY:$jwt_public,AUTH_PEPPER:$pepper} + {($dynamic_name):$admin_domain}' \
+            > "$key_dir/admin.json"
+          jq -n \
+            --rawfile admin_key "$key_dir/PRODUCTION_ADMIN_TO_DOMAIN_KEY" \
+            --rawfile domain_admin "$key_dir/PRODUCTION_DOMAIN_TO_ADMIN_KEY" \
+            --rawfile notifier_key "$key_dir/PRODUCTION_DOMAIN_TO_NOTIFIER_KEY" \
+            --rawfile jwt_public "$key_dir/PRODUCTION_JWT_PUBLIC_KEY" \
+            --arg dynamic_name "$domain_secret" \
+            '{($dynamic_name):$admin_key,DOMAIN_TO_ADMIN_KEY:$domain_admin,DOMAIN_TO_NOTIFIER_KEY:$notifier_key,JWT_PUBLIC_KEY:$jwt_public}' \
+            > "$key_dir/domain.json"
+          jq -n \
+            --rawfile ops_key "$key_dir/PRODUCTION_OPS_TO_NOTIFIER_KEY" \
+            --rawfile export_token "$key_dir/PRODUCTION_D1_EXPORT_API_TOKEN" \
+            --rawfile r2_token "$key_dir/PRODUCTION_R2_POLICY_CHECK_API_TOKEN" \
+            --rawfile signing "$key_dir/PRODUCTION_BACKUP_SIGNING_PRIVATE_KEY" \
+            '{OPS_TO_NOTIFIER_KEY:$ops_key,D1_EXPORT_API_TOKEN:$export_token,R2_POLICY_CHECK_API_TOKEN:$r2_token,BACKUP_SIGNING_PRIVATE_KEY:$signing}' \
+            > "$key_dir/ops.json"
+      # Wrangler was installed from the frozen lockfile and verified before
+      # credentials were exposed. `--config.offline=true` makes any registry
+      # fallback fail closed after the credential boundary.
+      - name: Bootstrap notifier
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        working-directory: services/notifier
+        run: ${{ steps.trusted-tools.outputs.pnpm }} --config.offline=true exec wrangler deploy dist/index.js --no-bundle --config=wrangler.jsonc --secrets-file "$RUNNER_TEMP/production-secret-bundles/notifier.json"
+      - name: Bootstrap admin
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        working-directory: services/admin
+        run: ${{ steps.trusted-tools.outputs.pnpm }} --config.offline=true exec wrangler deploy dist/admin/index.js --no-bundle --config=wrangler.jsonc --secrets-file "$RUNNER_TEMP/production-secret-bundles/admin.json" --assets=dist/client
+      - name: Bootstrap copied domain
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        working-directory: services/${{ inputs.domain_service }}
+        run: ${{ steps.trusted-tools.outputs.pnpm }} --config.offline=true exec wrangler deploy "dist/${{ inputs.domain_service }}/index.js" --no-bundle --config=wrangler.jsonc --secrets-file "$RUNNER_TEMP/production-secret-bundles/domain.json" --assets=dist/client
+      - name: Bootstrap ops
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        working-directory: services/ops
+        run: ${{ steps.trusted-tools.outputs.pnpm }} --config.offline=true exec wrangler deploy dist/index.js --no-bundle --config=wrangler.jsonc --secrets-file "$RUNNER_TEMP/production-secret-bundles/ops.json"
+      - name: Remove bootstrap secret material
+        if: ${{ always() }}
+        shell: bash
+        run: rm -rf -- "$RUNNER_TEMP/production-secret-bundles"

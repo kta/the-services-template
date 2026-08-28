@@ -24,11 +24,34 @@
       "migrations_dir": "migrations"
     }
   ],
+  "secrets": {
+    "required": [
+      "ADMIN_TO_EXAMPLE_SERVICE_KEY",
+      "DOMAIN_TO_ADMIN_KEY",
+      "DOMAIN_TO_NOTIFIER_KEY",
+      "JWT_PUBLIC_KEY"
+    ]
+  },
   // No secrets in `vars` (official guidance). Dev values live in .dev.vars
-  // (copied from .dev.vars.example by `make init`, gitignored); prod values are
-  // set via `wrangler secret put` only. Until secrets are set, internal APIs
-  // and auth fail closed. See docs/howto/deploy.md.
+  // (copied from .dev.vars.example by `make init`, gitignored); production
+  // domain Workers receive JWT_PUBLIC_KEY (never JWT_PRIVATE_KEY), and values
+  // are set by a protected production workflow only. AUTH_DEV_PRIVATE_KEY exists only
+  // for the local credential-less grant and must never be configured remotely.
+  // Until secrets are set, internal APIs and auth fail closed. The optional
+  // AUTH_DEV_PRIVATE_KEY is loaded only from local .dev.vars when an E2E/dev
+  // config explicitly requests it; it is not a production binding. See
+  // docs/howto/deploy.md.
+  "vars": {
+    "APP_ENV": "production",
+    "DOMAIN_NOTIFICATION_TO": "",
+    // Credential-less dev grant is disabled by default and only overridden by
+    // a local .dev.vars value. Never set this to true in a production env.
+    "AUTH_DEV_GRANT": "false"
+  },
   // Notifier binding (this template does not use Queues). POST NotificationJob to
   // the notifier Worker's /api/internal/send over this service binding.
-  "services": [{ "binding": "NOTIFIER", "service": "notifier" }]
+  "services": [
+    { "binding": "ADMIN", "service": "admin" },
+    { "binding": "NOTIFIER", "service": "notifier" }
+  ]
 }

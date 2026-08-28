@@ -2,7 +2,12 @@
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "treatConfigHintsAsErrors": true,
   "ignoreDependencies": ["^cloudflare(:.*)?$"],
-  "ignoreFiles": [".agents/skills/design-select/scripts/**"],
+  "ignoreBinaries": ["ruby", "terraform"],
+  "ignoreFiles": [
+    ".agents/skills/design-select/scripts/**",
+    "scripts/tauri-dev-host.d.mts",
+    "scripts/web-csp.d.mts"
+  ],
   "workspaces": {
     "packages/contracts": {
       "entry": ["test/**/*.test.ts"],
@@ -19,7 +24,12 @@
       "project": ["src/**/*.{ts,tsx}"]
     },
     "services/admin": {
-      "entry": ["test/**/*.test.ts", "vitest.config.ts", "src/web/**/*.test.{ts,tsx}"],
+      "entry": [
+        "test/**/*.test.ts",
+        "vitest.config.ts",
+        "vite.tauri.config.ts",
+        "src/web/**/*.test.{ts,tsx}"
+      ],
       "project": ["src/**/*.{ts,tsx,css}", "test/**/*.ts", "e2e/**/*.ts", "*.ts", "*.mjs"],
       "vitest": false
     },
@@ -27,6 +37,7 @@
       "entry": [
         "test/**/*.test.ts",
         "vitest.config.ts",
+        "vite.tauri.config.ts",
         "src/web/**/*.test.{ts,tsx}",
         "e2e/notifier-failure.worker.ts"
       ],

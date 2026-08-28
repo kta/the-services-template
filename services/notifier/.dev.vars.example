@@ -1,7 +1,13 @@
 # ローカル開発用の dev 値。`make init` が .dev.vars にコピーする(.dev.vars は gitignore)。
-# 本番は `wrangler secret put` で設定(docs/howto/deploy.md)。
-INTERNAL_KEY=dev-internal-key
+# 本番は protected production workflow の allowlist 経由で設定(docs/howto/deploy.md)。
+APP_ENV=development
+ADMIN_TO_NOTIFIER_KEY=dev-admin-to-notifier-key-000000000000
+DOMAIN_TO_NOTIFIER_KEY=dev-domain-to-notifier-key-000000000000
+OPS_TO_NOTIFIER_KEY=dev-ops-to-notifier-key-000000000000
 # 空 = LogSender(メールを送らずログ出力)。実送信したいローカルだけ実キーを入れる。
 RESEND_API_KEY=
 # dev では LogSender(メールを送らずログ出力)を明示許可。本番には設定しない。
 MAIL_DEV_LOG=true
+DOMAIN_NOTIFICATION_TO=team@example.com
+OPS_ALERT_EMAIL=ops@example.com
+INVITE_BASE_URL=http://localhost:5174

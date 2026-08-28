@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
 import { lstat, readdir, readFile } from 'node:fs/promises'
-import { basename, extname, relative, resolve } from 'node:path'
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as ts from 'typescript/unstable/ast'
 import { API as TypeScriptAPI } from 'typescript/unstable/sync'
+import { forbiddenSecretMarkersInText } from './secret-boundary.mjs'
 
 const TAURI_TARGETS = [
   {
@@ -19,6 +20,7 @@ const TAURI_TARGETS = [
         'services/admin/src/web/auth/session.ts',
         {
           key: 'app.admin.dev.token',
+          logoutIntentKey: 'app.admin.logout.intent',
           reason: 'development-only fallback token; native sessions never use browser storage',
         },
       ],
@@ -48,9 +50,7 @@ const FORBIDDEN_WEB_PLUGIN_IMPORT =
   /(?:\bimport\s*(?:\(\s*)?|\bfrom\s+|\brequire\s*\(\s*)['"](@tauri-apps\/plugin-[^'"]+)['"]/g
 const FORBIDDEN_TAURI_PLUGIN_REFERENCE =
   /(?:@tauri-apps\/plugin-[A-Za-z0-9_-]+|tauri-plugin-[A-Za-z0-9_-]+)/g
-const ALLOWED_CAPABILITY_PERMISSIONS = new Set(['allow-api-request'])
 const CAPABILITY_EXTENSIONS = new Set(['.json', '.toml'])
-const SECRET_NAMES = ['JWT_SECRET', 'AUTH_PEPPER', 'INTERNAL_KEY', 'RESEND']
 async function filesUnder(directory, includeSymlinks = false) {
   let entries
   try {
@@ -87,6 +87,52 @@ function isTestSource(path) {
 
 function isProductionWebSource(path) {
   return SOURCE_EXTENSIONS.has(extname(path)) && !isTestSource(path)
+}
+
+const MODULE_IMPORT_PATTERN =
+  /(?:\b(?:import|export)\s+(?:[\s\S]*?\sfrom\s+)?|\bimport\s*\(\s*|\brequire\s*\(\s*)['"]([^'"]+)['"]/g
+
+function resolveLocalModule(importer, specifier, webRoot, sources) {
+  if (!specifier.startsWith('.')) return undefined
+  const base = resolve(dirname(importer), specifier)
+  const candidates = []
+  if (SOURCE_EXTENSIONS.has(extname(base))) candidates.push(base)
+  else {
+    for (const extension of SOURCE_EXTENSIONS) candidates.push(`${base}${extension}`)
+    for (const extension of SOURCE_EXTENSIONS) candidates.push(join(base, `index${extension}`))
+  }
+  return candidates.find((candidate) => {
+    const path = relative(webRoot, candidate)
+    return !isAbsolute(path) && !path.startsWith('../') && sources.has(candidate)
+  })
+}
+
+function importedWebSources(importer, source, webRoot, sources) {
+  const imported = []
+  MODULE_IMPORT_PATTERN.lastIndex = 0
+  for (const match of source.matchAll(MODULE_IMPORT_PATTERN)) {
+    const candidate = resolveLocalModule(importer, match[1], webRoot, sources)
+    if (candidate) imported.push(candidate)
+  }
+  return imported
+}
+
+async function findImportedTestSources(webRoot, allSources, productionSources) {
+  const sources = new Set(allSources)
+  const visited = new Set()
+  const importedTests = new Set()
+  const queue = [...productionSources]
+  while (queue.length > 0) {
+    const importer = queue.pop()
+    if (visited.has(importer)) continue
+    visited.add(importer)
+    const source = await readFile(importer, 'utf8')
+    for (const imported of importedWebSources(importer, source, webRoot, sources)) {
+      if (isTestSource(imported)) importedTests.add(imported)
+      if (!visited.has(imported)) queue.push(imported)
+    }
+  }
+  return [...importedTests].sort()
 }
 
 function isTransportSource(root, path, target) {
@@ -279,170 +325,6 @@ function collectBoundaryAliases(sourceFile) {
   return { globals, fetches, storages, storageMethods, shape }
 }
 
-/* Legacy lexer retained below temporarily during the AST migration. */
-function _tokenize(source) {
-  const tokens = []
-  let index = 0
-  while (index < source.length) {
-    const start = index
-    const char = source[index]
-    if (/\s/.test(char)) {
-      index += 1
-      continue
-    }
-    if (char === '/' && source[index + 1] === '/') {
-      index = source.indexOf('\n', index + 2)
-      if (index < 0) break
-      continue
-    }
-    if (char === '/' && source[index + 1] === '*') {
-      const end = source.indexOf('*/', index + 2)
-      index = end < 0 ? source.length : end + 2
-      continue
-    }
-    if (char === '"' || char === "'") {
-      const quote = char
-      index += 1
-      let value = ''
-      while (index < source.length) {
-        if (source[index] === '\\') {
-          const escaped = source[index + 1]
-          value += escaped === undefined ? '' : escaped
-          index += 2
-        } else if (source[index] === quote) {
-          index += 1
-          break
-        } else {
-          value += source[index]
-          index += 1
-        }
-      }
-      tokens.push({ kind: 'string', value, start, end: index })
-      continue
-    }
-    if (char === '`') {
-      index += 1
-      while (index < source.length) {
-        if (source[index] === '\\') index += 2
-        else if (source[index++] === '`') break
-      }
-      tokens.push({
-        kind: 'template',
-        value: source.slice(start + 1, index - 1),
-        start,
-        end: index,
-      })
-      continue
-    }
-    const identifier = source.slice(index).match(/^[A-Za-z_$][\w$]*/)?.[0]
-    if (identifier) {
-      index += identifier.length
-      tokens.push({ kind: 'identifier', value: identifier, start, end: index })
-      continue
-    }
-    const punctuation = source
-      .slice(index)
-      .match(/^(?:\?\.|=>|===|!==|==|!=|&&|\|\||\+=|-=|\*\*|\.{3})/)?.[0]
-    if (punctuation) {
-      index += punctuation.length
-      tokens.push({ kind: 'punctuation', value: punctuation, start, end: index })
-      continue
-    }
-    index += 1
-    tokens.push({ kind: 'punctuation', value: char, start, end: index })
-  }
-  return tokens
-}
-
-function tokenValue(token) {
-  return token?.value
-}
-
-function isIdentifier(token, value) {
-  return token?.kind === 'identifier' && (value === undefined || token.value === value)
-}
-
-function isString(token, value) {
-  return token?.kind === 'string' && (value === undefined || token.value === value)
-}
-
-function isPunctuation(token, value) {
-  return token?.kind === 'punctuation' && token.value === value
-}
-
-function matchingToken(tokens, index, open, close) {
-  if (!isPunctuation(tokens[index], open)) return -1
-  let depth = 0
-  for (let cursor = index; cursor < tokens.length; cursor += 1) {
-    if (isPunctuation(tokens[cursor], open)) depth += 1
-    else if (isPunctuation(tokens[cursor], close) && --depth === 0) return cursor
-  }
-  return -1
-}
-
-function memberReference(tokens, index, objectNames, property) {
-  if (!isIdentifier(tokens[index], objectNames) && !objectNames.has(tokenValue(tokens[index]))) {
-    return false
-  }
-  if (isPunctuation(tokens[index + 1], '.') || isPunctuation(tokens[index + 1], '?.')) {
-    return isIdentifier(tokens[index + 2], property)
-  }
-  return (
-    isPunctuation(tokens[index + 1], '[') &&
-    isString(tokens[index + 2], property) &&
-    isPunctuation(tokens[index + 3], ']')
-  )
-}
-
-function directReference(tokens, index, names, property) {
-  if (typeof names === 'string' && isIdentifier(tokens[index], names)) return true
-  if (names instanceof Set && names.has(tokenValue(tokens[index]))) return true
-  return memberReference(tokens, index, names, property)
-}
-
-function _collectAliases(tokens, objectNames, property) {
-  const aliases = new Set()
-  let changed = true
-  while (changed) {
-    changed = false
-    for (let index = 0; index < tokens.length; index += 1) {
-      if (!['const', 'let', 'var'].includes(tokenValue(tokens[index]))) continue
-      const alias = tokens[index + 1]
-      if (!isIdentifier(alias) || !isPunctuation(tokens[index + 2], '=')) continue
-      const target = tokens[index + 3]
-      if (
-        directReference(tokens, index + 3, objectNames, property) ||
-        aliases.has(tokenValue(target))
-      ) {
-        if (!aliases.has(alias.value)) {
-          aliases.add(alias.value)
-          changed = true
-        }
-      }
-    }
-    for (let index = 0; index + 7 < tokens.length; index += 1) {
-      // const { fetch: alias } = globalThis/window
-      if (
-        !['const', 'let', 'var'].includes(tokenValue(tokens[index])) ||
-        !isPunctuation(tokens[index + 1], '{') ||
-        !isIdentifier(tokens[index + 2], property) ||
-        !isPunctuation(tokens[index + 3], ':') ||
-        !isIdentifier(tokens[index + 4], undefined) ||
-        !isPunctuation(tokens[index + 5], '}') ||
-        !isPunctuation(tokens[index + 6], '=') ||
-        !isIdentifier(tokens[index + 7], undefined) ||
-        !objectNames.has(tokens[index + 7].value)
-      )
-        continue
-      if (!aliases.has(tokens[index + 4].value)) {
-        aliases.add(tokens[index + 4].value)
-        changed = true
-      }
-    }
-  }
-  return aliases
-}
-
 function fetchBoundaryReferences(sourceFile) {
   const aliases = collectBoundaryAliases(sourceFile)
   const references = []
@@ -502,53 +384,6 @@ function checkWebSource(violations, root, path, source, sourceFile, checker, tar
   checkStorageWrites(violations, root, path, source, sourceFile, checker, target)
 }
 
-function _tokenText(source, tokens, start, end) {
-  if (start < 0 || end < start || !tokens[start] || !tokens[end]) return ''
-  return source.slice(tokens[start].start, tokens[end].end)
-}
-
-function _storageReferences(tokens) {
-  const names = new Set(['localStorage', 'sessionStorage'])
-  const browserStorage = new Set(['globalThis', 'window'])
-  let changed = true
-  while (changed) {
-    changed = false
-    for (let index = 0; index + 3 < tokens.length; index += 1) {
-      if (!['const', 'let', 'var'].includes(tokenValue(tokens[index]))) continue
-      const alias = tokens[index + 1]
-      if (!isIdentifier(alias) || !isPunctuation(tokens[index + 2], '=')) continue
-      if (
-        directReference(tokens, index + 3, names, 'sessionStorage') ||
-        memberReference(tokens, index + 3, browserStorage, 'sessionStorage') ||
-        names.has(tokenValue(tokens[index + 3]))
-      ) {
-        if (!names.has(alias.value)) {
-          names.add(alias.value)
-          changed = true
-        }
-      }
-    }
-    for (let index = 0; index + 7 < tokens.length; index += 1) {
-      if (
-        !['const', 'let', 'var'].includes(tokenValue(tokens[index])) ||
-        !isPunctuation(tokens[index + 1], '{') ||
-        !isIdentifier(tokens[index + 2], 'sessionStorage') ||
-        !isPunctuation(tokens[index + 3], ':') ||
-        !isIdentifier(tokens[index + 4]) ||
-        !isPunctuation(tokens[index + 5], '}') ||
-        !isPunctuation(tokens[index + 6], '=') ||
-        !['globalThis', 'window'].includes(tokenValue(tokens[index + 7]))
-      )
-        continue
-      if (!names.has(tokens[index + 4].value)) {
-        names.add(tokens[index + 4].value)
-        changed = true
-      }
-    }
-  }
-  return names
-}
-
 function storageWrites(sourceFile) {
   const aliases = collectBoundaryAliases(sourceFile)
   const writes = []
@@ -577,12 +412,12 @@ function storageWrites(sourceFile) {
           ts.isPropertyAccessExpression(callee) &&
           !callee.questionDotToken &&
           ts.isIdentifier(receiver) &&
-          receiver.text === 'sessionStorage'
+          (receiver.text === 'sessionStorage' || receiver.text === 'localStorage')
         add(
           node,
           node.arguments[0],
           node.arguments[1],
-          exact ? 'sessionStorage.setItem' : 'indirect storage write',
+          exact ? `${receiver.text}.setItem` : 'indirect storage write',
         )
       } else if (calleeShape === 'storage-method-call') {
         add(node, node.arguments[1], node.arguments[2], 'Storage.prototype.setItem')
@@ -613,91 +448,6 @@ function storageWrites(sourceFile) {
   }
   visit(sourceFile)
   return { writes }
-}
-
-function _legacyFindDevLoginBody(tokens) {
-  for (let index = 0; index + 3 < tokens.length; index += 1) {
-    if (!isIdentifier(tokens[index], 'devLogin')) continue
-    for (let cursor = index + 1; cursor < tokens.length; cursor += 1) {
-      if (isPunctuation(tokens[cursor], '{')) {
-        const close = matchingToken(tokens, cursor, '{', '}')
-        if (close >= 0) return { start: cursor + 1, end: close }
-        break
-      }
-      if (isPunctuation(tokens[cursor], ';')) break
-    }
-  }
-  return null
-}
-
-function _legacyIsDocumentedDevFallback(pathName, tokens, write) {
-  const allow = TAURI_TARGETS.map((target) => target.storageAllowlist.get(pathName)).find(Boolean)
-  if (!allow || write.shape !== 'sessionStorage.setItem') return false
-  if (write.keyArgument !== 'DEV_TOKEN_KEY' || write.valueArgument !== 'token') return false
-  const keyDeclaration = tokens.filter(
-    (token, index) =>
-      isIdentifier(token, 'DEV_TOKEN_KEY') &&
-      isIdentifier(tokens[index - 1], 'const') &&
-      isPunctuation(tokens[index + 1], '=') &&
-      isString(tokens[index + 2], allow.key),
-  )
-  if (keyDeclaration.length !== 1) return false
-  const body = findDevLoginBody(tokens)
-  if (!body) return false
-  const writeToken = tokens.findIndex((token) => token.start === write.index)
-  if (writeToken < body.start || writeToken >= body.end) return false
-
-  // The only accepted value is a token destructured directly from the
-  // /api/auth/token response in this devLogin body. No inferred taint graph is
-  // needed: all other shapes fail closed.
-  let responseToken = -1
-  let responseVariable = ''
-  for (let index = body.start; index + 8 < body.end; index += 1) {
-    if (
-      !['const', 'let', 'var'].includes(tokenValue(tokens[index])) ||
-      !isIdentifier(tokens[index + 1]) ||
-      !isPunctuation(tokens[index + 2], '=') ||
-      !isIdentifier(tokens[index + 3], 'await') ||
-      !isIdentifier(tokens[index + 4], 'platformFetch') ||
-      !isPunctuation(tokens[index + 5], '(') ||
-      !isString(tokens[index + 6], '/api/auth/token')
-    )
-      continue
-    responseVariable = tokens[index + 1].value
-    break
-  }
-  if (!responseVariable) return false
-  for (let index = body.start; index + 8 < body.end; index += 1) {
-    if (
-      !['const', 'let', 'var'].includes(tokenValue(tokens[index])) ||
-      !isPunctuation(tokens[index + 1], '{') ||
-      !isIdentifier(tokens[index + 2], 'token') ||
-      !isPunctuation(tokens[index + 3], '}') ||
-      !isPunctuation(tokens[index + 4], '=')
-    )
-      continue
-    let cursor = index + 5
-    if (isPunctuation(tokens[cursor], '(')) cursor += 1
-    if (
-      !isIdentifier(tokens[cursor], 'await') ||
-      !isIdentifier(tokens[cursor + 1], responseVariable) ||
-      !(isPunctuation(tokens[cursor + 2], '.') || isPunctuation(tokens[cursor + 2], '?.')) ||
-      !isIdentifier(tokens[cursor + 3], 'json') ||
-      !isPunctuation(tokens[cursor + 4], '(')
-    )
-      continue
-    responseToken = index + 2
-    break
-  }
-  if (responseToken < 0 || responseToken >= writeToken) return false
-  for (let index = responseToken + 1; index < writeToken; index += 1) {
-    if (
-      isIdentifier(tokens[index], 'token') &&
-      (isPunctuation(tokens[index + 1], '=') || isPunctuation(tokens[index - 1], 'const'))
-    )
-      return false
-  }
-  return true
 }
 
 function isWithin(node, container) {
@@ -773,8 +523,31 @@ function resolveTokenBinding(identifier, bindings, checker) {
 
 function isDocumentedDevFallbackAst(pathName, sourceFile, write, checker, target) {
   const allow = target.storageAllowlist.get(pathName)
-  if (!allow || write.shape !== 'sessionStorage.setItem') return false
+  if (!allow || !['sessionStorage.setItem', 'localStorage.setItem'].includes(write.shape))
+    return false
+  const isLogoutIntentWrite =
+    allow.logoutIntentKey !== undefined &&
+    write.keyArgument === 'LOGOUT_INTENT_KEY' &&
+    ts.isStringLiteral(write.valueNode) &&
+    write.valueNode.text === '1'
+  if (isLogoutIntentWrite) {
+    let logoutKeyDeclarations = 0
+    function visitLogoutKey(node) {
+      if (
+        ts.isVariableDeclaration(node) &&
+        ts.isIdentifier(node.name) &&
+        node.name.text === 'LOGOUT_INTENT_KEY' &&
+        stringValue(node.initializer) === allow.logoutIntentKey
+      ) {
+        logoutKeyDeclarations += 1
+      }
+      node.forEachChild(visitLogoutKey)
+    }
+    visitLogoutKey(sourceFile)
+    return logoutKeyDeclarations === 1
+  }
   const isTokenWrite =
+    write.shape === 'sessionStorage.setItem' &&
     write.keyArgument === 'DEV_TOKEN_KEY' &&
     ts.isIdentifier(write.valueNode) &&
     write.valueArgument === 'token'
@@ -892,7 +665,7 @@ function checkStorageWrites(violations, root, path, source, sourceFile, checker,
   for (const write of writes) {
     if (isDocumentedDevFallbackAst(pathName, sourceFile, write, checker, target)) continue
     violations.push(
-      `${pathName}:${lineAt(source, write.index)}: browser storage write is forbidden (${write.keyArgument}); allowlist only permits the exact devLogin grant-token fallback`,
+      `${pathName}:${lineAt(source, write.index)}: browser storage write is forbidden (${write.keyArgument}); allowlist only permits the exact devLogin grant-token fallback or logout tombstone`,
     )
   }
 }
@@ -902,9 +675,10 @@ function checkCsp(violations, config, target) {
   const required = {
     'default-src': ["'self'"],
     'base-uri': ["'self'"],
+    'form-action': ["'self'"],
     'object-src': ["'none'"],
     'script-src': ["'self'"],
-    'style-src': ["'self'", "'unsafe-inline'"],
+    'style-src': ["'self'"],
     'img-src': ["'self'", 'data:'],
     'font-src': ["'self'"],
   }
@@ -915,7 +689,18 @@ function checkCsp(violations, config, target) {
       continue
     }
     const directives = { ...required, 'connect-src': ["'self'", 'ipc:', 'http://ipc.localhost'] }
-    if (name === 'devCsp') directives['connect-src'].push(`http://localhost:${target.devPort}`)
+    if (name === 'devCsp') {
+      // Vite/Tauri development injects styles. Keep this exception confined to
+      // devCsp; the release CSP must not permit inline styles.
+      directives['style-src'].push("'unsafe-inline'")
+      directives['connect-src'].push(
+        `http://localhost:${target.devPort}`,
+        `ws://localhost:${target.devPort}`,
+        `ws://127.0.0.1:${target.devPort}`,
+        'ws://localhost:1421',
+        'ws://127.0.0.1:1421',
+      )
+    }
     for (const directive of Object.keys(directives)) {
       const value = csp[directive]
       if (typeof value !== 'string' || value.trim() === '') {
@@ -953,8 +738,8 @@ function jsonCapabilityPermissions(value) {
   return value.permissions
 }
 
-function tomlCapabilityPermissions(source) {
-  const assignment = /(?:^|\n)[ \t]*permissions[ \t]*=/m.exec(source)
+function tomlCapabilityArray(source, key) {
+  const assignment = new RegExp(`(?:^|\\n)[ \\t]*${key}[ \\t]*=`, 'm').exec(source)
   if (!assignment) return null
   const equals = source.indexOf('=', assignment.index)
   const arrayStart = source.slice(equals + 1).search(/\[/)
@@ -1026,16 +811,49 @@ function tomlCapabilityPermissions(source) {
   return tail === '' ? values : null
 }
 
-function capabilityPermissions(source, extension) {
+function capabilityMetadata(source, extension) {
   try {
-    if (extension === '.json') return jsonCapabilityPermissions(JSON.parse(source))
-    return extension === '.toml' ? tomlCapabilityPermissions(source) : null
+    if (extension === '.json') {
+      const value = JSON.parse(source)
+      return {
+        permissions: jsonCapabilityPermissions(value),
+        windows: Array.isArray(value?.windows) ? value.windows : null,
+        hasRemote: Boolean(value && typeof value === 'object' && 'remote' in value),
+        hasWebviews: Boolean(value && typeof value === 'object' && 'webviews' in value),
+      }
+    }
+    if (extension === '.toml') {
+      return {
+        permissions: tomlCapabilityArray(source, 'permissions'),
+        windows: tomlCapabilityArray(source, 'windows'),
+        hasRemote: /(?:^|\n)[ \t]*remote[ \t]*=/m.test(source),
+        hasWebviews: /(?:^|\n)[ \t]*webviews[ \t]*=/m.test(source),
+      }
+    }
+    return null
   } catch {
     return null
   }
 }
 
-function checkCapability(violations, path, permissions) {
+function checkCapability(violations, path, metadata) {
+  const expected = path.startsWith('services/admin/')
+    ? new Set(['allow-api-request', 'allow-clear-session'])
+    : new Set(['allow-api-request'])
+  if (!metadata) {
+    violations.push(`${path}: capability could not be parsed safely`)
+    return
+  }
+  if (metadata.hasRemote) {
+    violations.push(`${path}: remote capability access is forbidden`)
+  }
+  if (metadata.hasWebviews) {
+    violations.push(`${path}: webview capability access is forbidden`)
+  }
+  if (metadata.windows?.length !== 1 || metadata.windows[0] !== 'main') {
+    violations.push(`${path}: capability must allow exactly the local main window`)
+  }
+  const permissions = metadata.permissions
   if (!permissions) {
     violations.push(
       `${path}: capability must declare permissions as a TOML/JSON array containing only allow-api-request`,
@@ -1043,15 +861,39 @@ function checkCapability(violations, path, permissions) {
     return
   }
   for (const permission of permissions) {
-    if (!ALLOWED_CAPABILITY_PERMISSIONS.has(permission)) {
+    if (!expected.has(permission)) {
       violations.push(`${path}: capability permission ${permission} is not allowed`)
     }
   }
   if (
-    permissions.length !== ALLOWED_CAPABILITY_PERMISSIONS.size ||
-    !permissions.every((permission) => ALLOWED_CAPABILITY_PERMISSIONS.has(permission))
+    permissions.length !== expected.size ||
+    !permissions.every((permission) => expected.has(permission))
   ) {
-    violations.push(`${path}: capability must contain exactly allow-api-request`)
+    violations.push(
+      `${path}: capability must contain exactly the commands allowed for this service`,
+    )
+  }
+}
+
+function checkTauriWindows(violations, path, config) {
+  const windows = config?.app?.windows
+  if (!Array.isArray(windows) || windows.length !== 1) {
+    violations.push(`${path}: Tauri config must declare exactly one local main window`)
+    return
+  }
+  const [window] = windows
+  if (!window || typeof window !== 'object' || Array.isArray(window) || window.label !== 'main') {
+    violations.push(`${path}: Tauri config window must be labelled exactly main`)
+  }
+  if (window && typeof window === 'object' && !Array.isArray(window) && 'url' in window) {
+    violations.push(`${path}: remote or separately-addressed Tauri window URLs are forbidden`)
+  }
+}
+
+function checkTauriCapabilities(violations, path, config) {
+  const capabilities = config?.app?.security?.capabilities
+  if (!Array.isArray(capabilities) || capabilities.length !== 1 || capabilities[0] !== 'default') {
+    violations.push(`${path}: Tauri config capability references must contain only default`)
   }
 }
 
@@ -1066,14 +908,57 @@ function checkTauriConfigPlugins(violations, path, config) {
   }
 }
 
-function checkTauriPluginReferences(violations, path, source, checkConfig) {
+function checkTauriOverlaySecurity(violations, path, config) {
+  const app = config?.app
+  if (app && typeof app === 'object' && !Array.isArray(app) && 'security' in app) {
+    violations.push(`${path}: security configuration is forbidden in platform overlays`)
+  }
+  if (app && typeof app === 'object' && !Array.isArray(app) && 'windows' in app) {
+    violations.push(`${path}: window configuration is forbidden in platform overlays`)
+  }
+  if (config && typeof config === 'object' && !Array.isArray(config) && 'security' in config) {
+    violations.push(`${path}: security configuration is forbidden in platform overlays`)
+  }
+  if (config && typeof config === 'object' && !Array.isArray(config) && 'windows' in config) {
+    violations.push(`${path}: window configuration is forbidden in platform overlays`)
+  }
+}
+
+function navigationGuardPattern(service) {
+  const originEnv =
+    service === 'admin'
+      ? 'TAURI_ADMIN_API_ORIGIN'
+      : service === 'example_service'
+        ? 'TAURI_EXAMPLE_API_ORIGIN'
+        : `TAURI_${service.replaceAll('-', '_').toUpperCase()}_API_ORIGIN`
+  return new RegExp(
+    String.raw`\.plugin\(\s*tauri::plugin::Builder::<tauri::Wry>::new\("navigation-guard"\)\s*\.on_navigation\(\s*\|_,\s*url\|\s*\{\s*origin::navigation_allowed\(\s*url,\s*env!\("${originEnv}"\)\s*\)\s*\}\s*\)\s*\.build\(\),\s*\)`,
+  )
+}
+
+function checkTauriPluginReferences(
+  violations,
+  path,
+  source,
+  checkConfig,
+  allowedNavigationGuard = null,
+) {
+  let sourceForBuilderScan = source
+  let foundAllowedNavigationGuard = false
+  if (allowedNavigationGuard) {
+    const match = source.match(allowedNavigationGuard)
+    if (match && match.index !== undefined) {
+      foundAllowedNavigationGuard = true
+      sourceForBuilderScan = `${source.slice(0, match.index)}${source.slice(match.index + match[0].length)}`
+    }
+  }
   FORBIDDEN_TAURI_PLUGIN_REFERENCE.lastIndex = 0
   for (const match of source.matchAll(FORBIDDEN_TAURI_PLUGIN_REFERENCE)) {
     violations.push(
       `${path}:${lineAt(source, match.index)}: forbidden Tauri plugin reference: ${match[0]}`,
     )
   }
-  if (/\.\s*plugin\s*\(/.test(source)) {
+  if (/\.\s*plugin\s*\(/.test(sourceForBuilderScan)) {
     violations.push(`${path}: Tauri plugin builder calls are forbidden (.plugin())`)
   }
   if (checkConfig && extname(path).toLowerCase() === '.json') {
@@ -1089,26 +974,95 @@ function checkTauriPluginReferences(violations, path, source, checkConfig) {
       violations.push(`${path}: plugins configuration is forbidden for this Tauri shell`)
     }
   }
+  return foundAllowedNavigationGuard
 }
 
 async function readJson(path) {
   return JSON.parse(await readFile(path, 'utf8'))
 }
 
+async function dynamicTauriTarget(workspace, service) {
+  const configPath = resolve(workspace, `services/${service}/src-tauri/tauri.conf.json`)
+  let devPort = 0
+  try {
+    const config = await readJson(configPath)
+    const devUrl = config?.build?.devUrl
+    if (typeof devUrl === 'string') {
+      const url = new URL(devUrl)
+      if (url.protocol === 'http:' && url.hostname === 'localhost' && url.port) {
+        devPort = Number(url.port)
+      }
+    }
+  } catch {
+    // validateTarget reports the missing/malformed Tauri config. A zero port
+    // keeps the CSP check fail closed until that config is repaired.
+  }
+  return {
+    name: service,
+    webDirectory: `services/${service}/src/web`,
+    tauriDirectory: `services/${service}/src-tauri`,
+    tauriConfig: `services/${service}/src-tauri/tauri.conf.json`,
+    capabilitiesDirectory: `services/${service}/src-tauri/capabilities`,
+    devPort,
+    // A newly copied native shell must explicitly review every browser
+    // storage write; inheriting the example dev allowlist would be unsafe.
+    storageAllowlist: new Map(),
+  }
+}
+
+async function discoverTauriTargets(workspace) {
+  const targets = [...TAURI_TARGETS]
+  const known = new Set(TAURI_TARGETS.map((target) => target.name))
+  let entries
+  try {
+    entries = await readdir(resolve(workspace, 'services'), { withFileTypes: true })
+  } catch (error) {
+    if (error?.code === 'ENOENT') return targets
+    throw error
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || known.has(entry.name)) continue
+    const tauriPath = resolve(workspace, 'services', entry.name, 'src-tauri')
+    let info
+    try {
+      info = await lstat(tauriPath)
+    } catch (error) {
+      if (error?.code === 'ENOENT') continue
+      throw error
+    }
+    if (!info.isDirectory()) continue
+    targets.push(await dynamicTauriTarget(workspace, entry.name))
+  }
+  return targets
+}
+
 async function validateTarget(workspace, target) {
   const violations = []
   const webRoot = resolve(workspace, target.webDirectory)
-  const webSources = (await filesUnder(webRoot, true)).filter(isProductionWebSource)
+  const allWebSources = []
+  for (const path of await filesUnder(webRoot, true)) {
+    if ((await lstat(path)).isSymbolicLink()) {
+      violations.push(
+        `${relativePath(workspace, path)}: symbolic links are forbidden in web source`,
+      )
+      continue
+    }
+    if (isProductionWebSource(path)) allWebSources.push(path)
+  }
+  const everyWebSource = (await filesUnder(webRoot)).filter((path) =>
+    SOURCE_EXTENSIONS.has(extname(path)),
+  )
+  const importedTestSources = await findImportedTestSources(webRoot, everyWebSource, allWebSources)
+  for (const path of importedTestSources) {
+    violations.push(
+      `${relativePath(workspace, path)}: test/spec source is imported by production source and cannot bypass the native boundary check`,
+    )
+  }
+  const webSources = [...allWebSources, ...importedTestSources]
   const typeScriptApi = new TypeScriptAPI({ cwd: workspace })
   const typeScriptSnapshot = typeScriptApi.updateSnapshot({ openFiles: webSources })
   try {
     for (const path of webSources) {
-      if ((await lstat(path)).isSymbolicLink()) {
-        violations.push(
-          `${relativePath(workspace, path)}: symbolic links are forbidden in web source`,
-        )
-        continue
-      }
       const project =
         typeScriptSnapshot.getDefaultProjectForFile(path) ?? typeScriptSnapshot.getProjects()[0]
       const sourceFile = project?.program.getSourceFile(path)
@@ -1135,9 +1089,15 @@ async function validateTarget(workspace, target) {
 
   const configPath = resolve(workspace, target.tauriConfig)
   try {
-    const config = await readJson(configPath)
-    checkCsp(violations, config, target)
-    checkTauriConfigPlugins(violations, target.tauriConfig, config)
+    if ((await lstat(configPath)).isSymbolicLink()) {
+      violations.push(`${target.tauriConfig}: symbolic links are forbidden`)
+    } else {
+      const config = await readJson(configPath)
+      checkCsp(violations, config, target)
+      checkTauriWindows(violations, target.tauriConfig, config)
+      checkTauriCapabilities(violations, target.tauriConfig, config)
+      checkTauriConfigPlugins(violations, target.tauriConfig, config)
+    }
   } catch (error) {
     if (error?.code === 'ENOENT') {
       violations.push(`${target.tauriConfig}: required Tauri config file is missing`)
@@ -1145,9 +1105,14 @@ async function validateTarget(workspace, target) {
   }
 
   const capabilitiesRoot = resolve(workspace, target.capabilitiesDirectory)
-  const capabilityFiles = (await filesUnder(capabilitiesRoot)).filter((path) =>
-    CAPABILITY_EXTENSIONS.has(extname(path).toLowerCase()),
-  )
+  const capabilityFiles = []
+  for (const path of await filesUnder(capabilitiesRoot, true)) {
+    if ((await lstat(path)).isSymbolicLink()) {
+      violations.push(`${relativePath(workspace, path)}: symbolic links are forbidden`)
+      continue
+    }
+    if (CAPABILITY_EXTENSIONS.has(extname(path).toLowerCase())) capabilityFiles.push(path)
+  }
   const defaultCapability = capabilityFiles.find((path) =>
     ['default.json', 'default.toml'].includes(basename(path).toLowerCase()),
   )
@@ -1161,12 +1126,18 @@ async function validateTarget(workspace, target) {
     checkCapability(
       violations,
       relativePath(workspace, path),
-      capabilityPermissions(await readFile(path, 'utf8'), extension),
+      capabilityMetadata(await readFile(path, 'utf8'), extension),
     )
   }
 
-  for (const path of await filesUnder(resolve(workspace, target.tauriDirectory))) {
+  let navigationGuardFound = false
+  const navigationGuardPath = `${target.tauriDirectory}/src/lib.rs`
+  for (const path of await filesUnder(resolve(workspace, target.tauriDirectory), true)) {
     const pathName = relativePath(workspace, path)
+    if ((await lstat(path)).isSymbolicLink()) {
+      violations.push(`${pathName}: symbolic links are forbidden in src-tauri`)
+      continue
+    }
     if (
       pathName.includes('/target/') ||
       pathName.includes('/gen/') ||
@@ -1174,15 +1145,39 @@ async function validateTarget(workspace, target) {
     )
       continue
     const source = await readFile(path, 'utf8')
-    checkTauriPluginReferences(violations, pathName, source, pathName !== target.tauriConfig)
-    for (const secret of SECRET_NAMES) {
-      const pattern = new RegExp(`\\b${secret}\\b`, 'g')
-      for (const match of source.matchAll(pattern)) {
-        violations.push(
-          `${pathName}:${lineAt(source, match.index)}: server secret name ${secret} is forbidden in src-tauri`,
-        )
+    const isMainLibrary = pathName === navigationGuardPath
+    const foundGuard = checkTauriPluginReferences(
+      violations,
+      pathName,
+      source,
+      pathName !== target.tauriConfig,
+      isMainLibrary ? navigationGuardPattern(target.name) : null,
+    )
+    if (isMainLibrary) navigationGuardFound = foundGuard
+    const isPlatformOverlay =
+      pathName !== target.tauriConfig &&
+      pathName.startsWith(`${target.tauriDirectory}/tauri.`) &&
+      pathName.endsWith('.conf.json')
+    if (isPlatformOverlay && extname(pathName).toLowerCase() === '.json') {
+      try {
+        checkTauriOverlaySecurity(violations, pathName, JSON.parse(source))
+      } catch {
+        // JSON syntax errors are reported by the Tauri CLI; the plugin and
+        // secret scans above still apply to malformed files.
       }
     }
+    for (const secret of forbiddenSecretMarkersInText(source)) {
+      let offset = source.indexOf(secret)
+      while (offset >= 0) {
+        violations.push(
+          `${pathName}:${lineAt(source, offset)}: server secret name ${secret} is forbidden in src-tauri`,
+        )
+        offset = source.indexOf(secret, offset + secret.length)
+      }
+    }
+  }
+  if (!navigationGuardFound) {
+    violations.push(`${navigationGuardPath}: exact top-level navigation guard plugin is required`)
   }
 
   return violations.sort()
@@ -1190,9 +1185,8 @@ async function validateTarget(workspace, target) {
 
 async function validateTauriBoundary(root = process.cwd()) {
   const workspace = resolve(root)
-  const violations = await Promise.all(
-    TAURI_TARGETS.map((target) => validateTarget(workspace, target)),
-  )
+  const targets = await discoverTauriTargets(workspace)
+  const violations = await Promise.all(targets.map((target) => validateTarget(workspace, target)))
   return violations.flat().sort()
 }
 

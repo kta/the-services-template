@@ -55,16 +55,16 @@ Lefthook は開発中の早期フィードバック、CI `verify` は迂回で�
 5. **デザインはトークン経由のみ**: 色・フォント・角丸は `packages/ui/src/theme.css` のセマンティックトークンだけ。**Tailwind デフォルトパレット（`bg-blue-500`）・任意値（`p-[13px]`・`text-[#hex]`）禁止**。UI 作成/変更時は `docs/frontend/DESIGN_RULE.md` に従う（2 パス設計）。
 6. **テナントスコープ強制**: 全 DB クエリを `organization_id`（JWT の `org`）でスコープ。
 7. **DB = Drizzle + D1**: FK 宣言しない。ID はアプリ生成（`crypto.randomUUID()`）。原子性は `db.batch()`。マイグレーションは `drizzle-kit generate` → `wrangler d1 migrations apply`（`out` == `migrations_dir` == `./migrations`）。
-8. **ドメイン分離**: 1 サービス = 1 Worker + 1 D1。**cross-D1 JOIN 禁止** → service binding でアプリ層同期（admin が源泉 → 各ドメインへ upsert + 日次照合 Cron）。
-9. **完全無料枠で動かす**: Workers Paid が必要な機能は設計に含めない。通知・非同期は **notifier への同期送信 API（service binding + `x-internal-key`）+ KV 冪等キー（TTL 24h）+ 再検知 Cron / UI フォールバック**（`docs/howto/notifications.md`）。**Queues は Free でも使える**（2026-02〜: 10,000 ops/日・保持 24h）が、**このテンプレートは採用しない**（部品を増やさず上記で足りるという設計判断 — 採用はルール 10 の人間承認事項）。無料枠上限と設計対処は `docs/howto/free-tier-limits.md`。Cron は UTC（JST の意図をコメントに残す）。
+8. **ドメイン分離**: 1 サービス = 1 Worker + 1 D1。**cross-D1 JOIN 禁止** → service binding でアプリ層同期（admin が源泉 → 各ドメインへ upsert + hourly 照合 Cron）。同期 lease は 2 時間で、失効時は domain が fail closed する。production domain の保護 API はさらに `tenantAuth` → `requireLiveDomainSession` → `requireActiveOrg` とし、admin の live session を毎リクエスト照合する。
+9. **完全無料枠で動かす**: Workers Paid が必要な機能は設計に含めない。通知・非同期は **notifier への同期送信 API（service binding + caller-specific `x-internal-key` / `x-internal-caller`）+ KV 冪等キー（TTL 24h）+ 再検知 Cron / UI フォールバック**（`docs/howto/notifications.md`）。内部鍵は 32 bytes 以上で方向ごとに分離する。**Queues は Free でも使える**（2026-02〜: 10,000 ops/日・保持 24h）が、**このテンプレートは採用しない**（部品を増やさず上記で足りるという設計判断 — 採用はルール 10 の人間承認事項）。無料枠上限と設計対処は `docs/howto/free-tier-limits.md`。Cron は UTC（JST の意図をコメントに残す）。
 10. **同意なしに決めない**: アーキ変更・ライブラリ追加・仕様外機能は人間承認。
-11. **secrets は `wrangler secret put`**（コード / TF state / `wrangler.jsonc` の `vars` に置かない）。dev 値は各サービスの `.dev.vars`（gitignore 対象）のみ。
+11. **secrets は GitHub `production` environment secret から protected workflow の allowlist 経由で反映する**（コード / TF state / `wrangler.jsonc` の `vars` に置かない）。`scripts/put-production-secret.mjs` は validation-only で、ローカルの secret write は行わない。既存 Worker の更新も初回 Worker 作成も protected `main` の production workflow と required reviewer を通す。dev 値は各サービスの `.dev.vars`（gitignore 対象）のみ。
 
 ## サービス境界
 | パッケージ | 種別 | dev port | 役割 |
 |---|---|---|---|
 | `services/example_service` (`@app/example_service`) | SPA+API Worker + D1 | 5173 | item ドメイン。**コピー元の雛形**（本番デプロイ対象外） |
-| `services/admin` (`@app/admin`) | SPA+API Worker + D1 + KV | 5174 | organizations 源泉 + **認証源泉**（login/refresh/招待）。service binding で各ドメインへ org 同期 + 日次照合 Cron |
+| `services/admin` (`@app/admin`) | SPA+API Worker + D1 | 5174 | organizations 源泉 + **認証源泉**（login/refresh/招待、D1 原子的 login lockout）。service binding で各ドメインへ org 同期 + hourly 照合 Cron |
 | `services/notifier` (`@app/notifier`) | 同期送信 API Worker + KV | — | 通知（`POST /api/internal/send`・KV 冪等・Resend）。送信手段未設定は **fail close(502)** |
 | `services/ops` (`@app/ops`) | Cron + Workflows Worker + R2 | — | D1 バックアップ（R2 に世代保存）+ 鮮度/容量/死活監視。Workflows は無料枠内 |
 | `packages/contracts` (`@app/contracts`) | TS | — | **Zod 単一ソース** |
@@ -75,8 +75,8 @@ Lefthook は開発中の早期フィードバック、CI `verify` は迂回で�
 
 ## セキュリティ / やってはいけない
 - ドメインクエリのテナントスコープを外さない。認証フロー（`packages/shared` の auth）を無断で変えない。
-- secrets をコミットしない。`.dev.vars` は gitignore、本番は `wrangler secret put`。
-- **本番前チェックリスト**（`INTERNAL_KEY` / `JWT_SECRET` / `AUTH_PEPPER` / `AUTH_DEV_GRANT` / `MAIL_FROM` 等）は [`docs/howto/deploy.md`](./docs/howto/deploy.md)。example_service は雛形なので本番デプロイしない（CI の deploy matrix 対象外）。
+- secrets をコミットしない。`.dev.vars` は gitignore、本番の Worker secret は protected production workflow の allowlist からだけ反映する。`scripts/put-production-secret.mjs` は検査専用で、初回 Worker の作成は `.github/workflows/production-bootstrap.yml` からだけ行う。
+- **本番前チェックリスト**（caller-specific 内部鍵 / admin 専用 `JWT_PRIVATE_KEY` / 各 Worker の `JWT_PUBLIC_KEY` / `AUTH_PEPPER` / `AUTH_DEV_GRANT` / `MAIL_FROM` 等）は [`docs/howto/deploy.md`](./docs/howto/deploy.md)。production deploy は保護された `main` の push と `production` environment に限定し、example_service は雛形なので本番デプロイしない（production deploy chain 対象外）。
 
 ## コミット / PR
 - **Conventional Commits**（commitlint + lefthook で強制。pre-commit=biome / pre-push=typecheck+test）。

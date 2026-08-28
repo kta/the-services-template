@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Main window with no plugin or filesystem permissions",
   "windows": ["main"],
-  "permissions": ["allow-api-request"]
+  "permissions": ["allow-api-request", "allow-clear-session"]
 }

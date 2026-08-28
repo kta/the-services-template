@@ -1,5 +1,6 @@
 terraform {
-  required_version = ">= 1.9, < 2.0"
+  # use_lockfile is the native S3 state-locking feature introduced in 1.10.
+  required_version = ">= 1.10, < 2.0"
 
   required_providers {
     cloudflare = {
@@ -8,22 +9,22 @@ terraform {
     }
   }
 
-  # State backend on R2 (S3-compatible). Uncomment and fill in after creating
-  # the bucket + an R2 API token. R2 has no native state locking, so serialize
-  # applies (e.g. a CI concurrency group).
-  #
-  # backend "s3" {
-  #   bucket = "tfstate"
-  #   key    = "cloudflare/terraform.tfstate"
-  #   region = "auto"
-  #   endpoints                   = { s3 = "https://<ACCOUNT_ID>.r2.cloudflarestorage.com" }
-  #   skip_credentials_validation = true
-  #   skip_metadata_api_check     = true
-  #   skip_region_validation      = true
-  #   skip_requesting_account_id  = true
-  #   skip_s3_checksum            = true
-  #   use_path_style              = true
-  # }
+  # Partial state backend on R2 (S3-compatible). Supply bucket, key, endpoint,
+  # and credentials with `terraform init -backend-config=...` (never commit
+  # those values). `use_lockfile` provides Terraform's S3 lockfile; still
+  # serialize applies with a CI concurrency group because the backend bucket is
+  # an operational single-writer boundary. Bootstrap instructions live in the
+  # Terraform README.
+  backend "s3" {
+    region                      = "auto"
+    skip_credentials_validation = true
+    skip_metadata_api_check     = true
+    skip_region_validation      = true
+    skip_requesting_account_id  = true
+    skip_s3_checksum            = true
+    use_path_style              = true
+    use_lockfile                = true
+  }
 }
 
 # Reads CLOUDFLARE_API_TOKEN from the environment. Scope the token minimally:

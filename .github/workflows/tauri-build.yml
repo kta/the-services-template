@@ -10,69 +10,93 @@ permissions:
 
 env:
   NODE_VERSION: 22
+  # Keep native verification reproducible. If Tauri changes its generated
+  # Android project, the alignment step below fails until these pins are
+  # reviewed and updated deliberately.
+  ANDROID_PLATFORM_API: 35
+  ANDROID_NDK_VERSION: 27.2.12479018
+  XCODEGEN_VERSION: 2.46.0
 
 jobs:
   macos-universal:
     name: macOS universal app bundle
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true
     runs-on: macos-15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe502a # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Check native security boundary
+        run: node scripts/check-tauri-boundary.mjs
+      - name: Check pinned Rust toolchain
+        run: test "$(rustc --version | awk '{print $2}')" = "1.88.0"
       - name: Install universal Rust targets
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - name: Check Apple build tools
         run: |
           xcodebuild -version
           pod --version
-      - name: Build unsigned universal app
-        env:
-          # The variable is intentionally non-secret. The fallback keeps this
-          # verification workflow runnable before production origin approval;
-          # such an artifact must not be released.
-          TAURI_ADMIN_API_ORIGIN: ${{ vars.TAURI_ADMIN_API_ORIGIN || 'https://admin.example.invalid' }}
+      - name: Build unsigned universal debug app
         run: >-
           pnpm --filter @app/admin exec tauri build
+          --debug
           --bundles app
           --target universal-apple-darwin
           --no-sign
+      - name: Scan macOS artifact for secrets
+        run: node scripts/check-tauri-artifact.mjs services/admin/src-tauri/target/universal-apple-darwin/debug/bundle/macos/Admin.app
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: tauri-macos-universal
-          path: services/admin/src-tauri/target/universal-apple-darwin/release/bundle/macos/Admin.app
+          name: tauri-macos-universal-debug
+          path: services/admin/src-tauri/target/universal-apple-darwin/debug/bundle/macos/Admin.app
           if-no-files-found: error
           retention-days: 7
 
   ios-simulator:
     name: iOS simulator app
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true
     runs-on: macos-15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe502a # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Check native security boundary
+        run: node scripts/check-tauri-boundary.mjs
+      - name: Check pinned Rust toolchain
+        run: test "$(rustc --version | awk '{print $2}')" = "1.88.0"
       - name: Install iOS simulator Rust target
         run: rustup target add aarch64-apple-ios-sim
+      - name: Install XcodeGen
+        run: brew install xcodegen
       - name: Check Apple build tools
         run: |
           xcodebuild -version
           pod --version
-          xcodegen --version
+          test "$(xcodegen --version)" = "Version: ${XCODEGEN_VERSION}"
       - name: Initialize iOS project
         run: pnpm --filter @app/admin exec tauri ios init --ci --skip-targets-install
+      - name: Re-check native security boundary after iOS generation
+        run: node scripts/check-tauri-boundary.mjs
       - name: Build unsigned simulator artifact
         run: >-
           pnpm --filter @app/admin exec tauri ios build
           --debug
           --target aarch64-sim
           --no-sign
+      - name: Scan iOS artifact for secrets
+        run: node scripts/check-tauri-artifact.mjs services/admin/src-tauri/gen/apple/build
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: tauri-ios-simulator
@@ -82,11 +106,14 @@ jobs:
 
   android-debug-apk:
     name: Android debug APK
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe502a # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
@@ -96,40 +123,37 @@ jobs:
           java-version: '17'
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
       - run: pnpm install --frozen-lockfile
+      - name: Check native security boundary
+        run: node scripts/check-tauri-boundary.mjs
+      - name: Check pinned Rust toolchain
+        run: test "$(rustc --version | awk '{print $2}')" = "1.88.0"
       - name: Install Android SDK prerequisites
         shell: bash
         run: |
           yes | sdkmanager --licenses >/dev/null
-          sdkmanager "platform-tools"
-          platform_api="$(sdkmanager --list | awk -F';' '/^  platforms;android-[0-9]+/{sub(/[[:space:]].*/, "", $2); print $2}' | sort -V | tail -1)"
-          test -n "$platform_api"
-          sdkmanager "platforms;$platform_api"
-          ndk_version="$(sdkmanager --list | awk -F';' '/^  ndk;[0-9]/{sub(/[[:space:]].*/, "", $2); print $2}' | sort -V | tail -1)"
-          test -n "$ndk_version"
-          sdkmanager "ndk;$ndk_version"
-          echo "NDK_HOME=$ANDROID_HOME/ndk/$ndk_version" >> "$GITHUB_ENV"
+          sdkmanager "platform-tools" "platforms;android-${ANDROID_PLATFORM_API}" "ndk;${ANDROID_NDK_VERSION}"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
       - name: Install Android Rust target
         run: rustup target add aarch64-linux-android
       - name: Initialize Android project
         run: pnpm --filter @app/admin exec tauri android init --ci --skip-targets-install
+      - name: Re-check native security boundary after Android generation
+        run: node scripts/check-tauri-boundary.mjs
       - name: Align NDK with generated Gradle project
         shell: bash
         run: |
           compile_sdk="$(rg -o 'compileSdk(Version)?[[:space:]]*=[[:space:]]*[0-9]+' services/admin/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*[^0-9]([0-9]+)$/\1/' | head -1)"
-          if [[ -n "$compile_sdk" ]]; then
-            sdkmanager "platforms;android-$compile_sdk"
-          fi
+          test "$compile_sdk" = "$ANDROID_PLATFORM_API"
           build_tools="$(rg -o 'buildToolsVersion[[:space:]]*=[[:space:]]*"[^"]+"' services/admin/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*"([^"]+)".*/\1/' | head -1)"
           if [[ -n "$build_tools" ]]; then
             sdkmanager "build-tools;$build_tools"
           fi
           ndk_version="$(rg -o 'ndkVersion[[:space:]]*=[[:space:]]*"[^"]+"' services/admin/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*"([^"]+)".*/\1/' | head -1)"
-          if [[ -n "$ndk_version" ]]; then
-            sdkmanager "ndk;$ndk_version"
-            echo "NDK_HOME=$ANDROID_HOME/ndk/$ndk_version" >> "$GITHUB_ENV"
-          fi
+          test "$ndk_version" = "$ANDROID_NDK_VERSION"
       - name: Build debug APK
         run: pnpm --filter @app/admin exec tauri android build --debug --apk --target aarch64
+      - name: Scan Android APK for secrets
+        run: node scripts/check-tauri-artifact.mjs services/admin/src-tauri/gen/android/app/build/outputs/apk
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: tauri-android-debug-apk
@@ -139,11 +163,14 @@ jobs:
 
   android-debug-aab:
     name: Android debug AAB
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe502a # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
@@ -153,40 +180,37 @@ jobs:
           java-version: '17'
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
       - run: pnpm install --frozen-lockfile
+      - name: Check native security boundary
+        run: node scripts/check-tauri-boundary.mjs
+      - name: Check pinned Rust toolchain
+        run: test "$(rustc --version | awk '{print $2}')" = "1.88.0"
       - name: Install Android SDK prerequisites
         shell: bash
         run: |
           yes | sdkmanager --licenses >/dev/null
-          sdkmanager "platform-tools"
-          platform_api="$(sdkmanager --list | awk -F';' '/^  platforms;android-[0-9]+/{sub(/[[:space:]].*/, "", $2); print $2}' | sort -V | tail -1)"
-          test -n "$platform_api"
-          sdkmanager "platforms;$platform_api"
-          ndk_version="$(sdkmanager --list | awk -F';' '/^  ndk;[0-9]/{sub(/[[:space:]].*/, "", $2); print $2}' | sort -V | tail -1)"
-          test -n "$ndk_version"
-          sdkmanager "ndk;$ndk_version"
-          echo "NDK_HOME=$ANDROID_HOME/ndk/$ndk_version" >> "$GITHUB_ENV"
+          sdkmanager "platform-tools" "platforms;android-${ANDROID_PLATFORM_API}" "ndk;${ANDROID_NDK_VERSION}"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
       - name: Install Android Rust target
         run: rustup target add aarch64-linux-android
       - name: Initialize Android project
         run: pnpm --filter @app/admin exec tauri android init --ci --skip-targets-install
+      - name: Re-check native security boundary after Android generation
+        run: node scripts/check-tauri-boundary.mjs
       - name: Align NDK with generated Gradle project
         shell: bash
         run: |
           compile_sdk="$(rg -o 'compileSdk(Version)?[[:space:]]*=[[:space:]]*[0-9]+' services/admin/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*[^0-9]([0-9]+)$/\1/' | head -1)"
-          if [[ -n "$compile_sdk" ]]; then
-            sdkmanager "platforms;android-$compile_sdk"
-          fi
+          test "$compile_sdk" = "$ANDROID_PLATFORM_API"
           build_tools="$(rg -o 'buildToolsVersion[[:space:]]*=[[:space:]]*"[^"]+"' services/admin/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*"([^"]+)".*/\1/' | head -1)"
           if [[ -n "$build_tools" ]]; then
             sdkmanager "build-tools;$build_tools"
           fi
           ndk_version="$(rg -o 'ndkVersion[[:space:]]*=[[:space:]]*"[^"]+"' services/admin/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*"([^"]+)".*/\1/' | head -1)"
-          if [[ -n "$ndk_version" ]]; then
-            sdkmanager "ndk;$ndk_version"
-            echo "NDK_HOME=$ANDROID_HOME/ndk/$ndk_version" >> "$GITHUB_ENV"
-          fi
+          test "$ndk_version" = "$ANDROID_NDK_VERSION"
       - name: Build debug AAB
         run: pnpm --filter @app/admin exec tauri android build --debug --aab --target aarch64
+      - name: Scan Android AAB for secrets
+        run: node scripts/check-tauri-artifact.mjs services/admin/src-tauri/gen/android/app/build/outputs/bundle
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: tauri-android-debug-aab
