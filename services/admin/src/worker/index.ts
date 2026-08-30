@@ -50,10 +50,12 @@ import {
 } from './db/schema'
 import { reconcileOrgs } from './reconcile'
 import {
-  configuredDomainSyncEnvironments,
+  configuredDomainSyncIdentities,
+  type DomainSyncIdentity,
   listDomainOrgs,
+  resolveDomainSyncIdentity,
+  syncOrgToConfiguredDomains,
   syncOrgToDomain,
-  syncOrgToDomains,
 } from './sync'
 
 // The admin SPA is served by this same Worker (same origin) — no CORS.
@@ -469,10 +471,7 @@ const routes = app
       // Reconcile into the domain D1 via the typed service binding (best-effort).
       // 結果は `synced` で応答に載せる — 失敗を握りつぶすと、無効化やプラン変更が
       // ドメイン側に届いていないことに次の hourly reconcile までオペレータが気づけない。
-      const synced = await syncOrgToDomains(
-        configuredDomainSyncEnvironments(c.env),
-        toOrganization(org),
-      )
+      const synced = await syncOrgToConfiguredDomains(c.env, toOrganization(org))
       return c.json({ ...toOrganization(org), synced }, 201)
     },
   )
@@ -507,7 +506,7 @@ const routes = app
       const row = updated[0]
       if (!row) return c.json({ error: 'not_found' }, 404)
       const merged = toOrganization(row)
-      const synced = await syncOrgToDomains(configuredDomainSyncEnvironments(c.env), merged)
+      const synced = await syncOrgToConfiguredDomains(c.env, merged)
       return c.json({ ...merged, synced })
     },
   )
@@ -527,10 +526,7 @@ const routes = app
     // synced=false は「admin では無効化済みだがドメイン側はまだ有効」— service
     // binding が失敗した場合、domain の 2h lease が切れるまで API が生き残り得る。
     // UI が警告を出せるよう返す。
-    const synced = await syncOrgToDomains(
-      configuredDomainSyncEnvironments(c.env),
-      toOrganization(row),
-    )
+    const synced = await syncOrgToConfiguredDomains(c.env, toOrganization(row))
     return c.json({ id, isDisabled: true as const, synced })
   })
   // Invite a user (staff by default) to an org: user(hash=null) + invitation +
@@ -648,6 +644,22 @@ function notify(env: Bindings, job: NotificationJob): Promise<boolean> {
 const AUTH_EVENTS_RETENTION_DAYS = 90
 const LOGIN_RATE_LIMIT_CLEANUP_LIMIT = 1_000
 
+async function reportReconcileFailure(env: Bindings, directory: string, error: unknown) {
+  console.error(`hourly reconcile failed for ${directory}`, error)
+  const alertEmail = configuredAlertEmail(env)
+  if (!alertEmail) return
+  await notify(env, {
+    id: `ops.sync_drift:failed:${directory}:${new Date().toISOString().slice(0, 10)}`,
+    type: 'ops.sync_drift',
+    to: alertEmail,
+    payload: {
+      domain: directory,
+      reason: 'reconcile_failed',
+      message: error instanceof Error ? error.message : '',
+    },
+  })
+}
+
 /**
  * Hourly org reconcile (Cron) + auth_events retention. Re-syncs any
  * admin↔domain drift; notifies once per day slot. deployable domain が 0 件なら
@@ -684,8 +696,16 @@ async function scheduled(_event: unknown, env: Bindings, _ctx?: unknown): Promis
     console.error('login rate-limit cleanup failed', err)
   }
 
+  let identities: DomainSyncIdentity[]
   try {
-    for (const syncEnv of configuredDomainSyncEnvironments(env)) {
+    identities = configuredDomainSyncIdentities(env)
+  } catch (error) {
+    await reportReconcileFailure(env, 'configuration', error)
+    return
+  }
+  for (const identity of identities) {
+    try {
+      const syncEnv = resolveDomainSyncIdentity(env, identity)
       const result = await reconcileOrgs({
         // 全行を 1 クエリで取り、resync にそのまま持ち回す(org ごとの再 SELECT = N+1
         // を避ける。全 org ドリフト時に D1 の 50 クエリ/呼 上限を踏まないため)。
@@ -726,19 +746,8 @@ async function scheduled(_event: unknown, env: Bindings, _ctx?: unknown): Promis
       if (result.drift.length > 0) {
         console.warn(`org sync drift reconciled for ${syncEnv.directory}`, result)
       }
-    }
-  } catch (err) {
-    // 照合そのものの失敗(ドメイン側ダウン・caller-specific key 不一致等)。ドリフト通知は
-    // 照合成功時にしか出ないので、ここで通知しないと壊れた同期が永久に無音になる。
-    console.error('hourly reconcile failed', err)
-    const alertEmail = configuredAlertEmail(env)
-    if (alertEmail) {
-      await notify(env, {
-        id: `ops.sync_drift:failed:${new Date().toISOString().slice(0, 10)}`,
-        type: 'ops.sync_drift',
-        to: alertEmail,
-        payload: { reason: 'reconcile_failed', message: err instanceof Error ? err.message : '' },
-      })
+    } catch (error) {
+      await reportReconcileFailure(env, identity.directory, error)
     }
   }
 }

@@ -3,6 +3,10 @@ import type { AppType as ExampleAppType } from '@app/example_service'
 import type { Fetcher } from '@cloudflare/workers-types'
 import { hc } from 'hono/client'
 import { z } from 'zod'
+import { type DomainSyncIdentity, resolveDomainSyncIdentity } from './domain-sync-identity.mjs'
+
+export type { DomainSyncIdentity } from './domain-sync-identity.mjs'
+export { resolveDomainSyncIdentity } from './domain-sync-identity.mjs'
 
 /**
  * admin → catalog deployable domain の service binding helper。
@@ -14,7 +18,7 @@ import { z } from 'zod'
 
 export type SyncEnv = { directory: string; binding: Fetcher; key: string }
 
-const DomainSyncIdentity = z
+const DomainSyncIdentitySchema = z
   .object({
     directory: z.string().regex(/^[a-z][a-z0-9_]{0,62}$/),
     binding: z.string().regex(/^[A-Z][A-Z0-9_]{0,62}$/),
@@ -32,9 +36,11 @@ const DomainSyncIdentity = z
     }
   })
 
-const DomainSyncIdentities = z.array(DomainSyncIdentity).max(40)
+const DomainSyncIdentities = z.array(DomainSyncIdentitySchema).max(40)
 
-export function configuredDomainSyncEnvironments(environment: Record<string, unknown>): SyncEnv[] {
+export function configuredDomainSyncIdentities(
+  environment: Record<string, unknown>,
+): DomainSyncIdentity[] {
   const serialized = environment.ADMIN_DOMAIN_IDENTITIES
   if (typeof serialized !== 'string') {
     throw new Error('ADMIN_DOMAIN_IDENTITIES must be a reviewed JSON array')
@@ -49,21 +55,14 @@ export function configuredDomainSyncEnvironments(environment: Record<string, unk
   if (new Set(identities.map(({ directory }) => directory)).size !== identities.length) {
     throw new Error('ADMIN_DOMAIN_IDENTITIES contains duplicate domains')
   }
-  return identities.map((identity) => {
-    const binding = environment[identity.binding]
-    if (
-      !binding ||
-      typeof binding !== 'object' ||
-      typeof (binding as { fetch?: unknown }).fetch !== 'function'
-    ) {
-      throw new Error(`${identity.binding} must resolve to a service Fetcher`)
-    }
-    const secret = environment[identity.secret]
-    if (typeof secret !== 'string' || secret.length === 0) {
-      throw new Error(`${identity.secret} must resolve to a caller key`)
-    }
-    return { directory: identity.directory, binding: binding as Fetcher, key: secret }
-  })
+  return identities
+}
+
+export function configuredDomainSyncEnvironments(environment: Record<string, unknown>): SyncEnv[] {
+  const identities = configuredDomainSyncIdentities(environment)
+  return identities.map((identity: DomainSyncIdentity) =>
+    resolveDomainSyncIdentity(environment, identity),
+  )
 }
 
 /** A hung service binding must not pin an admin request or hourly Cron forever. */
@@ -94,9 +93,33 @@ export async function syncOrgToDomain(env: SyncEnv, org: Organization): Promise<
     if (!res.ok) console.error('org sync returned non-2xx', res.status, org.id)
     return res.ok
   } catch (err) {
-    console.error('failed to sync organization', err)
+    console.error(`failed to sync organization to ${env.directory}`, err)
     return false
   }
+}
+
+export async function syncOrgToConfiguredDomains(
+  environment: Record<string, unknown>,
+  org: Organization,
+): Promise<boolean> {
+  let identities: DomainSyncIdentity[]
+  try {
+    identities = configuredDomainSyncIdentities(environment)
+  } catch (error) {
+    console.error('failed to parse configured domain sync identities', error)
+    return false
+  }
+  const results = await Promise.all(
+    identities.map(async (identity) => {
+      try {
+        return await syncOrgToDomain(resolveDomainSyncIdentity(environment, identity), org)
+      } catch (error) {
+        console.error(`failed to resolve domain sync target ${identity.directory}`, error)
+        return false
+      }
+    }),
+  )
+  return results.every(Boolean)
 }
 
 export async function syncOrgToDomains(

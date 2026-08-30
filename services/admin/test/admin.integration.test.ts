@@ -34,6 +34,34 @@ function authed(token: string, body?: unknown) {
     ...(body ? { body: JSON.stringify(body) } : {}),
   }
 }
+
+const TWO_DOMAIN_IDENTITIES = JSON.stringify([
+  { directory: 'booking', binding: 'BOOKING', secret: 'ADMIN_TO_BOOKING_KEY' },
+  {
+    directory: 'example_service',
+    binding: 'EXAMPLE_SERVICE',
+    secret: 'ADMIN_TO_EXAMPLE_SERVICE_KEY',
+  },
+])
+
+function runtimeEnvironment(overrides: Record<string, unknown>) {
+  return new Proxy(env, {
+    get(target, property, receiver) {
+      if (typeof property === 'string' && Object.hasOwn(overrides, property)) {
+        return overrides[property]
+      }
+      return Reflect.get(target, property, receiver)
+    },
+  })
+}
+
+async function fetchWithRuntimeEnvironment(request: Request, runtimeEnv: typeof env) {
+  return worker.fetch(
+    request,
+    runtimeEnv as unknown as Parameters<typeof worker.fetch>[1],
+    {} as never,
+  )
+}
 async function createOrg(token: string, name = 'Org', plan?: string) {
   const res = await SELF.fetch(
     `${BASE}/api/organizations`,
@@ -338,6 +366,66 @@ describe('organizations (operator-protected)', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     const org = await createOrg(await adminToken(), 'BestEffort')
     expect(org.name).toBe('BestEffort')
+  })
+
+  it.each(['binding', 'secret'] as const)(
+    'persists the org and syncs later domains when the first domain %s is missing',
+    async (missing) => {
+      const laterFetch = vi
+        .spyOn(env.EXAMPLE_SERVICE, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }) as never)
+      const bookingFetch = vi.fn(async () => new Response('{}', { status: 200 }))
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const runtimeEnv = runtimeEnvironment({
+        ADMIN_DOMAIN_IDENTITIES: TWO_DOMAIN_IDENTITIES,
+        BOOKING: missing === 'binding' ? undefined : { fetch: bookingFetch },
+        ADMIN_TO_BOOKING_KEY: missing === 'secret' ? undefined : 'booking-key',
+      })
+      const token = await adminToken()
+      const response = await fetchWithRuntimeEnvironment(
+        new Request(
+          `${BASE}/api/organizations`,
+          authed(token, { name: `Partial-${missing}-${crypto.randomUUID()}` }),
+        ),
+        runtimeEnv,
+      )
+
+      expect(response.status).toBe(201)
+      const body = (await response.json()) as { id: string; synced: boolean }
+      expect(body.synced).toBe(false)
+      expect(laterFetch).toHaveBeenCalledTimes(1)
+      const stored = await drizzle(env.DB)
+        .select({ id: organizations.id })
+        .from(organizations)
+        .where(eq(organizations.id, body.id))
+      expect(stored).toEqual([{ id: body.id }])
+      expect(
+        errorSpy.mock.calls.some((call) => call.some((value) => String(value).includes('booking'))),
+      ).toBe(true)
+    },
+  )
+
+  it('returns synced false and reaches the later domain when the first domain fetch rejects', async () => {
+    const laterFetch = vi
+      .spyOn(env.EXAMPLE_SERVICE, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }) as never)
+    const runtimeEnv = runtimeEnvironment({
+      ADMIN_DOMAIN_IDENTITIES: TWO_DOMAIN_IDENTITIES,
+      BOOKING: { fetch: vi.fn(async () => Promise.reject(new Error('booking unavailable'))) },
+      ADMIN_TO_BOOKING_KEY: 'booking-key',
+    })
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const response = await fetchWithRuntimeEnvironment(
+      new Request(
+        `${BASE}/api/organizations`,
+        authed(await adminToken(), { name: `FetchFailure-${crypto.randomUUID()}` }),
+      ),
+      runtimeEnv,
+    )
+
+    expect(response.status).toBe(201)
+    expect(((await response.json()) as { synced: boolean }).synced).toBe(false)
+    expect(laterFetch).toHaveBeenCalledTimes(1)
   })
 
   it('DELETE disables the org (audit row kept) and re-syncs', async () => {
@@ -812,6 +900,84 @@ describe('scheduled reconcile', () => {
         {} as never,
       ),
     ).resolves.toBeUndefined()
+  })
+
+  it.each(['binding', 'secret'] as const)(
+    'continues to the later domain and identifies the failed domain when the first %s is missing',
+    async (missing) => {
+      const laterFetch = vi
+        .spyOn(env.EXAMPLE_SERVICE, 'fetch')
+        .mockImplementation((() => Promise.resolve(Response.json([]))) as never)
+      const notifySpy = vi
+        .spyOn(env.NOTIFIER, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }) as never)
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const runtimeEnv = runtimeEnvironment({
+        ADMIN_DOMAIN_IDENTITIES: TWO_DOMAIN_IDENTITIES,
+        BOOKING:
+          missing === 'binding'
+            ? undefined
+            : { fetch: vi.fn(async () => Promise.resolve(Response.json([]))) },
+        ADMIN_TO_BOOKING_KEY: missing === 'secret' ? undefined : 'booking-key',
+      })
+
+      await worker.scheduled?.(
+        {} as never,
+        runtimeEnv as unknown as Parameters<NonNullable<typeof worker.scheduled>>[1],
+        {} as never,
+      )
+
+      expect(laterFetch).toHaveBeenCalled()
+      const jobs = notifySpy.mock.calls
+        .map((call) => String((call[1] as RequestInit | undefined)?.body ?? ''))
+        .filter(Boolean)
+        .map((body) => JSON.parse(body) as { id: string; payload: Record<string, unknown> })
+      const failure = jobs.find((job) => job.payload.reason === 'reconcile_failed')
+      expect(failure?.id).toContain('ops.sync_drift:failed:booking:')
+      expect(failure?.payload.domain).toBe('booking')
+      expect(
+        errorSpy.mock.calls.some((call) => call.some((value) => String(value).includes('booking'))),
+      ).toBe(true)
+    },
+  )
+
+  it('continues after a first-domain fetch failure and reports that domain in log and notification', async () => {
+    const laterFetch = vi
+      .spyOn(env.EXAMPLE_SERVICE, 'fetch')
+      .mockImplementation((() => Promise.resolve(Response.json([]))) as never)
+    const notifySpy = vi
+      .spyOn(env.NOTIFIER, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }) as never)
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const runtimeEnv = runtimeEnvironment({
+      ADMIN_DOMAIN_IDENTITIES: TWO_DOMAIN_IDENTITIES,
+      BOOKING: { fetch: vi.fn(async () => Promise.reject(new Error('booking unavailable'))) },
+      ADMIN_TO_BOOKING_KEY: 'booking-key',
+    })
+
+    await worker.scheduled?.(
+      {} as never,
+      runtimeEnv as unknown as Parameters<NonNullable<typeof worker.scheduled>>[1],
+      {} as never,
+    )
+
+    expect(laterFetch).toHaveBeenCalled()
+    const jobs = notifySpy.mock.calls
+      .map((call) => String((call[1] as RequestInit | undefined)?.body ?? ''))
+      .filter(Boolean)
+      .map((body) => JSON.parse(body) as { id: string; payload: Record<string, unknown> })
+    const failure = jobs.find((job) => job.payload.reason === 'reconcile_failed')
+    expect(failure?.id).toContain('ops.sync_drift:failed:booking:')
+    expect(failure?.payload).toMatchObject({
+      domain: 'booking',
+      reason: 'reconcile_failed',
+      message: 'booking unavailable',
+    })
+    expect(
+      errorSpy.mock.calls.some((call) => call.some((value) => String(value).includes('booking'))),
+    ).toBe(true)
   })
 })
 

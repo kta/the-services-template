@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   configuredDomainSyncEnvironments,
   listDomainOrgs,
+  resolveDomainSyncIdentity,
   syncOrgToDomain,
   syncOrgToDomains,
 } from '../src/worker/sync'
@@ -60,7 +61,8 @@ describe('admin → domain service binding timeout boundary', () => {
   })
 
   it('resolves the convention-bound Fetcher and caller key from the reviewed runtime identity', () => {
-    const { fetch } = binding(Response.json(org))
+    const booking = binding(Response.json(org)).fetch
+    const inventory = binding(Response.json(org)).fetch
     const targets = configuredDomainSyncEnvironments({
       ADMIN_DOMAIN_IDENTITIES: JSON.stringify([
         {
@@ -68,16 +70,49 @@ describe('admin → domain service binding timeout boundary', () => {
           binding: 'BOOKING',
           secret: 'ADMIN_TO_BOOKING_KEY',
         },
+        {
+          directory: 'inventory',
+          binding: 'INVENTORY',
+          secret: 'ADMIN_TO_INVENTORY_KEY',
+        },
       ]),
-      BOOKING: { fetch },
-      ADMIN_TO_BOOKING_KEY: 'k'.repeat(32),
+      BOOKING: { fetch: booking },
+      INVENTORY: { fetch: inventory },
+      ADMIN_TO_BOOKING_KEY: 'booking-key',
+      ADMIN_TO_INVENTORY_KEY: 'inventory-key',
     })
     expect(targets).toEqual([
       {
         directory: 'booking',
-        binding: { fetch },
-        key: 'k'.repeat(32),
+        binding: { fetch: booking },
+        key: 'booking-key',
       },
+      {
+        directory: 'inventory',
+        binding: { fetch: inventory },
+        key: 'inventory-key',
+      },
+    ])
+  })
+
+  it('executes the exported pure resolver with computed binding and secret access for multiple tuples', () => {
+    const booking = binding(Response.json(org)).fetch
+    const inventory = binding(Response.json(org)).fetch
+    const environment = {
+      BOOKING: { fetch: booking },
+      INVENTORY: { fetch: inventory },
+      ADMIN_TO_BOOKING_KEY: 'booking-key',
+      ADMIN_TO_INVENTORY_KEY: 'inventory-key',
+    }
+
+    expect(
+      [
+        { directory: 'booking', binding: 'BOOKING', secret: 'ADMIN_TO_BOOKING_KEY' },
+        { directory: 'inventory', binding: 'INVENTORY', secret: 'ADMIN_TO_INVENTORY_KEY' },
+      ].map((identity) => resolveDomainSyncIdentity(environment, identity)),
+    ).toEqual([
+      { directory: 'booking', binding: { fetch: booking }, key: 'booking-key' },
+      { directory: 'inventory', binding: { fetch: inventory }, key: 'inventory-key' },
     ])
   })
 

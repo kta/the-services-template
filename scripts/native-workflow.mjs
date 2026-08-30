@@ -184,6 +184,13 @@ export function nativeWorkflowChildEnvironment(environment, options) {
     typeof child.CARGO_HOME === 'string' ? child.CARGO_HOME : home && join(home, '.cargo')
   const androidHome =
     typeof child.ANDROID_HOME === 'string' ? child.ANDROID_HOME : child.ANDROID_SDK_ROOT
+  if (
+    child.NDK_HOME === undefined &&
+    androidHome &&
+    typeof child.ANDROID_NDK_VERSION === 'string'
+  ) {
+    child.NDK_HOME = join(androidHome, 'ndk', child.ANDROID_NDK_VERSION)
+  }
   const directories = [
     dirname(nodePath),
     dirname(pnpmPath),

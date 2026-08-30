@@ -199,6 +199,7 @@ export async function validateServiceCatalog(root = DEFAULT_ROOT) {
   const directories = new Set()
   const packages = new Set()
   const workflowPaths = new Set()
+  const nativeWorkflowServices = []
   const normalizedServices = []
   for (const [index, service] of services.entries()) {
     const violationCount = violations.length
@@ -253,6 +254,8 @@ export async function validateServiceCatalog(root = DEFAULT_ROOT) {
     }
 
     if (violations.length !== violationCount) continue
+
+    if (native) nativeWorkflowServices.push({ directory, package: packageName })
 
     const serviceRoot = join(servicesRoot, directory)
     const serviceReal = await safeDirectory(
@@ -390,7 +393,7 @@ export async function validateServiceCatalog(root = DEFAULT_ROOT) {
       )
       if (source) {
         try {
-          if (workflowContainsNativeBuild(source)) {
+          if (workflowContainsNativeBuild(source, nativeWorkflowServices)) {
             violations.push(
               `${workflowPath}: native workflow is not registered as a catalog nativeWorkflow`,
             )

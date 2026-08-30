@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { resolveDomainSyncIdentity } from '../services/admin/src/worker/domain-sync-identity.mjs'
 import {
   loadServiceCatalog,
   loadServiceRepositoryCatalog,
@@ -247,11 +248,7 @@ test('production write entry points are CI-only and cannot be reached through Ma
       /internalAuth[\s\S]*?DOMAIN_TO_ADMIN_KEY/,
       /sendNotification\(env\.NOTIFIER,\s*env\.ADMIN_TO_NOTIFIER_KEY/,
     ],
-    'services/admin/src/worker/sync.ts': [
-      /environment\s*\[\s*identity\.binding\s*\]/,
-      /environment\s*\[\s*identity\.secret\s*\]/,
-      /x-internal-key['"]:\s*env\.key/,
-    ],
+    'services/admin/src/worker/sync.ts': [/x-internal-key['"]:\s*env\.key/],
     'services/example_service/src/worker/index.ts': [
       /internalAuth[\s\S]*?ADMIN_TO_EXAMPLE_SERVICE_KEY/,
       /sendNotification\(c\.env\.NOTIFIER,\s*c\.env\.DOMAIN_TO_NOTIFIER_KEY/,
@@ -265,6 +262,28 @@ test('production write entry points are CI-only and cannot be reached through Ma
     const source = await readFile(join(root, path), 'utf8')
     for (const pattern of patterns) assert.match(source, pattern, path)
   }
+  const domainBindings = {
+    BOOKING: { fetch() {} },
+    ADMIN_TO_BOOKING_KEY: 'booking-key',
+    INVENTORY: { fetch() {} },
+    ADMIN_TO_INVENTORY_KEY: 'inventory-key',
+  }
+  assert.deepEqual(
+    resolveDomainSyncIdentity(domainBindings, {
+      directory: 'booking',
+      binding: 'BOOKING',
+      secret: 'ADMIN_TO_BOOKING_KEY',
+    }),
+    { directory: 'booking', binding: domainBindings.BOOKING, key: 'booking-key' },
+  )
+  assert.deepEqual(
+    resolveDomainSyncIdentity(domainBindings, {
+      directory: 'inventory',
+      binding: 'INVENTORY',
+      secret: 'ADMIN_TO_INVENTORY_KEY',
+    }),
+    { directory: 'inventory', binding: domainBindings.INVENTORY, key: 'inventory-key' },
+  )
 
   const examplePackage = JSON.parse(
     await readFile(join(root, 'services/example_service/package.json'), 'utf8'),
@@ -291,11 +310,15 @@ test('manual artifact workflows do not receive Cloudflare credentials', async ()
     assert.doesNotMatch(workflow, /wrangler\s+deploy/)
     assert.match(
       workflow,
-      new RegExp(`node scripts/native-workflow\\.mjs ${service.directory} boundary`),
+      new RegExp(
+        `\\$\\{\\{ steps\\.trusted-node\\.outputs\\.path \\}\\} scripts/native-workflow\\.mjs ${service.directory} boundary`,
+      ),
     )
     assert.match(
       workflow,
-      new RegExp(`node scripts/native-workflow\\.mjs ${service.directory} verify-`),
+      new RegExp(
+        `\\$\\{\\{ steps\\.trusted-node\\.outputs\\.path \\}\\} scripts/native-workflow\\.mjs ${service.directory} verify-`,
+      ),
     )
     assert.match(workflow, /ANDROID_PLATFORM_API:\s*35/)
     assert.match(workflow, /ANDROID_NDK_VERSION:\s*27\.2\.12479018/)
@@ -336,7 +359,9 @@ test('native artifact workflows exactly match catalog native services', async ()
     const workflow = await readFile(join(root, service.nativeWorkflow), 'utf8')
     assert.match(
       workflow,
-      new RegExp(`node scripts/native-workflow\\.mjs ${service.directory} (?:boundary|build-)`),
+      new RegExp(
+        `\\$\\{\\{ steps\\.trusted-node\\.outputs\\.path \\}\\} scripts/native-workflow\\.mjs ${service.directory} (?:boundary|build-)`,
+      ),
     )
   }
   const webServices = catalog.filter((service) => !service.native)
@@ -391,7 +416,9 @@ test('an additional catalog native service needs no Make or deploy-test hard-cod
     )
     await writeFile(
       join(fixture, service.nativeWorkflow),
-      referenceWorkflow.replaceAll('example_tauri_service', 'booking'),
+      referenceWorkflow
+        .replaceAll('example_tauri_service', 'booking')
+        .replaceAll('example-tauri-service', 'booking'),
     )
     const result = await validateServiceCatalog(fixture)
     assert.deepEqual(result.violations, [])

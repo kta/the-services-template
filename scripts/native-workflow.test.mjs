@@ -63,6 +63,7 @@ test('rebuilds the native child environment without Node or package-manager inje
       CARGO_HOME: '/runner/.cargo',
       RUSTUP_HOME: '/runner/.rustup',
       ANDROID_HOME: '/opt/android',
+      NDK_HOME: '/opt/android/ndk/27.2.12479018',
       JAVA_HOME: '/opt/java',
       ANDROID_PLATFORM_API: '35',
       ANDROID_NDK_VERSION: '27.2.12479018',

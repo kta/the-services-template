@@ -87,18 +87,58 @@ async function withRepositoryFixture({ services = [], workerOnlyServices = [] },
 }
 
 function validNativeWorkflow(service) {
+  const trustedNode = '$' + '{{ steps.trusted-node.outputs.path }}'
+  const artifactPrefix = service.directory.replaceAll('_', '-')
   return `name: ${service.directory} native artifacts
 on:\n  workflow_dispatch: {}
 permissions:\n  contents: read
 env:\n  NODE_VERSION: 22\n  ANDROID_PLATFORM_API: 35\n  ANDROID_NDK_VERSION: 27.2.12479018\n  XCODEGEN_VERSION: 2.46.0
-jobs:\n  macos-universal:\n    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true\n    runs-on: macos-15
+jobs:\n  macos-universal:\n    name: ${service.directory} macOS universal app bundle\n    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true\n    runs-on: macos-15
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: \${{ env.NODE_VERSION }}
+          cache: pnpm
+      - name: Capture trusted absolute Node path
+        id: trusted-node
+        shell: bash
+        run: |
+          set -euo pipefail
+          node_path="$(node -p 'require("node:fs").realpathSync(process.execPath)')"
+          case "$node_path" in
+            /*) ;;
+            *) echo "Node did not resolve to an absolute path" >&2; exit 1 ;;
+          esac
+          test -x "$node_path"
+          case "$node_path" in
+            "$GITHUB_WORKSPACE"/*) echo "Node resolved inside the checkout" >&2; exit 1 ;;
+          esac
+          printf 'path=%s\\n' "$node_path" >> "$GITHUB_OUTPUT"
+      - run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Check native security boundary
-        run: node scripts/native-workflow.mjs ${service.directory} boundary
+        run: ${trustedNode} scripts/native-workflow.mjs ${service.directory} boundary
+      - name: Check pinned Rust toolchain
+        run: test "$(rustc --version | awk '{print $2}')" = "1.88.0"
+      - name: Install universal Rust targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Check Apple build tools
+        run: |
+          xcodebuild -version
+          pod --version
       - name: Build unsigned universal debug app
-        run: node scripts/native-workflow.mjs ${service.directory} build-macos
+        run: ${trustedNode} scripts/native-workflow.mjs ${service.directory} build-macos
       - name: Scan macOS artifact for secrets
-        run: node scripts/native-workflow.mjs ${service.directory} verify-macos
+        run: ${trustedNode} scripts/native-workflow.mjs ${service.directory} verify-macos
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${artifactPrefix}-macos-universal-debug
+          path: services/${service.directory}/src-tauri/target/universal-apple-darwin/debug/bundle/macos/*.app
+          if-no-files-found: error
+          retention-days: 7
 `
 }
 
@@ -298,6 +338,11 @@ test('rejects workflow symlinks and orphan native workflows without reading outs
       '.github/workflows/printed-native-text.yml',
       "on: {workflow_dispatch: {}}\njobs:\n  print:\n    runs-on: ubuntu-latest\n    steps:\n      - run: printf '%s\\n' 'build:tauri'\n",
     )
+    await writeFixture(
+      root,
+      '.github/workflows/orphan-indirect-native.yml',
+      'on: {push: {}}\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - env: {SCRIPT: "build:tauri"}\n        run: pnpm --filter @app/booking run "$SCRIPT"\n',
+    )
     try {
       const result = await validateServiceCatalog(root)
       const diagnostic = result.violations.join('\n')
@@ -305,6 +350,7 @@ test('rejects workflow symlinks and orphan native workflows without reading outs
       assert.match(diagnostic, /orphan\.yml.*not registered.*nativeWorkflow/i)
       assert.match(diagnostic, /orphan-build-tauri\.yml.*not registered.*nativeWorkflow/i)
       assert.match(diagnostic, /orphan-dynamic-native\.yml.*not registered.*nativeWorkflow/i)
+      assert.match(diagnostic, /orphan-indirect-native\.yml.*not registered.*nativeWorkflow/i)
       assert.doesNotMatch(diagnostic, /printed-native-text\.yml.*not registered.*nativeWorkflow/i)
       assert.doesNotMatch(diagnostic, /OUTSIDE_WORKFLOW_SENTINEL/)
     } finally {

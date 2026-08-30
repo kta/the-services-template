@@ -21,6 +21,26 @@ const NATIVE_PLATFORM_PINS = {
   ANDROID_NDK_VERSION: '27.2.12479018',
   XCODEGEN_VERSION: '2.46.0',
 }
+const GITHUB_EXPRESSION = '$' + '{{'
+const TRUSTED_NATIVE_NODE = `${GITHUB_EXPRESSION} steps.trusted-node.outputs.path }}`
+const CHECKOUT_ACTION = 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'
+const PNPM_ACTION = 'pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86'
+const NODE_ACTION = 'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020'
+const JAVA_ACTION = 'actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3'
+const ANDROID_ACTION = 'android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407'
+const UPLOAD_ACTION = 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'
+const CAPTURE_TRUSTED_NODE_RUN = `set -euo pipefail
+node_path="$(node -p 'require("node:fs").realpathSync(process.execPath)')"
+case "$node_path" in
+  /*) ;;
+  *) echo "Node did not resolve to an absolute path" >&2; exit 1 ;;
+esac
+test -x "$node_path"
+case "$node_path" in
+  "$GITHUB_WORKSPACE"/*) echo "Node resolved inside the checkout" >&2; exit 1 ;;
+esac
+printf 'path=%s\\n' "$node_path" >> "$GITHUB_OUTPUT"
+`
 
 // Ruby's Psych parser is available on the GitHub-hosted runner and parses the
 // complete YAML object, including block scalars. We reject duplicate mapping
@@ -151,6 +171,39 @@ function isMapping(value) {
   return value && typeof value === 'object' && !Array.isArray(value)
 }
 
+function firstStructuralDifference(actual, expected, path = 'job') {
+  if (Object.is(actual, expected)) return undefined
+  if (Array.isArray(actual) || Array.isArray(expected)) {
+    if (!Array.isArray(actual) || !Array.isArray(expected)) return `${path} type`
+    if (actual.length !== expected.length) {
+      return `${path} length ${actual.length} (expected ${expected.length})`
+    }
+    for (let index = 0; index < actual.length; index += 1) {
+      const difference = firstStructuralDifference(
+        actual[index],
+        expected[index],
+        `${path}[${index}]`,
+      )
+      if (difference) return difference
+    }
+    return undefined
+  }
+  if (isMapping(actual) || isMapping(expected)) {
+    if (!isMapping(actual) || !isMapping(expected)) return `${path} type`
+    const actualKeys = Object.keys(actual).sort()
+    const expectedKeys = Object.keys(expected).sort()
+    if (JSON.stringify(actualKeys) !== JSON.stringify(expectedKeys)) {
+      return `${path} fields ${actualKeys.join(',')} (expected ${expectedKeys.join(',')})`
+    }
+    for (const key of actualKeys) {
+      const difference = firstStructuralDifference(actual[key], expected[key], `${path}.${key}`)
+      if (difference) return difference
+    }
+    return undefined
+  }
+  return `${path} value ${JSON.stringify(actual)} (expected ${JSON.stringify(expected)})`
+}
+
 const NATIVE_JOB_PROFILES = {
   'macos-universal': [
     ['Check native security boundary', 'boundary'],
@@ -178,6 +231,227 @@ const NATIVE_JOB_PROFILES = {
     ['Build debug AAB', 'build-android-aab'],
     ['Scan Android AAB for secrets', 'verify-android-aab'],
   ],
+}
+
+function nativeWrapperRun(directory, action) {
+  return `${TRUSTED_NATIVE_NODE} scripts/native-workflow.mjs ${directory} ${action}`
+}
+
+function commonNativeSteps() {
+  return [
+    { uses: CHECKOUT_ACTION, with: { 'persist-credentials': false } },
+    { uses: PNPM_ACTION },
+    {
+      uses: NODE_ACTION,
+      with: { 'node-version': `${GITHUB_EXPRESSION} env.NODE_VERSION }}`, cache: 'pnpm' },
+    },
+    {
+      name: 'Capture trusted absolute Node path',
+      id: 'trusted-node',
+      shell: 'bash',
+      run: CAPTURE_TRUSTED_NODE_RUN,
+    },
+    { run: 'pnpm install --frozen-lockfile --ignore-scripts' },
+  ]
+}
+
+function androidNativeSetupSteps() {
+  return [
+    {
+      uses: JAVA_ACTION,
+      with: { distribution: 'temurin', 'java-version': '17' },
+    },
+    { uses: ANDROID_ACTION },
+  ]
+}
+
+function reviewedNativeJobs(directory) {
+  const artifactPrefix = directory.replaceAll('_', '-')
+  const protectedMain = PROTECTED_MAIN_DISPATCH
+  const boundary = {
+    name: 'Check native security boundary',
+    run: nativeWrapperRun(directory, 'boundary'),
+  }
+  const rust = {
+    name: 'Check pinned Rust toolchain',
+    run: `test "$(rustc --version | awk '{print $2}')" = "1.88.0"`,
+  }
+  const androidPrerequisites = {
+    name: 'Install Android SDK prerequisites',
+    shell: 'bash',
+    run: `yes | sdkmanager --licenses >/dev/null
+sdkmanager "platform-tools" "platforms;android-\${ANDROID_PLATFORM_API}" "ndk;\${ANDROID_NDK_VERSION}"
+`,
+  }
+  const androidAlignment = {
+    name: 'Align NDK with generated Gradle project',
+    shell: 'bash',
+    run: `compile_sdk="$(rg -o 'compileSdk(Version)?[[:space:]]*=[[:space:]]*[0-9]+' services/${directory}/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*[^0-9]([0-9]+)$/\\1/' | head -1)"
+test "$compile_sdk" = "$ANDROID_PLATFORM_API"
+build_tools="$(rg -o 'buildToolsVersion[[:space:]]*=[[:space:]]*"[^"]+"' services/${directory}/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*"([^"]+)".*/\\1/' | head -1)"
+if [[ -n "$build_tools" ]]; then
+  sdkmanager "build-tools;$build_tools"
+fi
+ndk_version="$(rg -o 'ndkVersion[[:space:]]*=[[:space:]]*"[^"]+"' services/${directory}/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*"([^"]+)".*/\\1/' | head -1)"
+test "$ndk_version" = "$ANDROID_NDK_VERSION"
+`,
+  }
+  const androidBase = () => [
+    ...commonNativeSteps().slice(0, 3),
+    ...androidNativeSetupSteps(),
+    ...commonNativeSteps().slice(3),
+    boundary,
+    rust,
+    androidPrerequisites,
+    {
+      name: 'Install Android Rust target',
+      run: 'rustup target add aarch64-linux-android',
+    },
+    {
+      name: 'Initialize Android project',
+      run: nativeWrapperRun(directory, 'init-android'),
+    },
+    {
+      name: 'Re-check native security boundary after Android generation',
+      run: nativeWrapperRun(directory, 'boundary'),
+    },
+    androidAlignment,
+  ]
+
+  return {
+    'macos-universal': {
+      name: `${directory} macOS universal app bundle`,
+      if: protectedMain,
+      'runs-on': 'macos-15',
+      steps: [
+        ...commonNativeSteps(),
+        boundary,
+        rust,
+        {
+          name: 'Install universal Rust targets',
+          run: 'rustup target add aarch64-apple-darwin x86_64-apple-darwin',
+        },
+        {
+          name: 'Check Apple build tools',
+          run: 'xcodebuild -version\npod --version\n',
+        },
+        {
+          name: 'Build unsigned universal debug app',
+          run: nativeWrapperRun(directory, 'build-macos'),
+        },
+        {
+          name: 'Scan macOS artifact for secrets',
+          run: nativeWrapperRun(directory, 'verify-macos'),
+        },
+        {
+          uses: UPLOAD_ACTION,
+          with: {
+            name: `${artifactPrefix}-macos-universal-debug`,
+            path: `services/${directory}/src-tauri/target/universal-apple-darwin/debug/bundle/macos/*.app`,
+            'if-no-files-found': 'error',
+            'retention-days': 7,
+          },
+        },
+      ],
+    },
+    'ios-simulator': {
+      name: `${directory} iOS simulator app`,
+      if: protectedMain,
+      'runs-on': 'macos-15',
+      steps: [
+        ...commonNativeSteps(),
+        boundary,
+        rust,
+        {
+          name: 'Install iOS simulator Rust target',
+          run: 'rustup target add aarch64-apple-ios-sim',
+        },
+        { name: 'Install XcodeGen', run: 'brew install xcodegen' },
+        {
+          name: 'Check Apple build tools',
+          run: `xcodebuild -version
+pod --version
+test "$(xcodegen --version)" = "Version: \${XCODEGEN_VERSION}"
+`,
+        },
+        {
+          name: 'Initialize iOS project',
+          run: nativeWrapperRun(directory, 'init-ios'),
+        },
+        {
+          name: 'Re-check native security boundary after iOS generation',
+          run: nativeWrapperRun(directory, 'boundary'),
+        },
+        {
+          name: 'Build unsigned simulator artifact',
+          run: nativeWrapperRun(directory, 'build-ios'),
+        },
+        {
+          name: 'Scan iOS artifact for secrets',
+          run: nativeWrapperRun(directory, 'verify-ios'),
+        },
+        {
+          uses: UPLOAD_ACTION,
+          with: {
+            name: `${artifactPrefix}-ios-simulator`,
+            path: `services/${directory}/src-tauri/gen/apple/build`,
+            'if-no-files-found': 'error',
+            'retention-days': 7,
+          },
+        },
+      ],
+    },
+    'android-debug-apk': {
+      name: `${directory} Android debug APK`,
+      if: protectedMain,
+      'runs-on': 'ubuntu-24.04',
+      steps: [
+        ...androidBase(),
+        {
+          name: 'Build debug APK',
+          run: nativeWrapperRun(directory, 'build-android-apk'),
+        },
+        {
+          name: 'Scan Android APK for secrets',
+          run: nativeWrapperRun(directory, 'verify-android-apk'),
+        },
+        {
+          uses: UPLOAD_ACTION,
+          with: {
+            name: `${artifactPrefix}-android-debug-apk`,
+            path: `services/${directory}/src-tauri/gen/android/app/build/outputs/apk/**/debug/*.apk`,
+            'if-no-files-found': 'error',
+            'retention-days': 7,
+          },
+        },
+      ],
+    },
+    'android-debug-aab': {
+      name: `${directory} Android debug AAB`,
+      if: protectedMain,
+      'runs-on': 'ubuntu-24.04',
+      steps: [
+        ...androidBase(),
+        {
+          name: 'Build debug AAB',
+          run: nativeWrapperRun(directory, 'build-android-aab'),
+        },
+        {
+          name: 'Scan Android AAB for secrets',
+          run: nativeWrapperRun(directory, 'verify-android-aab'),
+        },
+        {
+          uses: UPLOAD_ACTION,
+          with: {
+            name: `${artifactPrefix}-android-debug-aab`,
+            path: `services/${directory}/src-tauri/gen/android/app/build/outputs/bundle/**/debug/*.aab`,
+            'if-no-files-found': 'error',
+            'retention-days': 7,
+          },
+        },
+      ],
+    },
+  }
 }
 
 function containsSecretsContext(value) {
@@ -221,7 +495,9 @@ function nativeWrapperCommand(step) {
   if (typeof step?.run !== 'string') return undefined
   const match = step.run
     .trim()
-    .match(/^node scripts\/native-workflow\.mjs ([a-z][a-z0-9_]{0,62}) ([a-z][a-z0-9-]*)$/)
+    .match(
+      /^\$\{\{ steps\.trusted-node\.outputs\.path \}\} scripts\/native-workflow\.mjs ([a-z][a-z0-9_]{0,62}) ([a-z][a-z0-9-]*)$/,
+    )
   return match ? { directory: match[1], action: match[2] } : undefined
 }
 
@@ -245,6 +521,32 @@ function containsDirectNativeCommand(step) {
       step.run,
     )
   )
+}
+
+function writesGithubExecutionState(step) {
+  return typeof step?.run === 'string' && /\bGITHUB_(?:PATH|ENV)\b/.test(step.run)
+}
+
+function nativeScriptEnvironment(value) {
+  return Object.values(isMapping(value) ? value : {}).some(
+    (entry) =>
+      typeof entry === 'string' && /^(?:build:tauri|tauri(?::[a-z0-9_-]+)?)$/i.test(entry.trim()),
+  )
+}
+
+function escapesRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function dispatchesIndirectNativePackageScript(step, effectiveEnv, nativeServices) {
+  if (typeof step?.run !== 'string' || !nativeScriptEnvironment(effectiveEnv)) return false
+  if (!/\bpnpm\b/.test(step.run)) return false
+  return nativeServices.some(({ directory, package: packageName }) => {
+    const packagePattern = new RegExp(
+      `(?:${escapesRegex(packageName)}|services/${escapesRegex(directory)})`,
+    )
+    return packagePattern.test(step.run) || packagePattern.test(JSON.stringify(effectiveEnv))
+  })
 }
 
 function nativeStepHasRootExecution(step) {
@@ -305,6 +607,7 @@ export function inspectNativeWorkflowPolicy(workflowPath, source, service) {
   if (workflow.defaults !== undefined) {
     violations.push(`${workflowPath}: native workflow defaults and custom shells are forbidden`)
   }
+  const reviewedJobs = reviewedNativeJobs(service.directory)
   for (const [name, expected] of Object.entries(NATIVE_PLATFORM_PINS)) {
     if (!isMapping(workflow.env) || String(workflow.env[name]) !== String(expected)) {
       violations.push(`${workflowPath}: native workflow is missing required platform pin ${name}`)
@@ -405,6 +708,16 @@ export function inspectNativeWorkflowPolicy(workflowPath, source, service) {
         violations.push(
           `${workflowPath}:${jobName}:steps[${index}] contains an unreviewed native wrapper reference`,
         )
+        if (/^\s*node\s+scripts\/native-workflow\.mjs\b/.test(step.run)) {
+          violations.push(
+            `${workflowPath}:${jobName}:steps[${index}] native wrapper must use the captured trusted absolute Node path`,
+          )
+        }
+      }
+      if (writesGithubExecutionState(step)) {
+        violations.push(
+          `${workflowPath}:${jobName}:steps[${index}] must not write GITHUB_PATH or GITHUB_ENV`,
+        )
       }
       const injection = executionInjectionNames(step.env)
       if (injection.length > 0) {
@@ -454,6 +767,15 @@ export function inspectNativeWorkflowPolicy(workflowPath, source, service) {
     if (!expectedProfile || JSON.stringify(actualProfile) !== JSON.stringify(expectedWithService)) {
       violations.push(`${workflowPath}:${jobName} must use the exact native wrapper sequence`)
     }
+    const reviewedJob = reviewedJobs[jobName]
+    const jobDifference = reviewedJob
+      ? firstStructuralDifference(job, reviewedJob)
+      : 'job name is not registered'
+    if (jobDifference) {
+      violations.push(
+        `${workflowPath}:${jobName} must match the reviewed exact job profile (${jobDifference})`,
+      )
+    }
     if (containsSecretsContext(job) || containsCloudflareCapability(job)) {
       violations.push(
         `${workflowPath}:${jobName} must not receive a Cloudflare credential or production capability`,
@@ -463,7 +785,7 @@ export function inspectNativeWorkflowPolicy(workflowPath, source, service) {
   return [...new Set(violations)]
 }
 
-export function workflowContainsNativeBuild(source) {
+export function workflowContainsNativeBuild(source, nativeServices = []) {
   const workflow = parseGithubWorkflow(source)
   for (const [, job] of objectEntries(workflow.jobs)) {
     if (!Array.isArray(job?.steps)) continue
@@ -471,6 +793,12 @@ export function workflowContainsNativeBuild(source) {
       // An unregistered workflow may not reference the reviewed executor at
       // all. Dynamic/quoted argv are still capable of selecting a heavy build.
       if (containsNativeWrapperReference(step)) return true
+      const effectiveEnv = {
+        ...(isMapping(workflow.env) ? workflow.env : {}),
+        ...(isMapping(job.env) ? job.env : {}),
+        ...(isMapping(step?.env) ? step.env : {}),
+      }
+      if (dispatchesIndirectNativePackageScript(step, effectiveEnv, nativeServices)) return true
     }
   }
   return false

@@ -533,21 +533,25 @@ test('rejects inherited production execution overrides at workflow and job scope
   }
 })
 
-test('validates admin domain binding and secret tuples through config, generated Env, and runtime source', () => {
+test('validates admin domain binding and secret tuples through config, generated Env, and executable runtime adapter', () => {
   const booking = { directory: 'booking', package: '@app/booking', deployable: true }
-  const catalog = { services: [...services, booking], workerOnlyServices }
+  const inventory = { directory: 'inventory', package: '@app/inventory', deployable: true }
+  const catalog = { services: [...services, booking, inventory], workerOnlyServices }
   const runtimeIdentity = JSON.stringify([
     { directory: 'booking', binding: 'BOOKING', secret: 'ADMIN_TO_BOOKING_KEY' },
+    { directory: 'inventory', binding: 'INVENTORY', secret: 'ADMIN_TO_INVENTORY_KEY' },
   ])
   const validAdminConfig = {
     services: [
       { binding: 'BOOKING', service: 'booking' },
+      { binding: 'INVENTORY', service: 'inventory' },
       { binding: 'NOTIFIER', service: 'notifier' },
     ],
     secrets: {
       required: [
         'DOMAIN_TO_ADMIN_KEY',
         'ADMIN_TO_BOOKING_KEY',
+        'ADMIN_TO_INVENTORY_KEY',
         'ADMIN_TO_NOTIFIER_KEY',
         'JWT_PRIVATE_KEY',
         'JWT_PUBLIC_KEY',
@@ -560,28 +564,37 @@ test('validates admin domain binding and secret tuples through config, generated
     const sources = validSources()
     sources.adminConfig = JSON.stringify(validAdminConfig)
     sources.opsConfig = JSON.stringify({
-      vars: { ADMIN_DB_ID: 'id', BOOKING_DB_ID: 'id' },
+      vars: { ADMIN_DB_ID: 'id', BOOKING_DB_ID: 'id', INVENTORY_DB_ID: 'id' },
       services: [
         { binding: 'ADMIN', service: 'admin' },
         { binding: 'NOTIFIER', service: 'notifier' },
         { binding: 'BOOKING', service: 'booking' },
+        { binding: 'INVENTORY', service: 'inventory' },
       ],
     })
     sources.opsSource = `
       { name: 'admin', databaseId: env.ADMIN_DB_ID, healthBinding: env.ADMIN },
       { name: 'notifier', healthBinding: env.NOTIFIER },
       { name: 'booking', databaseId: env.BOOKING_DB_ID, healthBinding: env.BOOKING },
+      { name: 'inventory', databaseId: env.INVENTORY_DB_ID, healthBinding: env.INVENTORY },
     `
     sources.adminGeneratedEnv = `
       interface __BaseEnv_Env {
         ADMIN_DOMAIN_IDENTITIES: string;
         BOOKING: Fetcher;
+        INVENTORY: Fetcher;
         ADMIN_TO_BOOKING_KEY: string;
+        ADMIN_TO_INVENTORY_KEY: string;
       }
     `
     sources.adminSyncSource = `
-      const binding = environment[identity.binding]
-      const secret = environment[identity.secret]
+      // environment[identity.binding]
+      // environment[identity.secret]
+      function unused(identity, environment) {
+        return [environment[identity.binding], environment[identity.secret]]
+      }
+      const binding = environment.BOOKING
+      const secret = environment.ADMIN_TO_BOOKING_KEY
     `
     return sources
   }
@@ -591,6 +604,7 @@ test('validates admin domain binding and secret tuples through config, generated
     ...validAdminConfig,
     services: [
       { binding: 'INVENTORY', service: 'booking' },
+      { binding: 'INVENTORY', service: 'inventory' },
       { binding: 'NOTIFIER', service: 'notifier' },
     ],
   })
@@ -610,19 +624,23 @@ test('validates admin domain binding and secret tuples through config, generated
 
   const missingGeneratedBinding = complete()
   missingGeneratedBinding.adminGeneratedEnv =
-    'interface __BaseEnv_Env { ADMIN_DOMAIN_IDENTITIES: string; ADMIN_TO_BOOKING_KEY: string; }'
+    'interface __BaseEnv_Env { ADMIN_DOMAIN_IDENTITIES: string; ADMIN_TO_BOOKING_KEY: string; ADMIN_TO_INVENTORY_KEY: string; }'
   assert.match(
     validateServiceWiringSources(catalog, missingGeneratedBinding).join('\n'),
     /generated Env domain binding.*missing BOOKING/i,
   )
 
-  const sourceMismatch = complete()
-  sourceMismatch.adminSyncSource = sourceMismatch.adminSyncSource.replace(
-    'environment[identity.secret]',
-    'environment.ADMIN_TO_EXAMPLE_SERVICE_KEY',
-  )
+  const sourceSpoof = complete()
   assert.match(
-    validateServiceWiringSources(catalog, sourceMismatch).join('\n'),
-    /runtime domain adapter.*identity\.secret/i,
+    validateServiceWiringSources(catalog, sourceSpoof, {
+      resolveDomainSyncIdentity(environment, identity) {
+        return {
+          directory: identity.directory,
+          binding: environment.BOOKING,
+          key: environment.ADMIN_TO_BOOKING_KEY,
+        }
+      },
+    }).join('\n'),
+    /executable runtime domain adapter.*inventory/i,
   )
 })

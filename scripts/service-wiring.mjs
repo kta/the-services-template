@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { resolveDomainSyncIdentity as resolveAdminDomainSyncIdentity } from '../services/admin/src/worker/domain-sync-identity.mjs'
 import { parseJsonc, productionDomainIdentity } from './check-production-config.mjs'
 import { parseGithubWorkflow } from './workflow-policy.mjs'
 
@@ -56,6 +57,37 @@ function parseRuntimeDomainIdentityTuples(value, violations) {
     }
     return `${object.directory}|${object.binding}|${object.secret}`
   })
+}
+
+function validateExecutableRuntimeDomainAdapter(domainIdentities, resolver, violations) {
+  const environment = Object.create(null)
+  const expected = new Map()
+  for (const identity of domainIdentities) {
+    const binding = Object.freeze({ fetch: () => Promise.resolve(new Response()) })
+    const secret = `checked:${identity.secret}`
+    environment[identity.binding] = binding
+    environment[identity.secret] = secret
+    expected.set(identity.directory, { binding, secret })
+  }
+  for (const identity of domainIdentities) {
+    try {
+      const resolved = resolver(environment, identity)
+      const target = expected.get(identity.directory)
+      if (
+        resolved?.directory !== identity.directory ||
+        resolved?.binding !== target?.binding ||
+        resolved?.key !== target?.secret
+      ) {
+        violations.push(
+          `admin executable runtime domain adapter must resolve ${identity.directory} through ${identity.binding} and ${identity.secret}`,
+        )
+      }
+    } catch (error) {
+      violations.push(
+        `admin executable runtime domain adapter failed for ${identity.directory}: ${error instanceof Error ? error.message : 'failure'}`,
+      )
+    }
+  }
 }
 
 function generatedEnvDomainFields(source, pattern) {
@@ -461,7 +493,7 @@ function requireCredentialedStepAllowlist(workflowPath, jobSteps, registrations,
   }
 }
 
-export function validateServiceWiringSources(catalog, sources) {
+export function validateServiceWiringSources(catalog, sources, adapters = {}) {
   const violations = []
   const spaDirectories = catalog.services.map((service) => service.directory)
   const spaPackages = catalog.services.map((service) => service.package)
@@ -738,6 +770,11 @@ export function validateServiceWiringSources(catalog, sources) {
         parseRuntimeDomainIdentityTuples(adminConfig.vars?.ADMIN_DOMAIN_IDENTITIES, violations),
         violations,
       )
+      validateExecutableRuntimeDomainAdapter(
+        domainIdentities,
+        adapters.resolveDomainSyncIdentity ?? resolveAdminDomainSyncIdentity,
+        violations,
+      )
 
       if (sources.adminGeneratedEnv !== undefined) {
         const generatedBindings = generatedEnvDomainFields(
@@ -766,15 +803,6 @@ export function validateServiceWiringSources(catalog, sources) {
           )
         ) {
           violations.push('admin generated Env must expose ADMIN_DOMAIN_IDENTITIES')
-        }
-      }
-
-      if (sources.adminSyncSource !== undefined) {
-        if (!/environment\s*\[\s*identity\.binding\s*\]/.test(sources.adminSyncSource)) {
-          violations.push('admin runtime domain adapter must resolve environment[identity.binding]')
-        }
-        if (!/environment\s*\[\s*identity\.secret\s*\]/.test(sources.adminSyncSource)) {
-          violations.push('admin runtime domain adapter must resolve environment[identity.secret]')
         }
       }
     } catch (error) {
@@ -1013,7 +1041,6 @@ export async function validateServiceWiring(root, catalog) {
     productionChecker,
     adminConfig,
     adminGeneratedEnv,
-    adminSyncSource,
     opsConfig,
     opsSource,
   ] = await Promise.all([
@@ -1024,7 +1051,6 @@ export async function validateServiceWiring(root, catalog) {
     readFile(join(root, 'scripts/check-deploy-boundary.mjs'), 'utf8'),
     readFile(join(root, 'services/admin/wrangler.jsonc'), 'utf8'),
     readFile(join(root, 'services/admin/worker-configuration.d.ts'), 'utf8'),
-    readFile(join(root, 'services/admin/src/worker/sync.ts'), 'utf8'),
     readFile(join(root, 'services/ops/wrangler.jsonc'), 'utf8'),
     readFile(join(root, 'services/ops/src/index.ts'), 'utf8'),
   ])
@@ -1036,7 +1062,6 @@ export async function validateServiceWiring(root, catalog) {
     productionChecker,
     adminConfig,
     adminGeneratedEnv,
-    adminSyncSource,
     opsConfig,
     opsSource,
   })

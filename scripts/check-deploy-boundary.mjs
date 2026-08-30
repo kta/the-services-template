@@ -552,14 +552,6 @@ const bindingKeyWiring = {
     ],
   ],
   'services/admin/src/worker/sync.ts': [
-    [
-      /environment\s*\[\s*identity\.binding\s*\]/,
-      'admin sync must resolve the catalog-derived service binding',
-    ],
-    [
-      /environment\s*\[\s*identity\.secret\s*\]/,
-      'admin sync must resolve the catalog-derived caller secret',
-    ],
     [/x-internal-key['"]:\s*env\.key/, 'admin sync must send the resolved caller secret'],
   ],
   'services/example_service/src/worker/index.ts': [

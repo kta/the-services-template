@@ -5,6 +5,11 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { validateTauriBoundary } from './check-tauri-boundary.mjs'
 
+const reviewedNativeWorkflowTemplate = await readFile(
+  join(process.cwd(), '.github/workflows/example-tauri-build.yml'),
+  'utf8',
+)
+
 async function withFixture(files, check) {
   const root = await mkdtemp(join(tmpdir(), 'tauri-boundary-'))
   try {
@@ -151,7 +156,10 @@ function catalogJson(extra = []) {
 }
 
 function nativeWorkflow(directory) {
-  return `on:\n  workflow_dispatch: {}\npermissions:\n  contents: read\nenv:\n  NODE_VERSION: 22\n  ANDROID_PLATFORM_API: 35\n  ANDROID_NDK_VERSION: 27.2.12479018\n  XCODEGEN_VERSION: 2.46.0\njobs:\n  macos-universal:\n    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true\n    runs-on: macos-15\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          persist-credentials: false\n      - name: Check native security boundary\n        run: node scripts/native-workflow.mjs ${directory} boundary\n      - name: Build unsigned universal debug app\n        run: node scripts/native-workflow.mjs ${directory} build-macos\n      - name: Scan macOS artifact for secrets\n        run: node scripts/native-workflow.mjs ${directory} verify-macos\n`
+  return reviewedNativeWorkflowTemplate
+    .replace('name: Example Tauri Service native artifacts', `name: ${directory} native artifacts`)
+    .replaceAll('example_tauri_service', directory)
+    .replaceAll('example-tauri-service', directory.replaceAll('_', '-'))
 }
 
 function overlaysFor(directory, macOSMinimum = '10.13') {

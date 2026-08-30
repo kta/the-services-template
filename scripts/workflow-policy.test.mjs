@@ -240,6 +240,7 @@ const nativeService = {
   directory: 'booking',
   package: '@app/booking',
 }
+const trustedNativeNode = '$' + '{{ steps.trusted-node.outputs.path }}'
 
 function nativeWorkflow(overrides = '') {
   return `
@@ -255,18 +256,54 @@ env:
   XCODEGEN_VERSION: 2.46.0
 jobs:
   macos-universal:
+    name: booking macOS universal app bundle
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true
     runs-on: macos-15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: \${{ env.NODE_VERSION }}
+          cache: pnpm
+      - name: Capture trusted absolute Node path
+        id: trusted-node
+        shell: bash
+        run: |
+          set -euo pipefail
+          node_path="$(node -p 'require("node:fs").realpathSync(process.execPath)')"
+          case "$node_path" in
+            /*) ;;
+            *) echo "Node did not resolve to an absolute path" >&2; exit 1 ;;
+          esac
+          test -x "$node_path"
+          case "$node_path" in
+            "$GITHUB_WORKSPACE"/*) echo "Node resolved inside the checkout" >&2; exit 1 ;;
+          esac
+          printf 'path=%s\\n' "$node_path" >> "$GITHUB_OUTPUT"
+      - run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Check native security boundary
-        run: node scripts/native-workflow.mjs booking boundary
+        run: ${trustedNativeNode} scripts/native-workflow.mjs booking boundary
+      - name: Check pinned Rust toolchain
+        run: test "$(rustc --version | awk '{print $2}')" = "1.88.0"
+      - name: Install universal Rust targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Check Apple build tools
+        run: |
+          xcodebuild -version
+          pod --version
       - name: Build unsigned universal debug app
-        run: node scripts/native-workflow.mjs booking build-macos
+        run: ${trustedNativeNode} scripts/native-workflow.mjs booking build-macos
       - name: Scan macOS artifact for secrets
-        run: node scripts/native-workflow.mjs booking verify-macos
+        run: ${trustedNativeNode} scripts/native-workflow.mjs booking verify-macos
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: booking-macos-universal-debug
+          path: services/booking/src-tauri/target/universal-apple-darwin/debug/bundle/macos/*.app
+          if-no-files-found: error
+          retention-days: 7
 ${overrides}`
 }
 
@@ -301,11 +338,11 @@ test('native workflow policy rejects comments, block-scalar echoes, missing runn
   const spoofed = nativeWorkflow()
     .replace('    runs-on: macos-15\n', '')
     .replace(
-      '        run: node scripts/native-workflow.mjs booking boundary',
+      `        run: ${trustedNativeNode} scripts/native-workflow.mjs booking boundary`,
       '        # node scripts/native-workflow.mjs booking boundary\n        run: echo "node scripts/native-workflow.mjs booking boundary"',
     )
     .replace(
-      '        run: node scripts/native-workflow.mjs booking verify-macos',
+      `        run: ${trustedNativeNode} scripts/native-workflow.mjs booking verify-macos`,
       '        run: |\n          echo "node scripts/native-workflow.mjs booking verify-macos"',
     )
     .replace(/actions\/checkout@[0-9a-f]{40}/, 'actions/checkout@main')
@@ -335,7 +372,7 @@ test('native workflow policy rejects Cloudflare capability in actual nodes and w
     nativeService,
   ).join('\n')
   assert.match(violations, /Cloudflare credential or production capability/)
-  assert.match(violations, /exact native wrapper sequence/)
+  assert.match(violations, /reviewed exact job profile|trusted absolute Node/)
 })
 
 test('native workflow effective permissions are exactly contents read and jobs hold no credentials', () => {
@@ -443,8 +480,8 @@ test('native workflow forbids pin shadowing and validates the build step effecti
       ),
     (source) =>
       source.replace(
-        '        run: node scripts/native-workflow.mjs booking build-macos',
-        '        env:\n          ANDROID_NDK_VERSION: null\n        run: node scripts/native-workflow.mjs booking build-macos',
+        `        run: ${trustedNativeNode} scripts/native-workflow.mjs booking build-macos`,
+        `        env:\n          ANDROID_NDK_VERSION: null\n        run: ${trustedNativeNode} scripts/native-workflow.mjs booking build-macos`,
       ),
   ]) {
     const diagnostic = inspectNativeWorkflowPolicy(
@@ -474,7 +511,7 @@ test('native workflow accepts only the exact wrapper argv, order, and root worki
     ],
   ]) {
     const source = nativeWorkflow().replace(
-      'node scripts/native-workflow.mjs booking boundary',
+      `${trustedNativeNode} scripts/native-workflow.mjs booking boundary`,
       replacement,
     )
     assert.match(
@@ -486,8 +523,8 @@ test('native workflow accepts only the exact wrapper argv, order, and root worki
   }
 
   const wrongCwd = nativeWorkflow().replace(
-    '        run: node scripts/native-workflow.mjs booking build-macos',
-    '        working-directory: services/booking\n        run: node scripts/native-workflow.mjs booking build-macos',
+    `        run: ${trustedNativeNode} scripts/native-workflow.mjs booking build-macos`,
+    `        working-directory: services/booking\n        run: ${trustedNativeNode} scripts/native-workflow.mjs booking build-macos`,
   )
   assert.match(
     inspectNativeWorkflowPolicy('.github/workflows/booking.yml', wrongCwd, nativeService).join(
@@ -497,8 +534,8 @@ test('native workflow accepts only the exact wrapper argv, order, and root worki
   )
 
   const ignoredFailure = nativeWorkflow().replace(
-    '        run: node scripts/native-workflow.mjs booking build-macos',
-    `        continue-on-error: ${'$' + '{{'} true }}\n        run: node scripts/native-workflow.mjs booking build-macos`,
+    `        run: ${trustedNativeNode} scripts/native-workflow.mjs booking build-macos`,
+    `        continue-on-error: ${'$' + '{{'} true }}\n        run: ${trustedNativeNode} scripts/native-workflow.mjs booking build-macos`,
   )
   assert.match(
     inspectNativeWorkflowPolicy(
@@ -510,8 +547,8 @@ test('native workflow accepts only the exact wrapper argv, order, and root worki
   )
 
   const injectedNodeOptions = nativeWorkflow().replace(
-    '        run: node scripts/native-workflow.mjs booking build-macos',
-    '        env:\n          NODE_OPTIONS: --require ./rogue.cjs\n        run: node scripts/native-workflow.mjs booking build-macos',
+    `        run: ${trustedNativeNode} scripts/native-workflow.mjs booking build-macos`,
+    `        env:\n          NODE_OPTIONS: --require ./rogue.cjs\n        run: ${trustedNativeNode} scripts/native-workflow.mjs booking build-macos`,
   )
   assert.match(
     inspectNativeWorkflowPolicy(
@@ -582,4 +619,81 @@ test('registered native workflow rejects dynamic, quoted, and additional wrapper
       /unreviewed native wrapper reference|exact native wrapper sequence/i,
     )
   }
+})
+
+test('registered native workflow rejects every unreviewed job step and execution-state write', () => {
+  for (const step of [
+    '      - name: Unreviewed command\n        run: echo unreviewed\n',
+    `      - name: Replace Node through GITHUB_PATH
+        run: |
+          mkdir -p fake-bin
+          printf '#!/bin/sh\\nexit 0\\n' > fake-bin/node
+          chmod +x fake-bin/node
+          echo "$PWD/fake-bin" >> "$GITHUB_PATH"
+`,
+    `      - name: Persist execution environment
+        run: echo 'NODE_OPTIONS=--require=./rogue.cjs' >> "$GITHUB_ENV"
+`,
+    `      - name: Indirect native package script
+        env:
+          SCRIPT: build:tauri
+        run: pnpm --filter @app/booking run "$SCRIPT"
+`,
+  ]) {
+    assert.match(
+      inspectNativeWorkflowPolicy(
+        '.github/workflows/booking.yml',
+        nativeWorkflow(step),
+        nativeService,
+      ).join('\n'),
+      /reviewed exact job profile|unreviewed native step|GITHUB_(?:PATH|ENV)/i,
+    )
+  }
+})
+
+test('registered native workflow exact profile covers runner, uses, with, and full step order', () => {
+  const mutations = [
+    (source) => source.replace('runs-on: macos-15', 'runs-on: ubuntu-latest'),
+    (source) =>
+      source.replace(
+        'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
+        'actions/cache@5a3ec84eff668545956fd18022155c47e93e2684',
+      ),
+    (source) =>
+      source.replace(
+        'persist-credentials: false',
+        'persist-credentials: false\n          clean: false',
+      ),
+    (source) =>
+      source
+        .replace(
+          '      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          persist-credentials: false\n',
+          '',
+        )
+        .replace(
+          '      - name: Scan macOS artifact for secrets',
+          '      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          persist-credentials: false\n      - name: Scan macOS artifact for secrets',
+        ),
+  ]
+
+  for (const mutate of mutations) {
+    assert.match(
+      inspectNativeWorkflowPolicy(
+        '.github/workflows/booking.yml',
+        mutate(nativeWorkflow()),
+        nativeService,
+      ).join('\n'),
+      /reviewed exact job profile/i,
+    )
+  }
+})
+
+test('native wrapper must be launched through the captured trusted absolute Node path', () => {
+  const directNode = nativeWorkflow().replaceAll(trustedNativeNode, 'node')
+  assert.match(
+    inspectNativeWorkflowPolicy('.github/workflows/booking.yml', directNode, nativeService).join(
+      '\n',
+    ),
+    /trusted absolute Node/i,
+  )
 })
