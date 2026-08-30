@@ -269,6 +269,15 @@ test('production write entry points are CI-only and cannot be reached through Ma
   assert.equal(examplePackage.scripts['db:migrate:remote'], undefined)
 })
 
+test('root agent instructions keep service registration inside the CI-only production boundary', async () => {
+  const agents = await readFile(join(root, 'AGENTS.md'), 'utf8')
+  assert.match(agents, /DEV_ALL_SERVICES/)
+  assert.match(agents, /root `package\.json` の test chain/)
+  assert.match(agents, /e2e matrix/)
+  assert.match(agents, /ordered protected-production deploy chain/)
+  assert.doesNotMatch(agents, /DEPLOYABLE_SERVICES|make deploy\/<service>/)
+})
+
 test('manual artifact workflows do not receive Cloudflare credentials', async () => {
   for (const workflowPath of [
     '.github/workflows/example-tauri-build.yml',
