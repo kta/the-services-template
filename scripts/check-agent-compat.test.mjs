@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, symlink, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -20,7 +20,13 @@ async function withAgentFixture(skill, check) {
   try {
     await writeFixture(root, 'AGENTS.md', '# Canonical instructions\n')
     await symlink('AGENTS.md', join(root, 'CLAUDE.md'))
-    for (const service of ['admin', 'example_service', 'notifier', 'ops']) {
+    for (const service of [
+      'admin',
+      'example_service',
+      'example_tauri_service',
+      'notifier',
+      'ops',
+    ]) {
       await writeFixture(root, `services/${service}/AGENTS.md`, '# Service instructions\n')
       await symlink('AGENTS.md', join(root, `services/${service}/CLAUDE.md`))
     }
@@ -75,6 +81,15 @@ test('accepts a new-service skill with both choices and their matching copy sour
   await withAgentFixture(validTemplateChoiceSkill, async (root) => {
     const result = await runAgentCompatibilityCheck(root)
     assert.equal(result.code, 0)
+  })
+})
+
+test('rejects a broken CLAUDE.md link in the Tauri template', async () => {
+  await withAgentFixture(validTemplateChoiceSkill, async (root) => {
+    await unlink(join(root, 'services/example_tauri_service/CLAUDE.md'))
+    const result = await runAgentCompatibilityCheck(root)
+    assert.notEqual(result.code, 0)
+    assert.match(`${result.stderr}${result.stdout}`, /services\/example_tauri_service\/CLAUDE\.md/)
   })
 })
 

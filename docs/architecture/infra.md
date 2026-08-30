@@ -52,7 +52,7 @@ Worker の D1 REST export token、R2 世代からの restore operator token は�
 
 GitHub Actions の production deploy は verify 成功後、push event、refs/heads/main、protected ref の三条件を満たす場合だけ起動する。job は GitHub production environment を使用し、Cloudflare credential はその environment secrets からだけ供給する。environment の deployment branch policy は selected `main` の 1 件だけ（`protected_branches=false`、`custom_branch_policies=true`）とし、required reviewer/self-review 防止と main の branch protection はリポジトリ設定で有効化する。
 
-workflow_dispatch は verify/e2e と unsigned Tauri artifact の検証に限定し、本番 Cloudflare credential を持たない（secret bootstrap/rotation、remote seed、restore の protected production workflow を除く）。Worker の production deploy / remote migration は protected `main` への push を起点とする GitHub Actions のみが実行し、ローカルの Make/package entry point は CI 外で fail close する。既存 Worker の secret 登録、remote seed、restore も protected `main` の production workflow と required reviewer を要求する。example_service は雛形であり production deploy chain と本番 target から除外する。
+workflow_dispatch は verify/e2e と unsigned Tauri artifact の検証に限定し、本番 Cloudflare credential を持たない（secret bootstrap/rotation、remote seed、restore の protected production workflow を除く）。Worker の production deploy / remote migration は protected `main` への push を起点とする GitHub Actions のみが実行し、ローカルの Make/package entry point は CI 外で fail close する。既存 Worker の secret 登録、remote seed、restore も protected `main` の production workflow と required reviewer を要求する。`example_service` と `example_tauri_service` は雛形であり production deploy chain と本番 target から除外する。
 初回 Worker 作成を伴う secret bootstrap だけは例外的に専用の
 `.github/workflows/production-bootstrap.yml` の `workflow_dispatch` を使うが、
 protected `main`、production environment の required reviewer、入力検証、対象 Worker

@@ -276,11 +276,18 @@ for (const packagePath of [
 for (const packagePath of [
   'services/admin/package.json',
   'services/example_service/package.json',
+  'services/example_tauri_service/package.json',
 ]) {
   const packageJson = JSON.parse(await readFile(join(root, packagePath), 'utf8'))
   if (!/check-tauri-artifact\.mjs\s+dist\/client/.test(packageJson.scripts?.build ?? '')) {
     violations.push(`${packagePath} web build must scan dist/client for secret markers`)
   }
+}
+for (const packagePath of [
+  'services/admin/package.json',
+  'services/example_tauri_service/package.json',
+]) {
+  const packageJson = JSON.parse(await readFile(join(root, packagePath), 'utf8'))
   if (!/check-tauri-artifact\.mjs\s+dist\/tauri/.test(packageJson.scripts?.['build:tauri'] ?? '')) {
     violations.push(`${packagePath} Tauri build must scan dist/tauri for secret markers`)
   }
@@ -691,18 +698,26 @@ for (const [path, checks] of Object.entries(bindingKeyWiring)) {
   for (const [pattern, message] of checks) requireMatch(source, pattern, message)
 }
 
-const examplePackage = JSON.parse(
-  await readFile(join(root, 'services/example_service/package.json'), 'utf8'),
-)
-if (examplePackage.scripts?.deploy || examplePackage.scripts?.['db:migrate:remote']) {
-  violations.push('example_service must not expose production deploy or remote migration scripts')
+for (const template of ['example_service', 'example_tauri_service']) {
+  const templatePackage = JSON.parse(
+    await readFile(join(root, `services/${template}/package.json`), 'utf8'),
+  )
+  if (templatePackage.scripts?.deploy || templatePackage.scripts?.['db:migrate:remote']) {
+    violations.push(`${template} must not expose production deploy or remote migration scripts`)
+  }
 }
 
 // A copied domain is production code, not a documentation-only convention.
 // Make omissions fail in the repository's own boundary check before a deploy
 // can be attempted: package entry points, Make, CI, admin's service binding,
 // and ops' backup/health target must all be wired for the same service name.
-const knownServiceDirectories = new Set(['admin', 'example_service', 'notifier', 'ops'])
+const knownServiceDirectories = new Set([
+  'admin',
+  'example_service',
+  'example_tauri_service',
+  'notifier',
+  'ops',
+])
 const opsConfigSource = await readFile(join(root, 'services/ops/wrangler.jsonc'), 'utf8')
 const opsSource = await readFile(join(root, 'services/ops/src/index.ts'), 'utf8')
 for (const serviceEntry of await readdir(join(root, 'services'), { withFileTypes: true })) {

@@ -287,8 +287,8 @@ backup/health target、domain の production-auth を同じ PR で追加し、
 ## 6. Tauri の開発・artifact と本番 deploy の分離
 
 ブラウザ版は `make dev/admin` / `make dev/example_service`、Tauri desktop 開発は
-`make dev/admin/tauri` / `make dev/example_service/tauri`、静的 bundle の確認は
-`make build/admin/tauri` / `make build/example_service/tauri` を使う。Tauri artifact
+`make dev/admin/tauri` / `make dev/example_tauri_service/tauri`、静的 bundle の確認は
+`make build/admin/tauri` / `make build/example_tauri_service/tauri` を使う。Tauri artifact
 workflow は protected `main` からの `workflow_dispatch` 専用で、unsigned/debug artifact
 を保存するだけである。Tauri の build 成果物に Cloudflare API token、Worker secret、
 JWT_PRIVATE_KEY を入れない。`make build/<service>/tauri` は Cloudflare deploy を行わず
@@ -316,4 +316,4 @@ Tauri の詳細（TAURI_DEV_HOST、mobile の port forwarding、fixed API origin
   token を受け入れたり、logout/revoke 後も `sid` のない stateless token を長時間受け入れたりしない。
 - 初回 deploy 後に restore.md のリストア訓練を 1 回実施する。
 
-example_service はコピー元の雛形であり、本番対象ではない。フォーク後は自ドメインサービスを production deploy chain、remote migration、ops backup、admin の EXAMPLE_SERVICE binding へ明示的に追加し、`check-deploy-boundary.mjs` が green になってから protected `main` に merge する。
+`example_service` と `example_tauri_service` はコピー元の雛形であり、本番対象ではない。フォーク後は自ドメインサービスを production deploy chain、remote migration、ops backup、admin の EXAMPLE_SERVICE binding へ明示的に追加し、`check-deploy-boundary.mjs` が green になってから protected `main` に merge する。

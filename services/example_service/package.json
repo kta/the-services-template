@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "vite dev",
-    "build": "node ../../scripts/run-without-cloudflare-env.mjs pnpm exec vite build && node ../../scripts/clean-build-secrets.mjs dist",
+    "build": "node ../../scripts/run-without-cloudflare-env.mjs pnpm exec vite build && node ../../scripts/clean-build-secrets.mjs dist && node ../../scripts/check-tauri-artifact.mjs dist/client",
     "preview": "vite preview",
     "typecheck": "wrangler types && tsc --noEmit && tsc --noEmit -p src/web",
     "cf-typegen": "wrangler types",

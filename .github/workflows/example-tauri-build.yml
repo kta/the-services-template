@@ -1,4 +1,4 @@
-name: Example service Tauri native artifacts
+name: Example Tauri Service native artifacts
 
 on:
   workflow_dispatch: {}
@@ -19,7 +19,7 @@ env:
 
 jobs:
   macos-universal:
-    name: example_service macOS universal app bundle
+    name: example_tauri_service macOS universal app bundle
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true
     runs-on: macos-15
     steps:
@@ -44,22 +44,22 @@ jobs:
           pod --version
       - name: Build unsigned universal debug app
         run: >-
-          pnpm --filter @app/example_service exec tauri build
+          pnpm --filter @app/example_tauri_service exec tauri build
           --debug
           --bundles app
           --target universal-apple-darwin
           --no-sign
       - name: Scan macOS artifact for secrets
-        run: node scripts/check-tauri-artifact.mjs "services/example_service/src-tauri/target/universal-apple-darwin/debug/bundle/macos/Example Service.app"
+        run: node scripts/check-tauri-artifact.mjs "services/example_tauri_service/src-tauri/target/universal-apple-darwin/debug/bundle/macos/Example Tauri Service.app"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: example-tauri-macos-universal-debug
-          path: "services/example_service/src-tauri/target/universal-apple-darwin/debug/bundle/macos/Example Service.app"
+          path: "services/example_tauri_service/src-tauri/target/universal-apple-darwin/debug/bundle/macos/Example Tauri Service.app"
           if-no-files-found: error
           retention-days: 7
 
   ios-simulator:
-    name: example_service iOS simulator app
+    name: example_tauri_service iOS simulator app
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true
     runs-on: macos-15
     steps:
@@ -86,26 +86,26 @@ jobs:
           pod --version
           test "$(xcodegen --version)" = "Version: ${XCODEGEN_VERSION}"
       - name: Initialize iOS project
-        run: pnpm --filter @app/example_service exec tauri ios init --ci --skip-targets-install
+        run: pnpm --filter @app/example_tauri_service exec tauri ios init --ci --skip-targets-install
       - name: Re-check native security boundary after iOS generation
         run: node scripts/check-tauri-boundary.mjs
       - name: Build unsigned simulator artifact
         run: >-
-          pnpm --filter @app/example_service exec tauri ios build
+          pnpm --filter @app/example_tauri_service exec tauri ios build
           --debug
           --target aarch64-sim
           --no-sign
       - name: Scan iOS artifact for secrets
-        run: node scripts/check-tauri-artifact.mjs services/example_service/src-tauri/gen/apple/build
+        run: node scripts/check-tauri-artifact.mjs services/example_tauri_service/src-tauri/gen/apple/build
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: example-tauri-ios-simulator
-          path: services/example_service/src-tauri/gen/apple/build
+          path: services/example_tauri_service/src-tauri/gen/apple/build
           if-no-files-found: error
           retention-days: 7
 
   android-debug-apk:
-    name: example_service Android debug APK
+    name: example_tauri_service Android debug APK
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true
     runs-on: ubuntu-24.04
     steps:
@@ -136,33 +136,33 @@ jobs:
       - name: Install Android Rust target
         run: rustup target add aarch64-linux-android
       - name: Initialize Android project
-        run: pnpm --filter @app/example_service exec tauri android init --ci --skip-targets-install
+        run: pnpm --filter @app/example_tauri_service exec tauri android init --ci --skip-targets-install
       - name: Re-check native security boundary after Android generation
         run: node scripts/check-tauri-boundary.mjs
       - name: Align NDK with generated Gradle project
         shell: bash
         run: |
-          compile_sdk="$(rg -o 'compileSdk(Version)?[[:space:]]*=[[:space:]]*[0-9]+' services/example_service/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*[^0-9]([0-9]+)$/\1/' | head -1)"
+          compile_sdk="$(rg -o 'compileSdk(Version)?[[:space:]]*=[[:space:]]*[0-9]+' services/example_tauri_service/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*[^0-9]([0-9]+)$/\1/' | head -1)"
           test "$compile_sdk" = "$ANDROID_PLATFORM_API"
-          build_tools="$(rg -o 'buildToolsVersion[[:space:]]*=[[:space:]]*"[^"]+"' services/example_service/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*"([^"]+)".*/\1/' | head -1)"
+          build_tools="$(rg -o 'buildToolsVersion[[:space:]]*=[[:space:]]*"[^"]+"' services/example_tauri_service/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*"([^"]+)".*/\1/' | head -1)"
           if [[ -n "$build_tools" ]]; then
             sdkmanager "build-tools;$build_tools"
           fi
-          ndk_version="$(rg -o 'ndkVersion[[:space:]]*=[[:space:]]*"[^"]+"' services/example_service/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*"([^"]+)".*/\1/' | head -1)"
+          ndk_version="$(rg -o 'ndkVersion[[:space:]]*=[[:space:]]*"[^"]+"' services/example_tauri_service/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*"([^"]+)".*/\1/' | head -1)"
           test "$ndk_version" = "$ANDROID_NDK_VERSION"
       - name: Build debug APK
-        run: pnpm --filter @app/example_service exec tauri android build --debug --apk --target aarch64
+        run: pnpm --filter @app/example_tauri_service exec tauri android build --debug --apk --target aarch64
       - name: Scan Android APK for secrets
-        run: node scripts/check-tauri-artifact.mjs services/example_service/src-tauri/gen/android/app/build/outputs/apk
+        run: node scripts/check-tauri-artifact.mjs services/example_tauri_service/src-tauri/gen/android/app/build/outputs/apk
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: example-tauri-android-debug-apk
-          path: services/example_service/src-tauri/gen/android/app/build/outputs/apk/**/debug/*.apk
+          path: services/example_tauri_service/src-tauri/gen/android/app/build/outputs/apk/**/debug/*.apk
           if-no-files-found: error
           retention-days: 7
 
   android-debug-aab:
-    name: example_service Android debug AAB
+    name: example_tauri_service Android debug AAB
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true
     runs-on: ubuntu-24.04
     steps:
@@ -193,27 +193,27 @@ jobs:
       - name: Install Android Rust target
         run: rustup target add aarch64-linux-android
       - name: Initialize Android project
-        run: pnpm --filter @app/example_service exec tauri android init --ci --skip-targets-install
+        run: pnpm --filter @app/example_tauri_service exec tauri android init --ci --skip-targets-install
       - name: Re-check native security boundary after Android generation
         run: node scripts/check-tauri-boundary.mjs
       - name: Align NDK with generated Gradle project
         shell: bash
         run: |
-          compile_sdk="$(rg -o 'compileSdk(Version)?[[:space:]]*=[[:space:]]*[0-9]+' services/example_service/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*[^0-9]([0-9]+)$/\1/' | head -1)"
+          compile_sdk="$(rg -o 'compileSdk(Version)?[[:space:]]*=[[:space:]]*[0-9]+' services/example_tauri_service/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*[^0-9]([0-9]+)$/\1/' | head -1)"
           test "$compile_sdk" = "$ANDROID_PLATFORM_API"
-          build_tools="$(rg -o 'buildToolsVersion[[:space:]]*=[[:space:]]*"[^"]+"' services/example_service/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*"([^"]+)".*/\1/' | head -1)"
+          build_tools="$(rg -o 'buildToolsVersion[[:space:]]*=[[:space:]]*"[^"]+"' services/example_tauri_service/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*"([^"]+)".*/\1/' | head -1)"
           if [[ -n "$build_tools" ]]; then
             sdkmanager "build-tools;$build_tools"
           fi
-          ndk_version="$(rg -o 'ndkVersion[[:space:]]*=[[:space:]]*"[^"]+"' services/example_service/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*"([^"]+)".*/\1/' | head -1)"
+          ndk_version="$(rg -o 'ndkVersion[[:space:]]*=[[:space:]]*"[^"]+"' services/example_tauri_service/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*"([^"]+)".*/\1/' | head -1)"
           test "$ndk_version" = "$ANDROID_NDK_VERSION"
       - name: Build debug AAB
-        run: pnpm --filter @app/example_service exec tauri android build --debug --aab --target aarch64
+        run: pnpm --filter @app/example_tauri_service exec tauri android build --debug --aab --target aarch64
       - name: Scan Android AAB for secrets
-        run: node scripts/check-tauri-artifact.mjs services/example_service/src-tauri/gen/android/app/build/outputs/bundle
+        run: node scripts/check-tauri-artifact.mjs services/example_tauri_service/src-tauri/gen/android/app/build/outputs/bundle
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: example-tauri-android-debug-aab
-          path: services/example_service/src-tauri/gen/android/app/build/outputs/bundle/**/debug/*.aab
+          path: services/example_tauri_service/src-tauri/gen/android/app/build/outputs/bundle/**/debug/*.aab
           if-no-files-found: error
           retention-days: 7

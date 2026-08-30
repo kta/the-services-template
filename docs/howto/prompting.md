@@ -72,7 +72,7 @@ organization = 読書グループ）に沿う形で、MVP の spec 案を 2〜3 
    id は wrangler whoami で分かるはず）
 2. terraform output の id を各 wrangler.jsonc に反映
 3. caller-specific な内部鍵（admin→domain、admin→notifier、domain→notifier、ops→notifier）と AUTH_PEPPER をそれぞれ openssl rand -hex 32 で生成し、JWT 用とバックアップ manifest 用に**別々の** RSA key pair を deploy.md の手順で作る。初回 Worker の secret は `PRODUCTION_*` environment secret として登録し、`.github/workflows/production-bootstrap.yml` を protected `main` から reviewer 承認付きで起動する（JWT_PRIVATE_KEY は admin のみ、JWT_PUBLIC_KEY は admin と各 domain、BACKUP_SIGNING_PRIVATE_KEY は ops のみ）。R2 の public-domain preflight も通す。既存 Worker のローテーションも protected production workflow から実行し、`scripts/put-production-secret.mjs` は検証専用とする。
-4. PR を protected `main` へ merge し、verify 成功後に GitHub Actions が template では notifier → admin → ops、fork 後に domain を追加した構成では notifier → admin → copied domain → ops の順でリモート D1 マイグレーションとデプロイを行う（example_service は雛形なのでデプロイしない）。copied domain は `production-auth.ts` と対応テストで domain audience と `sid` revoke 照合を実装してから chain に追加する。ローカルの deploy CLI は起動しない
+4. PR を protected `main` へ merge し、verify 成功後に GitHub Actions が template では notifier → admin → ops、fork 後に domain を追加した構成では notifier → admin → copied domain → ops の順でリモート D1 マイグレーションとデプロイを行う（`example_service` と `example_tauri_service` は雛形なのでデプロイしない）。copied domain は `production-auth.ts` と対応テストで domain audience と `sid` revoke 照合を実装してから chain に追加する。ローカルの deploy CLI は起動しない
 5. CI 用に gh secret set --env production で CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID と bootstrap 用 `PRODUCTION_*` を production environment へ登録
    （API トークンは私がダッシュボードで作るので、必要権限を教えて。値は聞いて）
 

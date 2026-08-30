@@ -14,7 +14,7 @@ fail() {
 [[ "$(readlink CLAUDE.md)" == "AGENTS.md" ]] || fail "CLAUDE.md must point to AGENTS.md"
 [[ -r CLAUDE.md ]] || fail "CLAUDE.md link is broken"
 
-for service in admin example_service notifier ops; do
+for service in admin example_service example_tauri_service notifier ops; do
   agents="services/$service/AGENTS.md"
   claude="services/$service/CLAUDE.md"
   [[ -f "$agents" && ! -L "$agents" ]] || fail "$agents must be the canonical regular file"
@@ -55,6 +55,22 @@ if [[ -e .agents/skills || -e .claude/skills || -L .claude/skills ]]; then
     ' "$skill_file" || fail "$skill_file is missing frontmatter description"
   done < <(find -L .agents/skills -mindepth 2 -maxdepth 2 -name SKILL.md -type f | sort)
   (( skill_count > 0 )) || fail ".agents/skills does not contain any SKILL.md"
+fi
+
+new_service_skill=".agents/skills/new-service/SKILL.md"
+if [[ -f "$new_service_skill" ]]; then
+  web_choice_line="$(grep -Ei 'Web only.*services/example_service' "$new_service_skill" || true)"
+  tauri_choice_line="$(grep -Ei 'Web \+ Tauri.*services/example_tauri_service' "$new_service_skill" || true)"
+  [[ -n "$web_choice_line" ]] ||
+    fail "new-service must map the Web only choice to services/example_service"
+  [[ "$web_choice_line" != *"example_tauri_service"* ]] ||
+    fail "new-service must not map the Web only choice to services/example_tauri_service"
+  [[ -n "$tauri_choice_line" ]] ||
+    fail "new-service must map the Web + Tauri choice to services/example_tauri_service"
+  grep -Eiq 'Before copying|before (the user answers|copying)|コピー前' "$new_service_skill" ||
+    fail "new-service must ask for the template choice before copying"
+  grep -Eiq 'Do not copy.*before the user answers|回答前.*コピー.*(しない|してはならない)' "$new_service_skill" ||
+    fail "new-service must forbid copying before the template answer"
 fi
 
 printf 'agent-compat: ok (%s)\n' "$(basename "$ROOT")"

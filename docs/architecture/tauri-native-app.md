@@ -1,6 +1,6 @@
 # admin Tauri ネイティブアプリ設計
 
-この文書は refresh cookie と OS protected store を持つ services/admin の設計である。services/example_service の雛形向け native shell は refresh API を持たないため、memory-only auth 方針を採用する。導入手順は docs/howto/tauri-example-service.md と docs/howto/tauri-distribution.md、仕様は specs/example_service/features/002-tauri-native-app/spec.md を参照する。
+この文書は refresh cookie と OS protected store を持つ services/admin の設計である。services/example_tauri_service の雛形向け native shell は refresh API を持たないため、memory-only auth 方針を採用する。導入手順は docs/howto/tauri-example-service.md と docs/howto/tauri-distribution.md、仕様は item テンプレート配下の specs/example_service/features/002-tauri-native-app/spec.md を参照する。
 
 ## 目的と不変条件
 
@@ -49,13 +49,13 @@ Web の URL 契約は BrowserRouter のままにする。Tauri の custom protoc
 
 ## 開発サーバーと mobile host
 
-admin の通常 Vite server は port 5174、example_service は port 5173 を strictPort=true で使う。Tauri の devUrl はこの固定 port を指すため、port が使用中なら Vite は別 port へ逃げずに失敗する。これにより native window が別アプリの server を開く事故を防ぐ。
+admin の通常 Vite server は port 5174、example_tauri_service は port 5175 を strictPort=true で使う。Tauri の devUrl はこの固定 port を指すため、port が使用中なら Vite は別 port へ逃げずに失敗する。これにより native window が別アプリの server を開く事故を防ぐ。
 
-デスクトップ開発は `make dev/admin/tauri` または `make dev/example_service/tauri` を使う。iOS/Android の実機で HMR を使う場合は Vite の TAURI_DEV_HOST に開発端末から到達できる host を明示し、firewall と必要な port forwarding を設定する。Rust bridge の debug API origin は HTTP localhost/loopback のみを許可するため、TAURI_DEV_HOST だけで任意 LAN origin を release bundle に埋め込めるわけではない。実機の API 接続は端末側 localhost への安全な forwarding/tunnel が必要である。
+デスクトップ開発は `make dev/admin/tauri` または `make dev/example_tauri_service/tauri` を使う。iOS/Android の実機で HMR を使う場合は Vite の TAURI_DEV_HOST に開発端末から到達できる host を明示し、firewall と必要な port forwarding を設定する。Rust bridge の debug API origin は HTTP localhost/loopback のみを許可するため、TAURI_DEV_HOST だけで任意 LAN origin を release bundle に埋め込めるわけではない。実機の API 接続は端末側 localhost への安全な forwarding/tunnel が必要である。
 
 ## 権限、CSP、設定
 
-各 Tauri shell の capability file は `windows: ["main"]` のローカル main window に限定する。admin は `allow-api-request` と `allow-clear-session`、example_service は `allow-api-request` だけを許可する。`remote`、`webviews`、core:default、filesystem、shell、opener、clipboard、notification、任意 HTTP plugin、任意 command は追加しない。唯一の core plugin builder は top-level navigation guard であり、境界チェッカーがこの実装と capability の対象 window/権限を検証する。build script が各 shell の command ACL を生成する。
+各 Tauri shell の capability file は `windows: ["main"]` のローカル main window に限定する。admin は `allow-api-request` と `allow-clear-session`、example_tauri_service は `allow-api-request` だけを許可する。`remote`、`webviews`、core:default、filesystem、shell、opener、clipboard、notification、任意 HTTP plugin、任意 command は追加しない。唯一の core plugin builder は top-level navigation guard であり、境界チェッカーがこの実装と capability の対象 window/権限を検証する。build script が各 shell の command ACL を生成する。
 
 CSP は main config の app.security に置き、production の default-src self、base-uri self、object-src none、script-src self、style-src self、img-src self data、font-src self、connect-src self ipc: http://ipc.localhost だけを許可する。開発 CSP だけが inline style と固定された localhost の Vite/HMR port を追加する。LAN 全体を許可する wildcard は使わず、実機 HMR は port forwarding を優先する。直接 LAN host を使う場合は、レビュー済み devCsp にその host を個別追加してから実行し、チェック済み設定のまま `TAURI_DEV_HOST` に任意の private IP を渡して CSP を迂回しない。Rust reqwest が固定 API origin へ接続するため、固定 Worker origin を renderer の connect-src に追加する設計ではない。remote HTML/script、wildcard network source、platform overlay からの security override は許可しない。
 
@@ -65,7 +65,7 @@ Android の Keystore provider は ndk-context を必要とする。Android platf
 
 ## access JWT の秘密鍵境界
 
-access JWT は RS256 固定である。admin Worker だけが JWT_PRIVATE_KEY を保持して署名し、admin と domain Worker は JWT_PUBLIC_KEY で検証する。issuer は `admin`、audience は admin API が `admin`、domain API が `domain:<service_name>`（雛形は `domain:example_service`）に固定する。Tauri shell はどちらの鍵も保持せず、固定 API origin に HTTPS で接続するだけである。domain Worker に private key を設定すると、この設計の侵害時横展開防止が失われるため、本番チェックで拒否する。
+access JWT は RS256 固定である。admin Worker だけが JWT_PRIVATE_KEY を保持して署名し、admin と domain Worker は JWT_PUBLIC_KEY で検証する。issuer は `admin`、audience は admin API が `admin`、domain API が `domain:<service_name>`（雛形は `domain:example_tauri_service`）に固定する。Tauri shell はどちらの鍵も保持せず、固定 API origin に HTTPS で接続するだけである。domain Worker に private key を設定すると、この設計の侵害時横展開防止が失われるため、本番チェックで拒否する。
 
 ## 配布方針
 

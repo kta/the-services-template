@@ -27,18 +27,18 @@ const TAURI_TARGETS = [
     ]),
   },
   {
-    name: 'example_service',
-    webDirectory: 'services/example_service/src/web',
-    tauriDirectory: 'services/example_service/src-tauri',
-    tauriConfig: 'services/example_service/src-tauri/tauri.conf.json',
-    capabilitiesDirectory: 'services/example_service/src-tauri/capabilities',
-    devPort: 5173,
+    name: 'example_tauri_service',
+    webDirectory: 'services/example_tauri_service/src/web',
+    tauriDirectory: 'services/example_tauri_service/src-tauri',
+    tauriConfig: 'services/example_tauri_service/src-tauri/tauri.conf.json',
+    capabilitiesDirectory: 'services/example_tauri_service/src-tauri/capabilities',
+    devPort: 5175,
     storageAllowlist: new Map([
       [
-        'services/example_service/src/web/auth/session.ts',
+        'services/example_tauri_service/src/web/auth/session.ts',
         {
-          key: 'app.auth.token',
-          organizationKey: 'app.auth.org',
+          key: 'app.example_tauri_service.auth.token',
+          organizationKey: 'app.example_tauri_service.auth.org',
           reason: 'Web-only dev session; native sessions never use browser storage',
         },
       ],
@@ -928,9 +928,7 @@ function navigationGuardPattern(service) {
   const originEnv =
     service === 'admin'
       ? 'TAURI_ADMIN_API_ORIGIN'
-      : service === 'example_service'
-        ? 'TAURI_EXAMPLE_API_ORIGIN'
-        : `TAURI_${service.replaceAll('-', '_').toUpperCase()}_API_ORIGIN`
+      : `TAURI_${service.replaceAll('-', '_').toUpperCase()}_API_ORIGIN`
   return new RegExp(
     String.raw`\.plugin\(\s*tauri::plugin::Builder::<tauri::Wry>::new\("navigation-guard"\)\s*\.on_navigation\(\s*\|_,\s*url\|\s*\{\s*origin::navigation_allowed\(\s*url,\s*env!\("${originEnv}"\)\s*\)\s*\}\s*\)\s*\.build\(\),\s*\)`,
   )
@@ -979,6 +977,126 @@ function checkTauriPluginReferences(
 
 async function readJson(path) {
   return JSON.parse(await readFile(path, 'utf8'))
+}
+
+async function pathExists(path) {
+  try {
+    await lstat(path)
+    return true
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false
+    throw error
+  }
+}
+
+async function validateTemplateSeparation(workspace) {
+  const violations = []
+  const webService = 'example_service'
+  const webRoot = `services/${webService}`
+  const webTauriDirectory = `${webRoot}/src-tauri`
+  if (await pathExists(resolve(workspace, webTauriDirectory))) {
+    violations.push(
+      `${webTauriDirectory}: Web-only ${webService} template must not contain a Tauri src-tauri directory; regenerate it from services/example_service`,
+    )
+  }
+
+  const webPackagePath = `${webRoot}/package.json`
+  try {
+    const packageJson = await readJson(resolve(workspace, webPackagePath))
+    for (const section of [
+      'dependencies',
+      'devDependencies',
+      'optionalDependencies',
+      'peerDependencies',
+    ]) {
+      for (const dependency of Object.keys(packageJson?.[section] ?? {})) {
+        if (dependency.startsWith('@tauri-apps/')) {
+          violations.push(
+            `${webPackagePath}: Web-only ${webService} template has forbidden Tauri dependency ${dependency} in ${section}; remove it or use services/example_tauri_service`,
+          )
+        }
+      }
+    }
+    for (const script of Object.keys(packageJson?.scripts ?? {})) {
+      if (script === 'tauri' || script.startsWith('tauri:') || script.endsWith(':tauri')) {
+        violations.push(
+          `${webPackagePath}: Web-only ${webService} template has forbidden Tauri script ${script}; remove it or use services/example_tauri_service`,
+        )
+      }
+    }
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+  }
+
+  const tauriRoot = 'services/example_tauri_service'
+  const requiredAssets = [
+    'src-tauri/Cargo.toml',
+    'src-tauri/tauri.conf.json',
+    'src-tauri/capabilities/default.json',
+    'src/web/platform/transport.ts',
+    'src-tauri/src/origin.rs',
+    'src-tauri/tauri.android.conf.json',
+    'src-tauri/tauri.ios.conf.json',
+    'src-tauri/tauri.macos.conf.json',
+  ]
+  for (const asset of requiredAssets) {
+    const path = `${tauriRoot}/${asset}`
+    if (!(await pathExists(resolve(workspace, path)))) {
+      violations.push(
+        `${path}: Tauri template example_tauri_service is missing required asset ${asset}; restore it from services/example_tauri_service`,
+      )
+    }
+  }
+
+  const originPath = `${tauriRoot}/src-tauri/src/origin.rs`
+  if (await pathExists(resolve(workspace, originPath))) {
+    const source = await readFile(resolve(workspace, originPath), 'utf8')
+    if (
+      !/APPROVED_RELEASE_ORIGINS/.test(source) ||
+      !/APPROVED_RELEASE_ORIGINS\.contains\(/.test(source)
+    ) {
+      violations.push(
+        `${originPath}: Tauri template src/origin.rs must enforce its fixed APPROVED_RELEASE_ORIGINS allowlist`,
+      )
+    }
+  }
+
+  const transportPath = `${tauriRoot}/src/web/platform/transport.ts`
+  if (await pathExists(resolve(workspace, transportPath))) {
+    const source = await readFile(resolve(workspace, transportPath), 'utf8')
+    if (
+      !/@tauri-apps\/api\/core/.test(source) ||
+      !/invoke(?:<[^>]+>)?\(\s*['"]api_request['"]/.test(source)
+    ) {
+      violations.push(
+        `${transportPath}: Tauri template platform/transport.ts must invoke the allowlisted native api_request command`,
+      )
+    }
+  }
+
+  for (const [asset, valid] of [
+    ['tauri.android.conf.json', (config) => config?.bundle?.android?.minSdkVersion === 24],
+    ['tauri.ios.conf.json', (config) => config?.bundle?.iOS?.minimumSystemVersion === '14.0'],
+    [
+      'tauri.macos.conf.json',
+      (config) =>
+        Array.isArray(config?.bundle?.targets) &&
+        config.bundle.targets.length === 1 &&
+        config.bundle.targets[0] === 'app' &&
+        config?.bundle?.macOS?.minimumSystemVersion === '10.13',
+    ],
+  ]) {
+    const path = `${tauriRoot}/src-tauri/${asset}`
+    if (!(await pathExists(resolve(workspace, path)))) continue
+    const config = await readJson(resolve(workspace, path))
+    if (!valid(config)) {
+      violations.push(
+        `${path}: Tauri template ${asset} must retain the reviewed platform minimums and bundle target`,
+      )
+    }
+  }
+
+  return violations
 }
 
 async function dynamicTauriTarget(workspace, service) {
@@ -1186,8 +1304,11 @@ async function validateTarget(workspace, target) {
 async function validateTauriBoundary(root = process.cwd()) {
   const workspace = resolve(root)
   const targets = await discoverTauriTargets(workspace)
-  const violations = await Promise.all(targets.map((target) => validateTarget(workspace, target)))
-  return violations.flat().sort()
+  const [templateViolations, targetViolations] = await Promise.all([
+    validateTemplateSeparation(workspace),
+    Promise.all(targets.map((target) => validateTarget(workspace, target))),
+  ])
+  return [...templateViolations, ...targetViolations.flat()].sort()
 }
 
 export { validateTauriBoundary }

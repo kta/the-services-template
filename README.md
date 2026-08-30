@@ -51,8 +51,9 @@ make dev/admin  # → http://localhost:5174 が管理コンソール
 
 ```sh
 make dev/example_service   # → http://localhost:5173 サンプルの業務画面
-make dev/example_service/tauri  # example_service Tauri desktop（Worker + native window）
-make build/example_service/tauri # example_service Tauri 静的 bundle（dist/tauri）
+make dev/example_tauri_service   # → http://localhost:5175 Tauri 対応サンプルの Web 画面
+make dev/example_tauri_service/tauri  # Tauri desktop（Worker + native window）
+make build/example_tauri_service/tauri # Tauri 静的 bundle（dist/tauri）
 make dev/admin/tauri       # admin Tauri desktop（Worker + native window）
 make build/admin/tauri     # admin Tauri 静的 bundle（dist/tauri）
 make dev/all               # DEV_ALL_SERVICES に登録された SPA + API を同時に起動
@@ -69,16 +70,20 @@ make check                 # 壊れていないか全部確認する（緑なら
 make help                  # コマンド一覧
 ```
 
-新サービスを追加するときは、`.agents/skills/new-service` の手順に従って root `Makefile` の
-サービス一覧も更新します。これにより `make init`、`make dev/<service>`、`make dev/all` の
-ローカル開発導線が揃います。本番 deploy・remote migration はローカルtargetに追加せず、
+新サービスを追加するときは、`.agents/skills/new-service` がコピー前に **Web only（推奨）**
+または **Web + Tauri** を質問します。前者は `services/example_service`、後者は
+`services/example_tauri_service` をコピーし、回答前にはどちらもコピーしません。root
+`Makefile` のサービス一覧も更新し、`make init`、`make dev/<service>`、`make dev/all` の
+ローカル開発導線を揃えます。本番 deploy・remote migration はローカルtargetに追加せず、
 protected `main` の production workflow に登録します。
 
-example_service は Tauri v2 の native shell も雛形として含みます。`make dev/example_service/tauri`（または `pnpm --filter @app/example_service tauri dev`）が Worker/Vite dev server と native window をまとめて起動します。Web の `make dev/example_service` と Tauri は同じ :5173 を使うため同時に起動しません。iOS/Android 実機の HMR では `TAURI_DEV_HOST=<開発端末から到達できる host>` と必要な port forwarding を設定します。desktop / iOS / Android の前提と unsigned artifact の手順は [`docs/howto/tauri-example-service.md`](./docs/howto/tauri-example-service.md) を参照してください。
+`example_service` は Web-only で、`src-tauri`、Tauri 依存・scripts、native CI を持ちません。`example_tauri_service` は Tauri v2 の完成形雛形です。`make dev/example_tauri_service/tauri` が Worker/Vite dev server と native window をまとめて起動します。同じ :5175 を使う Web dev server とは同時に起動しません。iOS/Android 実機の HMR では `TAURI_DEV_HOST=<開発端末から到達できる host>` と必要な port forwarding を設定します。desktop / iOS / Android の前提と unsigned artifact の手順は [`docs/howto/tauri-example-service.md`](./docs/howto/tauri-example-service.md) を参照してください。
 
 `make build/<service>/tauri` は Worker を deploy せず、Tauri 用の相対 asset bundle だけを `services/<service>/dist/tauri` に作ります。`make dev/<service>/tauri` は対応する Vite/Worker dev server と native window を起動します。Tauri の macOS/iOS/Android unsigned artifact は GitHub Actions の `workflow_dispatch` で検証できますが、本番 credential や署名鍵は渡しません。
 
-本番 Worker deploy と remote migration は GitHub Actions の `production` environment で、protected `main` への push が verify を通った場合だけ実行します。ローカルの Make/package には本番 deploy・remote migration の entry point を公開していません。既存 Worker の secret 登録や restore／remote seed も protected `main` の production workflow と required reviewer を要求します。`scripts/put-production-secret.mjs` は validation-only です。初回 Worker 作成を伴う bootstrap は専用 workflow だけで行います。example_service は雛形なので本番 deploy しません。鍵の境界と初期設定は [`docs/howto/deploy.md`](./docs/howto/deploy.md) を参照してください。
+通常 CI の TypeScript/coverage/E2E 導線は両雛形を維持します。Rust fmt/test/clippy と native boundary/static build は `admin` と Tauri 対応雛形だけが対象で、重い macOS/iOS/Android artifact build は手動 `workflow_dispatch` です。
+
+本番 Worker deploy と remote migration は GitHub Actions の `production` environment で、protected `main` への push が verify を通った場合だけ実行します。ローカルの Make/package には本番 deploy・remote migration の entry point を公開していません。既存 Worker の secret 登録や restore／remote seed も protected `main` の production workflow と required reviewer を要求します。`scripts/put-production-secret.mjs` は validation-only です。初回 Worker 作成を伴う bootstrap は専用 workflow だけで行います。`example_service` と `example_tauri_service` は雛形なので本番 deploy しません。鍵の境界と初期設定は [`docs/howto/deploy.md`](./docs/howto/deploy.md) を参照してください。
 初回 Worker 作成を伴う secret bootstrap は `.github/workflows/production-bootstrap.yml` の
 `workflow_dispatch` 専用です。protected `main`、`production` environment の required
 reviewer、コピー済み domain の入力検証、Worker ごとの secret allowlist を通し、domain
@@ -102,9 +107,11 @@ pnpm --filter @app/admin test          # admin Worker/unit test
 pnpm --filter @app/admin test:web      # admin React/jsdom test（4指標とも 60% 以上）
 pnpm --filter @app/admin test:all      # admin の Worker + web test
 pnpm --filter @app/example_service test:all
+pnpm --filter @app/example_tauri_service test:all
 pnpm --filter @app/admin exec vitest run --config vitest.web.config.ts -t "<test name>"
 pnpm run test:traceability              # Approved UC/AC の E2E mapping を検証
 pnpm --filter @app/example_service e2e  # UI/API を変えた service の Playwright
+pnpm --filter @app/example_tauri_service e2e
 pnpm check                              # リポジトリ全体の完了 gate
 ```
 
@@ -138,7 +145,7 @@ docs/howto/deploy.md に従って、順番に実行して。
 - 必要なリソース（D1 / KV / R2）の作成と、id の設定ファイルへの反映
 - secrets の生成と、値を表示しない `production` environment secret への登録
 - 初回 Worker の作成・既存 Worker の更新は `production-bootstrap.yml` など protected production workflow で設定（`put-production-secret.mjs` は検証専用）
-- protected `main` へ反映後の notifier / admin / copied domain / ops の CI デプロイ（example_service は雛形なのでデプロイしない）
+- protected `main` へ反映後の notifier / admin / copied domain / ops の CI デプロイ（両 example は雛形なのでデプロイしない）
 
 各ステップで実行したコマンドと結果を報告して。本番に反映する前には必ず確認を取って。
 ```

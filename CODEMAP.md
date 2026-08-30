@@ -26,7 +26,7 @@ that CI context. Existing secret provisioning, seed, and restore are separate
 operator operations tied to a clean published `main` checkout. First-Worker
 secret bootstrap uses only the dedicated protected-main
 `production-bootstrap.yml` workflow and its reviewer gate. The template
-`example_service` is never a production target.
+`example_service` and `example_tauri_service` are never production targets.
 Service-binding authentication uses a distinct secret for each direction:
 `ADMIN_TO_<DOMAIN>_KEY` (the scaffold uses `ADMIN_TO_EXAMPLE_SERVICE_KEY`),
 `ADMIN_TO_NOTIFIER_KEY`, `DOMAIN_TO_NOTIFIER_KEY`, and
@@ -40,7 +40,8 @@ credential or the admin JWT signing key.
 | Area | Owner and entry point | Responsibility |
 |---|---|---|
 | [`services/admin`](./services/admin) | [`src/worker/index.ts`](./services/admin/src/worker/index.ts) | Operator SPA/API, organization source of truth, authentication, invitations, and organization reconciliation. |
-| [`services/example_service`](./services/example_service) | [`src/worker/index.ts`](./services/example_service/src/worker/index.ts), [`src-tauri/src/lib.rs`](./services/example_service/src-tauri/src/lib.rs) | Template domain Worker: same-origin SPA/API, tenant-scoped items, received organization records, and the optional Tauri v2 native shell. |
+| [`services/example_service`](./services/example_service) | [`src/worker/index.ts`](./services/example_service/src/worker/index.ts) | Web-only template domain Worker: same-origin SPA/API, tenant-scoped items, and received organization records. |
+| [`services/example_tauri_service`](./services/example_tauri_service) | [`src/worker/index.ts`](./services/example_tauri_service/src/worker/index.ts), [`src-tauri/src/lib.rs`](./services/example_tauri_service/src-tauri/src/lib.rs) | Web + Tauri template with the same item contract plus fixed-origin native transport and platform shells. |
 | [`services/notifier`](./services/notifier) | [`src/index.ts`](./services/notifier/src/index.ts) | Internal notification endpoint, KV deduplication, and Resend delivery. |
 | [`services/ops`](./services/ops) | [`src/index.ts`](./services/ops/src/index.ts) | Cron and Workflow entry points for D1 backup, freshness/capacity checks, and service health checks. |
 | [`packages/contracts`](./packages/contracts) | [`src/index.ts`](./packages/contracts/src/index.ts) | Zod API contracts shared by Workers and web clients. |
@@ -59,11 +60,12 @@ and required tests; the sibling `CLAUDE.md` is a symlink to that same source.
 |---|---|
 | `admin` | D1, `EXAMPLE_SERVICE`, `NOTIFIER`, Cron（login lockout は D1 の原子的カウンタ） |
 | `example_service` | D1, `NOTIFIER` |
+| `example_tauri_service` | D1, `NOTIFIER` |
 | `notifier` | `DEDUPE` KV |
 | `ops` | `BACKUPS` R2, `BACKUP_WF`, `ADMIN`, `NOTIFIER`, Cron |
 
 All services consume `packages/contracts` and `packages/shared`; SPA services
-(`admin` and `example_service`) also consume `packages/ui`. These packages do
+(`admin`, `example_service`, and `example_tauri_service`) also consume `packages/ui`. These packages do
 not depend on services.
 
 ## Core flows
@@ -72,7 +74,7 @@ not depend on services.
   and handles its `/api/*` routes on the same origin. The Hono route chain
   exports `AppType` for the typed client, with contracts defined in
   `packages/contracts`.
-- **Native to application:** example_service's Tauri React bundle sends API
+- **Native to application:** example_tauri_service's Tauri React bundle sends API
   requests through the Rust `api_request` command. The command uses a
   build-time fixed API origin and an `/api/` method/header allowlist; it does
   not expose response cookies. Native access tokens are memory-only because
@@ -100,9 +102,9 @@ not depend on services.
   are reflected in service `wrangler.jsonc` files. Wrangler deploys
   Workers, their bindings, Cron triggers, and Workflows. Details and order are
   in [`docs/howto/deploy.md`](./docs/howto/deploy.md).
-- **Local commands:** `make dev/example_service` runs the browser Worker,
-  `make dev/example_service/tauri` runs its Tauri dev window, and
-  `make build/example_service/tauri` builds the isolated native frontend
+- **Local commands:** `make dev/example_service` runs the Web-only Worker,
+  `make dev/example_tauri_service/tauri` runs the Tauri dev window, and
+  `make build/example_tauri_service/tauri` builds the isolated native frontend
   bundle. `make help` lists all repository targets.
 
 ## Where to change what
@@ -115,7 +117,7 @@ not depend on services.
 | Change notification delivery | [`services/notifier`](./services/notifier) and [`packages/contracts/src/notification.ts`](./packages/contracts/src/notification.ts). |
 | Change backup, monitoring, or scheduled operations | [`services/ops/src/index.ts`](./services/ops/src/index.ts) and [`services/ops/wrangler.jsonc`](./services/ops/wrangler.jsonc). |
 | Change shared visual language or UI primitives | [`packages/ui/src/theme.css`](./packages/ui/src/theme.css) and [`packages/ui/src`](./packages/ui/src). |
-| Change example_service's native shell or Web/native transport boundary | [`services/example_service/src/web/platform/transport.ts`](./services/example_service/src/web/platform/transport.ts), [`services/example_service/src-tauri/src/api.rs`](./services/example_service/src-tauri/src/api.rs), and [`scripts/check-tauri-boundary.mjs`](./scripts/check-tauri-boundary.mjs). |
+| Change the Tauri template's native shell or Web/native transport boundary | [`services/example_tauri_service/src/web/platform/transport.ts`](./services/example_tauri_service/src/web/platform/transport.ts), [`services/example_tauri_service/src-tauri/src/api.rs`](./services/example_tauri_service/src-tauri/src/api.rs), and [`scripts/check-tauri-boundary.mjs`](./scripts/check-tauri-boundary.mjs). |
 | Change Cloudflare resources, bindings, or deployment configuration | [`infra/terraform`](./infra/terraform), affected `wrangler.jsonc`, then [`docs/architecture/infra.md`](./docs/architecture/infra.md). |
 | Change production deploy protection or secret placement | [`scripts/check-deploy-boundary.mjs`](./scripts/check-deploy-boundary.mjs), [`.github/workflows/ci.yml`](./.github/workflows/ci.yml), [`.github/workflows/production-bootstrap.yml`](./.github/workflows/production-bootstrap.yml), and [`docs/howto/deploy.md`](./docs/howto/deploy.md). |
 

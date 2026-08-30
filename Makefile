@@ -5,7 +5,7 @@ export WORKTREE_NAME
 
 # SPA + API services started together by `make dev/all`.
 # Add each new domain service here; notifier and ops are Worker-only services.
-DEV_ALL_SERVICES := admin example_service
+DEV_ALL_SERVICES := admin example_service example_tauri_service
 
 ## init: install deps + generate types + apply local DB migrations + seed
 init:
@@ -27,13 +27,13 @@ db/seed/local:
 dev/%: FORCE
 	pnpm --filter @app/$* dev
 
-## dev/example_service/tauri: run example_service Tauri desktop dev (Worker + native window)
-dev/example_service/tauri:
-	pnpm --filter @app/example_service tauri dev
+## dev/example_tauri_service/tauri: run example_tauri_service Tauri desktop dev (Worker + native window)
+dev/example_tauri_service/tauri:
+	pnpm --filter @app/example_tauri_service tauri dev
 
-## build/example_service/tauri: build the example_service static Tauri frontend bundle
-build/example_service/tauri:
-	pnpm --filter @app/example_service build:tauri
+## build/example_tauri_service/tauri: build the example_tauri_service static Tauri frontend bundle
+build/example_tauri_service/tauri:
+	pnpm --filter @app/example_tauri_service build:tauri
 
 ## dev/admin: run admin — SPA + API in one dev server (:5174)
 dev/admin:
@@ -104,7 +104,7 @@ worktree/rm:
 help:
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed 's/## //' | awk -F': ' '{printf "  \033[36m%-26s\033[0m %s\n", $$1, $$2}'
 
-.PHONY: FORCE init dev/example_service/tauri build/example_service/tauri dev/admin dev/admin/tauri build/admin/tauri dev/all dev/notifier db/generate db/migrate/local db/seed/local \
+.PHONY: FORCE init dev/example_tauri_service/tauri build/example_tauri_service/tauri dev/admin dev/admin/tauri build/admin/tauri dev/all dev/notifier db/generate db/migrate/local db/seed/local \
 	build test typecheck lint check infra/check dev-vars \
 	worktree/new worktree/rm help
 

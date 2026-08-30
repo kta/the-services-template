@@ -6,7 +6,7 @@ AI コーディングエージェント（Claude Code / Cursor / Codex / Copilot
 追加適用する。詳細規約は末尾の「タスク別ロードガイド」から**必要なときだけ**読む。
 
 ## プロジェクト概要
-Cloudflare-only の SDD/TDD モノレポ **テンプレート**。**1 サービス = 1 Worker が React SPA と Hono API を同一オリジンで配信**し、ドメインごとに D1(SQLite) を持つ。型は **Zod 単一ソース + Hono RPC**、デザインは **`packages/ui` のトークン単一ソース**。**全スタックが Cloudflare 無料枠で動く**（Queues 等の Paid 機能は不使用。通知は service binding の同期送信 API）。IaC は Terraform + Wrangler。`services/example_service` を雛形に新サービスを増やす。
+Cloudflare-only の SDD/TDD モノレポ **テンプレート**。**1 サービス = 1 Worker が React SPA と Hono API を同一オリジンで配信**し、ドメインごとに D1(SQLite) を持つ。型は **Zod 単一ソース + Hono RPC**、デザインは **`packages/ui` のトークン単一ソース**。**全スタックが Cloudflare 無料枠で動く**（Queues 等の Paid 機能は不使用。通知は service binding の同期送信 API）。IaC は Terraform + Wrangler。新サービスはコピー前に Web only（推奨）または Web + Tauri を選び、`services/example_service` または `services/example_tauri_service` の完成形雛形から増やす。
 
 アーキテクチャの構成・責務・主要フローは [`CODEMAP.md`](./CODEMAP.md) を参照。
 
@@ -63,8 +63,9 @@ Lefthook は開発中の早期フィードバック、CI `verify` は迂回で�
 ## サービス境界
 | パッケージ | 種別 | dev port | 役割 |
 |---|---|---|---|
-| `services/example_service` (`@app/example_service`) | SPA+API Worker + D1 | 5173 | item ドメイン。**コピー元の雛形**（本番デプロイ対象外） |
+| `services/example_service` (`@app/example_service`) | SPA+API Worker + D1 | 5173 | item ドメインの **Web-only コピー元**（本番デプロイ対象外、native CI 対象外） |
 | `services/admin` (`@app/admin`) | SPA+API Worker + D1 | 5174 | organizations 源泉 + **認証源泉**（login/refresh/招待、D1 原子的 login lockout）。service binding で各ドメインへ org 同期 + hourly 照合 Cron |
+| `services/example_tauri_service` (`@app/example_tauri_service`) | SPA+API Worker + D1 + Tauri | 5175 | item ドメインの **Web + Tauri コピー元**（本番デプロイ対象外、Rust/native CI 対象） |
 | `services/notifier` (`@app/notifier`) | 同期送信 API Worker + KV | — | 通知（`POST /api/internal/send`・KV 冪等・Resend）。送信手段未設定は **fail close(502)** |
 | `services/ops` (`@app/ops`) | Cron + Workflows Worker + R2 | — | D1 バックアップ（R2 に世代保存）+ 鮮度/容量/死活監視。Workflows は無料枠内 |
 | `packages/contracts` (`@app/contracts`) | TS | — | **Zod 単一ソース** |
@@ -76,7 +77,7 @@ Lefthook は開発中の早期フィードバック、CI `verify` は迂回で�
 ## セキュリティ / やってはいけない
 - ドメインクエリのテナントスコープを外さない。認証フロー（`packages/shared` の auth）を無断で変えない。
 - secrets をコミットしない。`.dev.vars` は gitignore、本番の Worker secret は protected production workflow の allowlist からだけ反映する。`scripts/put-production-secret.mjs` は検査専用で、初回 Worker の作成は `.github/workflows/production-bootstrap.yml` からだけ行う。
-- **本番前チェックリスト**（caller-specific 内部鍵 / admin 専用 `JWT_PRIVATE_KEY` / 各 Worker の `JWT_PUBLIC_KEY` / `AUTH_PEPPER` / `AUTH_DEV_GRANT` / `MAIL_FROM` 等）は [`docs/howto/deploy.md`](./docs/howto/deploy.md)。production deploy は保護された `main` の push と `production` environment に限定し、example_service は雛形なので本番デプロイしない（production deploy chain 対象外）。
+- **本番前チェックリスト**（caller-specific 内部鍵 / admin 専用 `JWT_PRIVATE_KEY` / 各 Worker の `JWT_PUBLIC_KEY` / `AUTH_PEPPER` / `AUTH_DEV_GRANT` / `MAIL_FROM` 等）は [`docs/howto/deploy.md`](./docs/howto/deploy.md)。production deploy は保護された `main` の push と `production` environment に限定し、`example_service` と `example_tauri_service` は雛形なので本番デプロイしない（production deploy chain 対象外）。
 
 ## コミット / PR
 - **Conventional Commits**（commitlint + lefthook で強制。pre-commit=biome / pre-push=typecheck+test）。
@@ -85,7 +86,7 @@ Lefthook は開発中の早期フィードバック、CI `verify` は迂回で�
 ## エージェント固有メモ
 - **Claude Code**: 次の場合は **plan mode** で計画してから着手 — ①新サービス追加 ②DB スキーマ変更 ③ライブラリ追加・置換 ④仕様外/横断的なリファクタ ⑤認証・通知・service binding に触れる変更。
 - **リポジトリ内スキル**（`.agents/skills/`）: `check`（`pnpm check` を緑まで）/ `new-service <name>`（サービス雛形）/ `design-select`（デザイン候補を HTML でブラウザ提示→クリックで選択）。Claude Code は `.claude/skills` の symlink から同じスキルを利用する。
-- **新サービス追加時**: root `Makefile` の `DEV_ALL_SERVICES` を更新し、`make init` / `make dev/<service>` / `make dev/all` でローカル開発導線を確認する。root `package.json` の test chain、CI の e2e matrix、ordered protected-production deploy chain も更新する。本番 deploy / remote migration のローカル entry point は追加せず、protected `main` の production workflow にだけ登録する。
+- **新サービス追加時**: `.agents/skills/new-service` でコピー前に `Web only`（推奨）/ `Web + Tauri` を必ず確認する。root `Makefile` の `DEV_ALL_SERVICES` を更新し、`make init` / `make dev/<service>` / `make dev/all` でローカル開発導線を確認する。root `package.json` の test chain、CI の e2e matrix、ordered protected-production deploy chain も更新する。Rust/Tauri gate と native Make/workflow は Web + Tauri の場合だけ登録する。本番 deploy / remote migration のローカル entry point は追加せず、protected `main` の production workflow にだけ登録する。
 - **新規画面・見た目の大幅変更**では、コードの前に `docs/frontend/DESIGN_RULE.md` のパス 1（トークン計画）をテキストで出し、`design-select` スキルで候補 2〜3 案を見せてから実装する。
 - **新 API は当て推量しない**: Cloudflare は Claude Code の `.mcp.json` または Codex の `.codex/config.toml` にある `cloudflare-docs` MCP、ライブラリ全般は `context7` MCP（**導入している場合**。未導入ならインストール済みパッケージの型定義・公式 docs で確認）。
 - 並行作業は `make worktree/new name=<branch>` / `make worktree/rm name=<branch>`（`.wrangler/state` が worktree ごとに隔離される）。
