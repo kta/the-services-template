@@ -1,7 +1,10 @@
-import { platformFetch } from '../platform/transport'
+import { isTauriRuntime, platformFetch } from '../platform/transport'
 
-const DEV_TOKEN_KEY = 'app.auth.token'
-const DEV_ORG_KEY = 'app.auth.org'
+const DEV_TOKEN_KEY = 'app.example_tauri_service.auth.token'
+const DEV_ORG_KEY = 'app.example_tauri_service.auth.org'
+
+let nativeToken: string | null = null
+let nativeOrganization: string | null = null
 
 function browserValue(key: string): string | null {
   try {
@@ -23,24 +26,32 @@ export async function devLogin(organizationId: string): Promise<void> {
     throw new Error('login response did not contain a token')
   }
 
+  if (isTauriRuntime()) {
+    nativeToken = token
+    nativeOrganization = organizationId
+    return
+  }
   sessionStorage.setItem(DEV_TOKEN_KEY, token)
   sessionStorage.setItem(DEV_ORG_KEY, organizationId)
 }
 
 function getToken(): string | null {
-  return browserValue(DEV_TOKEN_KEY)
+  return isTauriRuntime() ? nativeToken : browserValue(DEV_TOKEN_KEY)
 }
 
 function getOrganization(): string | null {
-  return browserValue(DEV_ORG_KEY)
+  return isTauriRuntime() ? nativeOrganization : browserValue(DEV_ORG_KEY)
 }
 
 function logout(): void {
+  nativeToken = null
+  nativeOrganization = null
+  if (isTauriRuntime()) return
   try {
     sessionStorage.removeItem(DEV_TOKEN_KEY)
     sessionStorage.removeItem(DEV_ORG_KEY)
   } catch {
-    // sessionStorage unavailable: there is no browser session to clear.
+    // sessionStorage unavailable: the in-memory browser state is already absent.
   }
 }
 

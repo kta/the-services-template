@@ -37,6 +37,16 @@
       "entry": [
         "test/**/*.test.ts",
         "vitest.config.ts",
+        "src/web/**/*.test.{ts,tsx}",
+        "e2e/notifier-failure.worker.ts"
+      ],
+      "project": ["src/**/*.{ts,tsx,css}", "test/**/*.ts", "e2e/**/*.ts", "*.ts"],
+      "vitest": false
+    },
+    "services/example_tauri_service": {
+      "entry": [
+        "test/**/*.test.ts",
+        "vitest.config.ts",
         "vite.tauri.config.ts",
         "src/web/**/*.test.{ts,tsx}",
         "e2e/notifier-failure.worker.ts"

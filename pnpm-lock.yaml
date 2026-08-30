@@ -321,6 +321,97 @@ importers:
       '@hono/zod-validator':
         specifier: 'catalog:'
         version: 0.9.0(hono@4.13.3)(zod@4.4.3)
+      drizzle-orm:
+        specifier: 'catalog:'
+        version: 0.45.2(@cloudflare/workers-types@5.20260822.1)
+      hono:
+        specifier: 'catalog:'
+        version: 4.13.3
+      react:
+        specifier: 'catalog:'
+        version: 19.2.8
+      react-dom:
+        specifier: 'catalog:'
+        version: 19.2.8(react@19.2.8)
+      zod:
+        specifier: 'catalog:'
+        version: 4.4.3
+    devDependencies:
+      '@cloudflare/vite-plugin':
+        specifier: 'catalog:'
+        version: 1.53.1(vite@8.2.2(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))(wrangler@4.125.0(@cloudflare/workers-types@5.20260822.1))
+      '@cloudflare/vitest-pool-workers':
+        specifier: 'catalog:'
+        version: 0.22.0(@cloudflare/workers-types@5.20260822.1)(@vitest/runner@4.1.11)(@vitest/snapshot@4.1.11)(vitest@4.1.11)
+      '@cloudflare/workers-types':
+        specifier: 'catalog:'
+        version: 5.20260822.1
+      '@playwright/test':
+        specifier: 'catalog:'
+        version: 1.62.1
+      '@tailwindcss/vite':
+        specifier: 'catalog:'
+        version: 4.3.3(vite@8.2.2(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+      '@testing-library/dom':
+        specifier: 'catalog:'
+        version: 10.4.1
+      '@testing-library/jest-dom':
+        specifier: 'catalog:'
+        version: 7.0.1(@testing-library/dom@10.4.1)(vitest@4.1.11)
+      '@testing-library/react':
+        specifier: 'catalog:'
+        version: 16.3.2(@testing-library/dom@10.4.1)(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      '@testing-library/user-event':
+        specifier: 'catalog:'
+        version: 14.6.6(@testing-library/dom@10.4.1)
+      '@types/react':
+        specifier: 'catalog:'
+        version: 19.2.18
+      '@types/react-dom':
+        specifier: 'catalog:'
+        version: 19.2.4(@types/react@19.2.18)
+      '@vitejs/plugin-react':
+        specifier: 'catalog:'
+        version: 6.1.0(vite@8.2.2(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+      '@vitest/coverage-istanbul':
+        specifier: 'catalog:'
+        version: 4.1.11(supports-color@10.2.2)(vitest@4.1.11)
+      drizzle-kit:
+        specifier: 'catalog:'
+        version: 0.31.10
+      jsdom:
+        specifier: 'catalog:'
+        version: 30.0.1
+      tailwindcss:
+        specifier: 'catalog:'
+        version: 4.3.3
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+      vite:
+        specifier: 'catalog:'
+        version: 8.2.2(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)
+      vitest:
+        specifier: 'catalog:'
+        version: 4.1.11(@types/node@26.0.1)(@vitest/coverage-istanbul@4.1.11)(jsdom@30.0.1)(vite@8.2.2(@types/node@26.0.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+      wrangler:
+        specifier: 'catalog:'
+        version: 4.125.0(@cloudflare/workers-types@5.20260822.1)
+
+  services/example_tauri_service:
+    dependencies:
+      '@app/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@app/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      '@app/ui':
+        specifier: workspace:*
+        version: link:../../packages/ui
+      '@hono/zod-validator':
+        specifier: 'catalog:'
+        version: 0.9.0(hono@4.13.3)(zod@4.4.3)
       '@tauri-apps/api':
         specifier: 'catalog:'
         version: 2.11.1

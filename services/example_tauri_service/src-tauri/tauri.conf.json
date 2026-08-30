@@ -1,0 +1,57 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Example Tauri Service",
+  "version": "0.0.1",
+  "identifier": "com.kta.example.tauri.service",
+  "build": {
+    "beforeDevCommand": "pnpm run dev",
+    "beforeBuildCommand": "pnpm run build:tauri",
+    "devUrl": "http://localhost:5175",
+    "frontendDist": "../dist/tauri"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Example Tauri Service",
+        "width": 1100,
+        "height": 760,
+        "minWidth": 720,
+        "minHeight": 560,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "capabilities": ["default"],
+      "csp": {
+        "default-src": "'self'",
+        "base-uri": "'self'",
+        "form-action": "'self'",
+        "object-src": "'none'",
+        "script-src": "'self'",
+        "style-src": "'self'",
+        "img-src": "'self' data:",
+        "font-src": "'self'",
+        "connect-src": "'self' ipc: http://ipc.localhost"
+      },
+      "devCsp": {
+        "default-src": "'self'",
+        "base-uri": "'self'",
+        "form-action": "'self'",
+        "object-src": "'none'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' data:",
+        "font-src": "'self'",
+        "connect-src": "'self' ipc: http://ipc.localhost http://localhost:5175 ws://localhost:5175 ws://127.0.0.1:5175 ws://localhost:1421 ws://127.0.0.1:1421"
+      },
+      "freezePrototype": true
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": []
+  }
+}
