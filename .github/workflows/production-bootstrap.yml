@@ -49,6 +49,7 @@ jobs:
             echo 'domain_service must be an unreserved copied lowercase service directory' >&2
             exit 1
           fi
+          node scripts/service-catalog.mjs require-deployable "$DOMAIN_SERVICE"
           node scripts/require-production-domain-auth.mjs "$DOMAIN_SERVICE"
       - name: Build notifier without Cloudflare credentials
         run: pnpm --filter @app/notifier run build
@@ -120,6 +121,10 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Require a catalog deployable domain before credentials
+        env:
+          DOMAIN_SERVICE: ${{ inputs.domain_service }}
+        run: node scripts/service-catalog.mjs require-deployable "$DOMAIN_SERVICE"
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: production-bootstrap-worker-bundles
@@ -493,6 +498,12 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         working-directory: services/admin
         run: ${{ steps.trusted-tools.outputs.pnpm }} --config.offline=true exec wrangler deploy dist/admin/index.js --no-bundle --config=wrangler.jsonc --secrets-file "$RUNNER_TEMP/production-secret-bundles/admin.json" --assets=dist/client
+      - name: Apply copied domain remote migrations
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        working-directory: services/${{ inputs.domain_service }}
+        run: ${{ steps.trusted-tools.outputs.pnpm }} --config.offline=true exec wrangler d1 migrations apply DB --remote
       - name: Bootstrap copied domain
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

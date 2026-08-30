@@ -3,6 +3,7 @@
 import { lstat, readdir, readFile, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { inspectNativeWorkflowPolicy, workflowContainsNativeBuild } from './workflow-policy.mjs'
 
 const DEFAULT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -83,57 +84,6 @@ async function readRegularFile(path, label, violations, containmentRoot) {
   }
 }
 
-function validateNativeWorkflowPolicy(path, source, violations) {
-  if (!/\bworkflow_dispatch\s*:/.test(source))
-    violations.push(`${path}: native workflow must be manual-only with workflow_dispatch`)
-  const onBlock = source.match(/^on:\s*\n((?:[ \t].*(?:\n|$))*)/m)?.[1] ?? ''
-  const automaticTriggers = [
-    ...onBlock.matchAll(
-      /^ {2}(push|pull_request|schedule|workflow_call|repository_dispatch|merge_group):/gm,
-    ),
-  ].map((match) => match[1])
-  if (automaticTriggers.length > 0)
-    violations.push(
-      `${path}: native workflow must be manual-only; remove ${automaticTriggers.join(', ')}`,
-    )
-  const jobsStart = source.search(/^jobs:\s*$/m)
-  const jobsSource = jobsStart < 0 ? '' : source.slice(jobsStart)
-  const jobStarts = [...jobsSource.matchAll(/^ {2}[A-Za-z0-9_-]+:\s*$/gm)]
-  const protectedMain =
-    /github\.event_name == 'workflow_dispatch'[^\n]*github\.ref == 'refs\/heads\/main'[^\n]*github\.ref_protected == true/
-  if (
-    jobStarts.length === 0 ||
-    jobStarts.some((job, index) => {
-      const start = job.index ?? 0
-      const end = jobStarts[index + 1]?.index
-      return !protectedMain.test(jobsSource.slice(start, end))
-    })
-  )
-    violations.push(`${path}: every native workflow job must require protected main`)
-  if (
-    /CLOUDFLARE_(?:API_TOKEN|ACCOUNT_ID)|secrets\.PRODUCTION_|\bwrangler\s+deploy\b|id-token:\s*write/.test(
-      source,
-    )
-  )
-    violations.push(
-      `${path}: native workflow must not receive a Cloudflare credential or production capability`,
-    )
-  if (!/check-tauri-boundary\.mjs/.test(source))
-    violations.push(`${path}: native workflow must run the Tauri boundary checker`)
-  if (!/check-tauri-artifact\.mjs/.test(source))
-    violations.push(`${path}: native workflow must run the Tauri artifact checker`)
-  for (const pin of [
-    /ANDROID_PLATFORM_API:\s*35/,
-    /ANDROID_NDK_VERSION:\s*27\.2\.12479018/,
-    /XCODEGEN_VERSION:\s*2\.46\.0/,
-  ]) {
-    if (!pin.test(source))
-      violations.push(
-        `${path}: native workflow is missing required platform pin ${pin.source.split(':')[0]}`,
-      )
-  }
-}
-
 export async function validateServiceCatalog(root = DEFAULT_ROOT) {
   const violations = []
   const workspace = resolve(root)
@@ -155,24 +105,36 @@ export async function validateServiceCatalog(root = DEFAULT_ROOT) {
     return { services: [], workerOnlyServices: [], violations }
   }
   const rawWorkerOnlyServices = source.workerOnlyServices ?? []
-  const workerOnlyServices = []
+  const workerCandidates = []
   if (!Array.isArray(rawWorkerOnlyServices)) {
     violations.push('service-catalog.json workerOnlyServices must be an array')
   } else {
-    for (const [index, directory] of rawWorkerOnlyServices.entries()) {
-      if (typeof directory !== 'string' || !/^[a-z][a-z0-9_]{0,62}$/.test(directory)) {
-        violations.push(`service-catalog.json workerOnlyServices[${index}] has invalid directory`)
-      } else if (workerOnlyServices.includes(directory)) {
-        violations.push(`${directory}: duplicate worker-only service`)
-      } else {
-        workerOnlyServices.push(directory)
+    for (const [index, worker] of rawWorkerOnlyServices.entries()) {
+      const label = `service-catalog.json workerOnlyServices[${index}]`
+      if (!worker || typeof worker !== 'object' || Array.isArray(worker)) {
+        violations.push(`${label} must be an object`)
+        continue
       }
+      const { directory, package: packageName, deployable } = worker
+      if (typeof directory !== 'string' || !/^[a-z][a-z0-9_]{0,62}$/.test(directory)) {
+        violations.push(`${label} has invalid directory ${String(directory)}`)
+        continue
+      }
+      const valid = violations.length
+      if (packageName !== `@app/${directory}`) {
+        violations.push(`${directory}: package must be exactly @app/${directory}`)
+      }
+      if (typeof deployable !== 'boolean') {
+        violations.push(`${directory}: deployable must be boolean`)
+      }
+      if (violations.length === valid)
+        workerCandidates.push({ directory, package: packageName, deployable })
     }
   }
 
   const servicesRoot = join(workspace, 'services')
   const servicesReal = await safeDirectory(servicesRoot, 'services', workspaceReal, violations)
-  if (!servicesReal) return { services: [], workerOnlyServices, violations }
+  if (!servicesReal) return { services: [], workerOnlyServices: [], violations }
 
   const directories = new Set()
   const packages = new Set()
@@ -267,13 +229,12 @@ export async function validateServiceCatalog(root = DEFAULT_ROOT) {
         workspaceReal,
       )
       if (workflowSource !== undefined) {
-        validateNativeWorkflowPolicy(service.nativeWorkflow, workflowSource, violations)
-        if (!workflowSource.includes(packageName))
-          violations.push(`${service.nativeWorkflow}: must reference ${packageName}`)
-        if (!workflowSource.includes(`services/${directory}/src-tauri`))
-          violations.push(
-            `${service.nativeWorkflow}: must reference services/${directory}/src-tauri`,
-          )
+        violations.push(
+          ...inspectNativeWorkflowPolicy(service.nativeWorkflow, workflowSource, {
+            directory,
+            package: packageName,
+          }),
+        )
       }
     }
     if (violations.length !== violationCount) continue
@@ -288,9 +249,50 @@ export async function validateServiceCatalog(root = DEFAULT_ROOT) {
     })
   }
 
-  for (const directory of workerOnlyServices) {
-    if (directories.has(directory))
+  const workerOnlyServices = []
+  const workerDirectories = new Set()
+  for (const worker of workerCandidates) {
+    const { directory, package: packageName, deployable } = worker
+    const violationCount = violations.length
+    if (workerDirectories.has(directory)) {
+      violations.push(`${directory}: duplicate worker-only service`)
+      continue
+    }
+    workerDirectories.add(directory)
+    if (directories.has(directory)) {
       violations.push(`${directory}: service cannot be both SPA and worker-only`)
+      continue
+    }
+    const serviceRoot = join(servicesRoot, directory)
+    const serviceReal = await safeDirectory(
+      serviceRoot,
+      `services/${directory}`,
+      servicesReal,
+      violations,
+    )
+    if (!serviceReal) continue
+    const packageJson = await readJson(
+      join(serviceRoot, 'package.json'),
+      `services/${directory}/package.json`,
+      violations,
+      serviceReal,
+    )
+    if (packageJson && packageJson.name !== packageName) {
+      violations.push(
+        `${directory}: catalog package ${packageName} does not match workspace package ${String(packageJson.name)}`,
+      )
+    }
+    try {
+      const webInfo = await lstat(join(serviceRoot, 'src', 'web'))
+      if (webInfo) violations.push(`${directory}: worker-only service must not contain src/web`)
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        violations.push(`${directory}: worker-only src/web cannot be inspected: ${error.message}`)
+      }
+    }
+    if (violations.length === violationCount) {
+      workerOnlyServices.push({ directory, package: packageName, deployable })
+    }
   }
 
   const serviceEntries = await readdir(servicesRoot, { withFileTypes: true })
@@ -300,22 +302,8 @@ export async function validateServiceCatalog(root = DEFAULT_ROOT) {
       continue
     }
     if (!entry.isDirectory()) continue
-    const webPath = join(servicesRoot, entry.name, 'src', 'web')
-    let webInfo
-    try {
-      webInfo = await lstat(webPath)
-    } catch (error) {
-      if (error?.code === 'ENOENT') continue
-      violations.push(`services/${entry.name}/src/web cannot be inspected: ${error.message}`)
-      continue
-    }
-    if (webInfo.isSymbolicLink()) {
-      violations.push(`services/${entry.name}/src/web must not be a symbolic link`)
-      continue
-    }
-    if (!webInfo.isDirectory()) continue
-    if (!directories.has(entry.name)) {
-      violations.push(`${entry.name}: SPA workspace is missing from service-catalog.json`)
+    if (!directories.has(entry.name) && !workerDirectories.has(entry.name)) {
+      violations.push(`${entry.name}: service workspace is missing from service-catalog.json`)
     }
   }
 
@@ -337,10 +325,16 @@ export async function validateServiceCatalog(root = DEFAULT_ROOT) {
         violations,
         workspaceReal,
       )
-      if (source && /check-tauri-artifact\.mjs|\btauri\s+(?:build|ios|android)\b/.test(source)) {
-        violations.push(
-          `${workflowPath}: native workflow is not registered as a catalog nativeWorkflow`,
-        )
+      if (source) {
+        try {
+          if (workflowContainsNativeBuild(source)) {
+            violations.push(
+              `${workflowPath}: native workflow is not registered as a catalog nativeWorkflow`,
+            )
+          }
+        } catch (error) {
+          violations.push(`${workflowPath}: workflow is not valid safe YAML: ${error.message}`)
+        }
       }
     }
   } catch (error) {
@@ -410,6 +404,17 @@ async function main() {
     }
     return
   }
+  if (command === 'require-deployable') {
+    const directory = args[1]
+    const service = [...services, ...workerOnlyServices].find(
+      (candidate) => candidate.directory === directory,
+    )
+    if (!service) throw new Error(`${directory}: service is not registered in service-catalog.json`)
+    if (!service.deployable) {
+      throw new Error(`${directory}: service is registered with deployable false`)
+    }
+    return
+  }
   if (command === 'native-selector') {
     const directory = args[1]
     const service = services.find((candidate) => candidate.directory === directory)
@@ -421,7 +426,7 @@ async function main() {
     return
   }
   throw new Error(
-    'usage: service-catalog.mjs validate|validate-repository|list|native-manifests|require-native|native-selector',
+    'usage: service-catalog.mjs validate|validate-repository|list|native-manifests|require-native|require-deployable|native-selector',
   )
 }
 

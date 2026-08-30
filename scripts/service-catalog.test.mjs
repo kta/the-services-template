@@ -41,6 +41,41 @@ async function withCatalogFixture(catalog, services, check) {
   }
 }
 
+async function withRepositoryFixture({ services = [], workerOnlyServices = [] }, check) {
+  const root = await mkdtemp(join(tmpdir(), 'service-repository-'))
+  try {
+    await writeFixture(
+      root,
+      'service-catalog.json',
+      `${JSON.stringify({ services, workerOnlyServices })}\n`,
+    )
+    await mkdir(join(root, '.github/workflows'), { recursive: true })
+    await mkdir(join(root, 'services'), { recursive: true })
+    for (const service of [...services, ...workerOnlyServices]) {
+      if (
+        !service ||
+        typeof service !== 'object' ||
+        typeof service.directory !== 'string' ||
+        !/^[a-z][a-z0-9_]*$/.test(service.directory)
+      )
+        continue
+      await writeFixture(
+        root,
+        `services/${service.directory}/package.json`,
+        `${JSON.stringify({ name: service.package })}\n`,
+      )
+      if (Object.hasOwn(service, 'templateKind')) {
+        await writeFixture(root, `services/${service.directory}/src/web/App.tsx`, 'export {}\n')
+      } else {
+        await writeFixture(root, `services/${service.directory}/src/index.ts`, 'export {}\n')
+      }
+    }
+    await check(root)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}
+
 function validNativeWorkflow(service) {
   return `name: ${service.directory} native artifacts
 on:\n  workflow_dispatch: {}
@@ -105,6 +140,18 @@ test('allows native commands only for catalog services classified as Tauri', () 
   const webResult = runCatalog(['require-native', 'example_service'])
   assert.notEqual(webResult.status, 0)
   assert.match(webResult.stderr, /example_service.*Web-only.*native/i)
+})
+
+test('allows production selection only for catalog entries with deployable true', () => {
+  for (const service of ['admin', 'notifier', 'ops']) {
+    const result = runCatalog(['require-deployable', service])
+    assert.equal(result.status, 0, result.stderr)
+  }
+  for (const service of ['example_service', 'example_tauri_service']) {
+    const result = runCatalog(['require-deployable', service])
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr, new RegExp(`${service}.*deployable false`, 'i'))
+  }
 })
 
 test('rejects an SPA workspace that is missing from the catalog', async () => {
@@ -221,11 +268,17 @@ test('rejects workflow symlinks and orphan native workflows without reading outs
         package: '@app/orphan',
       }),
     )
+    await writeFixture(
+      root,
+      '.github/workflows/orphan-build-tauri.yml',
+      'on: {workflow_dispatch: {}}\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: pnpm --filter @app/orphan run build:tauri\n',
+    )
     try {
       const result = await validateServiceCatalog(root)
       const diagnostic = result.violations.join('\n')
       assert.match(diagnostic, /booking\.yml.*symbolic link/i)
       assert.match(diagnostic, /orphan\.yml.*not registered.*nativeWorkflow/i)
+      assert.match(diagnostic, /orphan-build-tauri\.yml.*not registered.*nativeWorkflow/i)
       assert.doesNotMatch(diagnostic, /OUTSIDE_WORKFLOW_SENTINEL/)
     } finally {
       await rm(outside, { force: true })
@@ -264,8 +317,8 @@ test('applies native workflow security policy to every catalog workflow', async 
       `${validNativeWorkflow(service).replace('  workflow_dispatch: {}', '  workflow_dispatch: {}\n  push:\n    branches: [main]')}  unprotected:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo unsafe\n`,
     )
     const diagnostic = (await validateServiceCatalog(root)).violations.join('\n')
-    assert.match(diagnostic, /booking\.yml.*manual-only.*push/i)
-    assert.match(diagnostic, /booking\.yml.*every native workflow job.*protected main/i)
+    assert.match(diagnostic, /booking\.yml.*only workflow_dispatch/i)
+    assert.match(diagnostic, /booking\.yml.*unprotected.*exact protected main predicate/i)
   })
 })
 
@@ -354,4 +407,75 @@ test('rejects a symbolic services parent without reading the external tree', asy
     await rm(root, { recursive: true, force: true })
     await rm(outside, { recursive: true, force: true })
   }
+})
+
+test('returns normalized worker-only objects and classifies every service directory exactly once', async () => {
+  const worker = { directory: 'metrics', package: '@app/metrics', deployable: true }
+  await withRepositoryFixture({ workerOnlyServices: [worker] }, async (root) => {
+    const result = await validateServiceCatalog(root)
+    assert.deepEqual(result.violations, [])
+    assert.deepEqual(result.workerOnlyServices, [worker])
+
+    await writeFixture(root, 'services/unknown/package.json', '{"name":"@app/unknown"}\n')
+    await writeFixture(root, 'services/unknown/src/index.ts', 'export {}\n')
+    const unknown = await validateServiceCatalog(root)
+    assert.match(unknown.violations.join('\n'), /unknown.*missing from service-catalog\.json/i)
+  })
+})
+
+test('rejects missing, malformed, symlinked, and web worker-only package identities', async () => {
+  const worker = { directory: 'metrics', package: '@app/metrics', deployable: true }
+  await withRepositoryFixture({ workerOnlyServices: [worker] }, async (root) => {
+    await writeFixture(root, 'services/metrics/package.json', '{"name":"@app/wrong"}\n')
+    await writeFixture(root, 'services/metrics/src/web/App.tsx', 'export {}\n')
+    const result = await validateServiceCatalog(root)
+    const diagnostic = result.violations.join('\n')
+    assert.match(diagnostic, /metrics.*package.*does not match/i)
+    assert.match(diagnostic, /metrics.*worker-only.*src\/web/i)
+    assert.deepEqual(result.workerOnlyServices, [])
+  })
+
+  await withRepositoryFixture(
+    { workerOnlyServices: [{ directory: 'ghost', package: '@app/ghost', deployable: false }] },
+    async (root) => {
+      await rm(join(root, 'services/ghost'), { recursive: true, force: true })
+      const result = await validateServiceCatalog(root)
+      assert.match(result.violations.join('\n'), /services\/ghost.*missing/i)
+    },
+  )
+
+  await withRepositoryFixture({ workerOnlyServices: [worker] }, async (root) => {
+    const outside = join(root, '..', `worker-package-${process.pid}.json`)
+    await writeFile(outside, '{"name":"@app/metrics","sentinel":"OUTSIDE_WORKER_SENTINEL"}\n')
+    await rm(join(root, 'services/metrics/package.json'))
+    await symlink(outside, join(root, 'services/metrics/package.json'))
+    try {
+      const result = await validateServiceCatalog(root)
+      assert.match(result.violations.join('\n'), /metrics\/package\.json.*symbolic link/i)
+      assert.doesNotMatch(result.violations.join('\n'), /OUTSIDE_WORKER_SENTINEL/)
+    } finally {
+      await rm(outside, { force: true })
+    }
+  })
+})
+
+test('rejects worker-only schema drift before returning entries', async () => {
+  await withRepositoryFixture(
+    {
+      workerOnlyServices: [
+        'notifier',
+        { directory: '../../outside', package: '@app/outside', deployable: true },
+        { directory: 'metrics', package: '@app/wrong', deployable: 'yes' },
+      ],
+    },
+    async (root) => {
+      const result = await validateServiceCatalog(root)
+      assert.deepEqual(result.workerOnlyServices, [])
+      const diagnostic = result.violations.join('\n')
+      assert.match(diagnostic, /workerOnlyServices\[0\].*object/i)
+      assert.match(diagnostic, /workerOnlyServices\[1\].*invalid directory/i)
+      assert.match(diagnostic, /metrics.*package must be exactly @app\/metrics/i)
+      assert.match(diagnostic, /metrics.*deployable must be boolean/i)
+    },
+  )
 })

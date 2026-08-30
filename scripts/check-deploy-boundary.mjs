@@ -863,29 +863,6 @@ for (const { directory: service } of serviceCatalog.services.filter(
   }
 }
 
-for (const workflowPath of [
-  '.github/workflows/example-tauri-build.yml',
-  '.github/workflows/tauri-build.yml',
-]) {
-  const source = await readFile(join(root, workflowPath), 'utf8')
-  if (!/workflow_dispatch:/.test(source)) {
-    violations.push(`${workflowPath} must remain manual-only`)
-  }
-  if (
-    !/if: github\.event_name == 'workflow_dispatch' && github\.ref == 'refs\/heads\/main' && github\.ref_protected == true/.test(
-      source,
-    )
-  ) {
-    violations.push(`${workflowPath} must require protected main for manual artifacts`)
-  }
-  if (/CLOUDFLARE_(?:API_TOKEN|ACCOUNT_ID)|wrangler\s+deploy/.test(source)) {
-    violations.push(`${workflowPath} must not have a Cloudflare deploy credential or command`)
-  }
-  if (!/check-tauri-boundary\.mjs/.test(source) || !/check-tauri-artifact\.mjs/.test(source)) {
-    violations.push(`${workflowPath} must run native boundary and artifact secret checks`)
-  }
-}
-
 if (violations.length > 0) {
   for (const violation of violations) console.error(violation)
   process.exitCode = 1

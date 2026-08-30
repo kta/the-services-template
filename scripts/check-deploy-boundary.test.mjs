@@ -153,6 +153,10 @@ test('production write entry points are CI-only and cannot be reached through Ma
   )
   assert.match(bootstrapWorkflow, /persist-credentials:\s*false/)
   assert.match(bootstrapWorkflow, /DOMAIN_SERVICE:\s*\$\{\{\s*inputs\.domain_service\s*\}\}/)
+  assert.equal(
+    bootstrapWorkflow.match(/service-catalog\.mjs require-deployable "\$DOMAIN_SERVICE"/g)?.length,
+    2,
+  )
   const bootstrapDomainGuards = bootstrapWorkflow
     .split('\n')
     .filter((line) => line.includes('if [[ ! "$DOMAIN_SERVICE" =~'))
@@ -388,7 +392,7 @@ test('an additional catalog native service needs no Make or deploy-test hard-cod
     await writeFile(join(fixture, 'Makefile'), await readFile(join(root, 'Makefile'), 'utf8'))
     await writeFile(
       join(fixture, service.nativeWorkflow),
-      `on:\n  workflow_dispatch: {}\nenv:\n  ANDROID_PLATFORM_API: 35\n  ANDROID_NDK_VERSION: 27.2.12479018\n  XCODEGEN_VERSION: 2.46.0\njobs:\n  build:\n    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true\n    steps:\n      - run: node scripts/check-tauri-boundary.mjs\n      - run: pnpm --filter @app/booking build:tauri\n      - run: node scripts/check-tauri-artifact.mjs services/booking/src-tauri/target\n`,
+      `on:\n  workflow_dispatch: {}\nenv:\n  ANDROID_PLATFORM_API: 35\n  ANDROID_NDK_VERSION: 27.2.12479018\n  XCODEGEN_VERSION: 2.46.0\njobs:\n  build:\n    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true\n    runs-on: ubuntu-latest\n    steps:\n      - run: node scripts/check-tauri-boundary.mjs\n      - run: pnpm --filter @app/booking build:tauri\n      - run: node scripts/check-tauri-artifact.mjs services/booking/src-tauri/target\n`,
     )
     const result = await validateServiceCatalog(fixture)
     assert.deepEqual(result.violations, [])

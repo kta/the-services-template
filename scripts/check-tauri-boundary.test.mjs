@@ -151,7 +151,7 @@ function catalogJson(extra = []) {
 }
 
 function nativeWorkflow(directory) {
-  return `on:\n  workflow_dispatch: {}\nenv:\n  ANDROID_PLATFORM_API: 35\n  ANDROID_NDK_VERSION: 27.2.12479018\n  XCODEGEN_VERSION: 2.46.0\njobs:\n  build:\n    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true\n    steps:\n      - run: node scripts/check-tauri-boundary.mjs\n      - run: pnpm --filter @app/${directory} build:tauri\n      - run: node scripts/check-tauri-artifact.mjs services/${directory}/src-tauri/target\n`
+  return `on:\n  workflow_dispatch: {}\nenv:\n  ANDROID_PLATFORM_API: 35\n  ANDROID_NDK_VERSION: 27.2.12479018\n  XCODEGEN_VERSION: 2.46.0\njobs:\n  build:\n    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true\n    runs-on: ubuntu-latest\n    steps:\n      - run: node scripts/check-tauri-boundary.mjs\n      - run: pnpm --filter @app/${directory} build:tauri\n      - run: node scripts/check-tauri-artifact.mjs services/${directory}/src-tauri/target\n`
 }
 
 function overlaysFor(directory, macOSMinimum = '10.13') {

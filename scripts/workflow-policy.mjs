@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 
 const MAX_WORKFLOW_BYTES = 1024 * 1024
 const PRODUCTION_WORKFLOWS = new Map([
@@ -11,6 +11,11 @@ const PROTECTED_MAIN_PUSH =
   "github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true"
 const PROTECTED_MAIN_DISPATCH =
   "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true"
+const NATIVE_PLATFORM_PINS = {
+  ANDROID_PLATFORM_API: 35,
+  ANDROID_NDK_VERSION: '27.2.12479018',
+  XCODEGEN_VERSION: '2.46.0',
+}
 
 // Ruby's Psych parser is available on the GitHub-hosted runner and parses the
 // complete YAML object, including block scalars. We reject duplicate mapping
@@ -22,6 +27,9 @@ require 'yaml'
 require 'json'
 
 def reject_unsafe_nodes(node)
+  if node.respond_to?(:tag) && node.tag
+    raise "explicit YAML tags are not allowed: #{node.tag}"
+  end
   case node
   when Psych::Nodes::Alias
     raise 'YAML aliases are not allowed'
@@ -52,8 +60,8 @@ def scalar_value(node)
   when 'null', 'Null', 'NULL', '~' then nil
   when 'true', 'True', 'TRUE' then true
   when 'false', 'False', 'FALSE' then false
-  when /^[-+]?d+$/ then Integer(node.value, 10)
-  when /^[-+]?(?:d+.d*|d*.d+)(?:[eE][-+]?d+)?$/ then Float(node.value)
+  when /^[-+]?\\d+$/ then Integer(node.value, 10)
+  when /^[-+]?(?:\\d+\\.\\d*|\\d*\\.\\d+)(?:[eE][-+]?\\d+)?$/ then Float(node.value)
   else node.value
   end
 end
@@ -87,12 +95,17 @@ export function parseGithubWorkflow(source) {
   if (typeof source !== 'string' || Buffer.byteLength(source, 'utf8') > MAX_WORKFLOW_BYTES) {
     throw new Error('workflow YAML is missing or too large')
   }
-  const output = execFileSync('ruby', ['-e', RUBY_YAML_TO_JSON], {
+  const result = spawnSync('ruby', ['-e', RUBY_YAML_TO_JSON], {
     input: source,
     encoding: 'utf8',
     maxBuffer: MAX_WORKFLOW_BYTES * 2,
   })
-  const value = JSON.parse(output)
+  if (result.error) throw result.error
+  if (result.status !== 0) {
+    const diagnostic = result.stderr.trim().split('\n')[0] || 'Ruby YAML parser failed'
+    throw new Error(diagnostic)
+  }
+  const value = JSON.parse(result.stdout)
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('workflow YAML root must be a mapping')
   }
@@ -109,6 +122,158 @@ function hasProductionMarker(value) {
 
 function isMapping(value) {
   return value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function actualShellCommands(run) {
+  if (typeof run !== 'string') return []
+  return run
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#') && !/^echo\b/.test(line))
+}
+
+function nativeCapabilityMaterial(value) {
+  if (!isMapping(value)) return false
+  for (const [name, raw] of Object.entries(value)) {
+    if (/^CLOUDFLARE_(?:API_TOKEN|ACCOUNT_ID)$/.test(name)) return true
+    if (name === 'id-token' && raw === 'write') return true
+    if (/secrets\.PRODUCTION_|secrets\.CLOUDFLARE_/.test(String(raw))) return true
+  }
+  return false
+}
+
+/**
+ * Validate a catalog-owned manual native artifact workflow from parsed YAML
+ * nodes. Comments are discarded by the YAML parser and command evidence must
+ * be an executable shell line, so an echo or comment cannot satisfy policy.
+ */
+export function inspectNativeWorkflowPolicy(workflowPath, source, service) {
+  const violations = []
+  let workflow
+  try {
+    workflow = parseGithubWorkflow(source)
+  } catch (error) {
+    return [
+      `${workflowPath}: native workflow is not valid safe YAML: ${error instanceof Error ? error.message : 'parse error'}`,
+    ]
+  }
+  if (
+    !isMapping(workflow.on) ||
+    Object.keys(workflow.on).length !== 1 ||
+    !Object.hasOwn(workflow.on, 'workflow_dispatch')
+  ) {
+    violations.push(`${workflowPath}: native workflow on must contain only workflow_dispatch`)
+  }
+  if (!isMapping(workflow.jobs) || Object.keys(workflow.jobs).length === 0) {
+    violations.push(`${workflowPath}: native workflow jobs must be a non-empty mapping`)
+    return violations
+  }
+  if (nativeCapabilityMaterial(workflow.env) || nativeCapabilityMaterial(workflow.permissions)) {
+    violations.push(
+      `${workflowPath}: native workflow must not receive a Cloudflare credential or production capability`,
+    )
+  }
+  for (const [name, expected] of Object.entries(NATIVE_PLATFORM_PINS)) {
+    if (!isMapping(workflow.env) || String(workflow.env[name]) !== String(expected)) {
+      violations.push(`${workflowPath}: native workflow is missing required platform pin ${name}`)
+    }
+  }
+
+  for (const [jobName, job] of objectEntries(workflow.jobs)) {
+    if (!isMapping(job)) {
+      violations.push(`${workflowPath}:${jobName} must be a job mapping`)
+      continue
+    }
+    if (typeof job['runs-on'] !== 'string' || job['runs-on'].trim() === '') {
+      violations.push(`${workflowPath}:${jobName} must declare runs-on`)
+    }
+    if (job.if !== PROTECTED_MAIN_DISPATCH) {
+      violations.push(`${workflowPath}:${jobName} must require the exact protected main predicate`)
+    }
+    if (nativeCapabilityMaterial(job.env) || nativeCapabilityMaterial(job.permissions)) {
+      violations.push(
+        `${workflowPath}:${jobName} must not receive a Cloudflare credential or production capability`,
+      )
+    }
+    if (!Array.isArray(job.steps) || job.steps.length === 0) {
+      violations.push(`${workflowPath}:${jobName} must declare executable steps`)
+      continue
+    }
+    const commands = []
+    for (const [index, step] of job.steps.entries()) {
+      if (!isMapping(step)) {
+        violations.push(`${workflowPath}:${jobName}:steps[${index}] must be a mapping`)
+        continue
+      }
+      if (nativeCapabilityMaterial(step.env)) {
+        violations.push(
+          `${workflowPath}:${jobName} must not receive a Cloudflare credential or production capability`,
+        )
+      }
+      if (typeof step.uses === 'string' && !/@[0-9a-f]{40}$/i.test(step.uses)) {
+        violations.push(
+          `${workflowPath}:${jobName} action ${step.uses} must be pinned to a full commit SHA`,
+        )
+      }
+      if (typeof step.uses === 'string' && /^cloudflare\//i.test(step.uses)) {
+        violations.push(
+          `${workflowPath}:${jobName} must not receive a Cloudflare credential or production capability`,
+        )
+      }
+      commands.push(...actualShellCommands(step.run))
+    }
+    if (!commands.some((line) => /^node scripts\/check-tauri-boundary\.mjs(?:\s|$)/.test(line))) {
+      violations.push(`${workflowPath}:${jobName} must run the Tauri boundary checker`)
+    }
+    if (!commands.some((line) => /^node scripts\/check-tauri-artifact\.mjs(?:\s|$)/.test(line))) {
+      violations.push(`${workflowPath}:${jobName} must run the Tauri artifact checker`)
+    }
+    const buildPackages = commands
+      .flatMap((line) => [
+        ...line.matchAll(
+          /\bpnpm\s+--filter\s+(@app\/[a-z][a-z0-9_]*)\s+(?:(?:run\s+)?build:tauri|exec\s+tauri\s+(?:build|ios\s+build|android\s+build))/g,
+        ),
+      ])
+      .map((match) => match[1])
+    if (buildPackages.length === 0 || buildPackages.some((name) => name !== service.package)) {
+      violations.push(`${workflowPath}:${jobName} must build only ${service.package}`)
+    }
+    if (
+      !commands.some(
+        (line) =>
+          /^node scripts\/check-tauri-artifact\.mjs(?:\s|$)/.test(line) &&
+          line.includes(`services/${service.directory}/src-tauri`),
+      )
+    ) {
+      violations.push(
+        `${workflowPath}:${jobName} artifact checker must inspect services/${service.directory}/src-tauri`,
+      )
+    }
+    if (
+      commands.some((line) => /\bwrangler\s+deploy\b/.test(line)) ||
+      commands.some((line) => /secrets\.PRODUCTION_|secrets\.CLOUDFLARE_/.test(line))
+    ) {
+      violations.push(
+        `${workflowPath}:${jobName} must not receive a Cloudflare credential or production capability`,
+      )
+    }
+  }
+  return [...new Set(violations)]
+}
+
+export function workflowContainsNativeBuild(source) {
+  const workflow = parseGithubWorkflow(source)
+  for (const [, job] of objectEntries(workflow.jobs)) {
+    if (!Array.isArray(job?.steps)) continue
+    for (const step of job.steps) {
+      for (const command of actualShellCommands(step?.run)) {
+        if (/\b(?:build:tauri|tauri\s+(?:build|ios\s+build|android\s+build))\b/.test(command)) {
+          return true
+        }
+      }
+    }
+  }
+  return false
 }
 
 function exactPermissions(job, expected) {

@@ -1,5 +1,8 @@
 {
-  "workerOnlyServices": ["notifier", "ops"],
+  "workerOnlyServices": [
+    { "directory": "notifier", "package": "@app/notifier", "deployable": true },
+    { "directory": "ops", "package": "@app/ops", "deployable": true }
+  ],
   "services": [
     {
       "directory": "admin",
