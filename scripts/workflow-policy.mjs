@@ -608,6 +608,19 @@ export function inspectNativeWorkflowPolicy(workflowPath, source, service) {
     violations.push(`${workflowPath}: native workflow defaults and custom shells are forbidden`)
   }
   const reviewedJobs = reviewedNativeJobs(service.directory)
+  const actualJobNames = Object.keys(workflow.jobs).sort()
+  const reviewedJobNames = Object.keys(reviewedJobs).sort()
+  const missingJobs = reviewedJobNames.filter((name) => !actualJobNames.includes(name))
+  const extraJobs = actualJobNames.filter((name) => !reviewedJobNames.includes(name))
+  if (missingJobs.length > 0 || extraJobs.length > 0) {
+    const details = [
+      missingJobs.length > 0 ? `missing ${missingJobs.join(', ')}` : undefined,
+      extraJobs.length > 0 ? `extra ${extraJobs.join(', ')}` : undefined,
+    ].filter(Boolean)
+    violations.push(
+      `${workflowPath}: native workflow job set must match the reviewed jobs (${details.join('; ')})`,
+    )
+  }
   for (const [name, expected] of Object.entries(NATIVE_PLATFORM_PINS)) {
     if (!isMapping(workflow.env) || String(workflow.env[name]) !== String(expected)) {
       violations.push(`${workflowPath}: native workflow is missing required platform pin ${name}`)

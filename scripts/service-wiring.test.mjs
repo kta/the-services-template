@@ -533,18 +533,21 @@ test('rejects inherited production execution overrides at workflow and job scope
   }
 })
 
-test('validates admin domain binding and secret tuples through config, generated Env, and executable runtime adapter', () => {
+test('validates three admin domain tuples through config, generated Env, and executable orchestration', () => {
   const booking = { directory: 'booking', package: '@app/booking', deployable: true }
   const inventory = { directory: 'inventory', package: '@app/inventory', deployable: true }
-  const catalog = { services: [...services, booking, inventory], workerOnlyServices }
+  const shipping = { directory: 'shipping', package: '@app/shipping', deployable: true }
+  const catalog = { services: [...services, booking, inventory, shipping], workerOnlyServices }
   const runtimeIdentity = JSON.stringify([
     { directory: 'booking', binding: 'BOOKING', secret: 'ADMIN_TO_BOOKING_KEY' },
     { directory: 'inventory', binding: 'INVENTORY', secret: 'ADMIN_TO_INVENTORY_KEY' },
+    { directory: 'shipping', binding: 'SHIPPING', secret: 'ADMIN_TO_SHIPPING_KEY' },
   ])
   const validAdminConfig = {
     services: [
       { binding: 'BOOKING', service: 'booking' },
       { binding: 'INVENTORY', service: 'inventory' },
+      { binding: 'SHIPPING', service: 'shipping' },
       { binding: 'NOTIFIER', service: 'notifier' },
     ],
     secrets: {
@@ -552,6 +555,7 @@ test('validates admin domain binding and secret tuples through config, generated
         'DOMAIN_TO_ADMIN_KEY',
         'ADMIN_TO_BOOKING_KEY',
         'ADMIN_TO_INVENTORY_KEY',
+        'ADMIN_TO_SHIPPING_KEY',
         'ADMIN_TO_NOTIFIER_KEY',
         'JWT_PRIVATE_KEY',
         'JWT_PUBLIC_KEY',
@@ -564,12 +568,18 @@ test('validates admin domain binding and secret tuples through config, generated
     const sources = validSources()
     sources.adminConfig = JSON.stringify(validAdminConfig)
     sources.opsConfig = JSON.stringify({
-      vars: { ADMIN_DB_ID: 'id', BOOKING_DB_ID: 'id', INVENTORY_DB_ID: 'id' },
+      vars: {
+        ADMIN_DB_ID: 'id',
+        BOOKING_DB_ID: 'id',
+        INVENTORY_DB_ID: 'id',
+        SHIPPING_DB_ID: 'id',
+      },
       services: [
         { binding: 'ADMIN', service: 'admin' },
         { binding: 'NOTIFIER', service: 'notifier' },
         { binding: 'BOOKING', service: 'booking' },
         { binding: 'INVENTORY', service: 'inventory' },
+        { binding: 'SHIPPING', service: 'shipping' },
       ],
     })
     sources.opsSource = `
@@ -577,25 +587,17 @@ test('validates admin domain binding and secret tuples through config, generated
       { name: 'notifier', healthBinding: env.NOTIFIER },
       { name: 'booking', databaseId: env.BOOKING_DB_ID, healthBinding: env.BOOKING },
       { name: 'inventory', databaseId: env.INVENTORY_DB_ID, healthBinding: env.INVENTORY },
+      { name: 'shipping', databaseId: env.SHIPPING_DB_ID, healthBinding: env.SHIPPING },
     `
-    sources.adminGeneratedEnv = `
-      interface __BaseEnv_Env {
-        ADMIN_DOMAIN_IDENTITIES: string;
-        BOOKING: Fetcher;
-        INVENTORY: Fetcher;
-        ADMIN_TO_BOOKING_KEY: string;
-        ADMIN_TO_INVENTORY_KEY: string;
-      }
-    `
-    sources.adminSyncSource = `
-      // environment[identity.binding]
-      // environment[identity.secret]
-      function unused(identity, environment) {
-        return [environment[identity.binding], environment[identity.secret]]
-      }
-      const binding = environment.BOOKING
-      const secret = environment.ADMIN_TO_BOOKING_KEY
-    `
+    sources.adminGeneratedEnv = `interface __BaseEnv_Env {
+  ADMIN_DOMAIN_IDENTITIES: string;
+  BOOKING: Fetcher;
+  INVENTORY: Fetcher;
+  SHIPPING: Fetcher;
+  ADMIN_TO_BOOKING_KEY: string;
+  ADMIN_TO_INVENTORY_KEY: string;
+  ADMIN_TO_SHIPPING_KEY: string;
+}`
     return sources
   }
 
@@ -605,6 +607,7 @@ test('validates admin domain binding and secret tuples through config, generated
     services: [
       { binding: 'INVENTORY', service: 'booking' },
       { binding: 'INVENTORY', service: 'inventory' },
+      { binding: 'SHIPPING', service: 'shipping' },
       { binding: 'NOTIFIER', service: 'notifier' },
     ],
   })
@@ -624,23 +627,39 @@ test('validates admin domain binding and secret tuples through config, generated
 
   const missingGeneratedBinding = complete()
   missingGeneratedBinding.adminGeneratedEnv =
-    'interface __BaseEnv_Env { ADMIN_DOMAIN_IDENTITIES: string; ADMIN_TO_BOOKING_KEY: string; ADMIN_TO_INVENTORY_KEY: string; }'
+    'interface __BaseEnv_Env {\n  ADMIN_DOMAIN_IDENTITIES: string;\n  ADMIN_TO_BOOKING_KEY: string;\n  ADMIN_TO_INVENTORY_KEY: string;\n  ADMIN_TO_SHIPPING_KEY: string;\n}'
   assert.match(
     validateServiceWiringSources(catalog, missingGeneratedBinding).join('\n'),
     /generated Env domain binding.*missing BOOKING/i,
   )
 
-  const sourceSpoof = complete()
+  assert.doesNotMatch(
+    validateServiceWiringSources(catalog, complete()).join('\n'),
+    /executable runtime domain orchestration/i,
+  )
+
+  const hardCodedOrchestration = complete()
+  const hardCodedDiagnostic = validateServiceWiringSources(catalog, hardCodedOrchestration, {
+    orchestrateDomainSyncIdentities(environment, identities, operation) {
+      for (const identity of identities) {
+        operation(
+          {
+            directory: identity.directory,
+            binding: environment.BOOKING,
+            key: environment.ADMIN_TO_BOOKING_KEY,
+          },
+          identity,
+        )
+      }
+      return Promise.resolve(true)
+    },
+  }).join('\n')
   assert.match(
-    validateServiceWiringSources(catalog, sourceSpoof, {
-      resolveDomainSyncIdentity(environment, identity) {
-        return {
-          directory: identity.directory,
-          binding: environment.BOOKING,
-          key: environment.ADMIN_TO_BOOKING_KEY,
-        }
-      },
-    }).join('\n'),
-    /executable runtime domain adapter.*inventory/i,
+    hardCodedDiagnostic,
+    /executable runtime domain orchestration request sync.*inventory/i,
+  )
+  assert.match(
+    hardCodedDiagnostic,
+    /executable runtime domain orchestration scheduled reconcile.*shipping/i,
   )
 })

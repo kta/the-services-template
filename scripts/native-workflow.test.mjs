@@ -1,13 +1,35 @@
 import assert from 'node:assert/strict'
-import { join } from 'node:path'
+import { execFile } from 'node:child_process'
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { delimiter, join } from 'node:path'
 import test from 'node:test'
-import { nativeWorkflowChildEnvironment, nativeWorkflowInvocation } from './native-workflow.mjs'
+import { promisify } from 'node:util'
+import {
+  assertNativeWorkflowExecutorContext,
+  nativeWorkflowChildEnvironment,
+  nativeWorkflowInvocation,
+} from './native-workflow.mjs'
+
+const execFileAsync = promisify(execFile)
 
 const root = '/workspace'
 const service = {
   directory: 'booking',
   package: '@app/booking',
   native: true,
+  nativeWorkflow: '.github/workflows/booking-tauri-build.yml',
+}
+
+const validGithubContext = {
+  GITHUB_ACTIONS: 'true',
+  GITHUB_EVENT_NAME: 'workflow_dispatch',
+  GITHUB_REF: 'refs/heads/main',
+  GITHUB_REF_PROTECTED: 'true',
+  GITHUB_REPOSITORY: 'acme/services',
+  GITHUB_WORKFLOW_REF: 'acme/services/.github/workflows/booking-tauri-build.yml@refs/heads/main',
+  GITHUB_RUN_ID: '123456',
+  GITHUB_WORKSPACE: root,
 }
 
 test('derives native build and verifier argv only from normalized catalog identity', () => {
@@ -17,7 +39,7 @@ test('derives native build and verifier argv only from normalized catalog identi
     args: [
       '--filter',
       '@app/booking',
-      'exec',
+      'run',
       'tauri',
       'build',
       '--debug',
@@ -96,4 +118,86 @@ test('rejects unknown actions and identities before forming a filesystem path or
       ),
     /normalized catalog identity/i,
   )
+})
+
+test('requires the catalog manual protected-main executor context in GitHub Actions', () => {
+  assert.doesNotThrow(() => assertNativeWorkflowExecutorContext(root, service, validGithubContext))
+  assert.doesNotThrow(() =>
+    assertNativeWorkflowExecutorContext(root, service, { GITHUB_ACTIONS: 'false' }),
+  )
+
+  for (const [name, value] of [
+    ['GITHUB_EVENT_NAME', 'push'],
+    ['GITHUB_REF', 'refs/heads/feature'],
+    ['GITHUB_REF_PROTECTED', 'false'],
+    ['GITHUB_WORKFLOW_REF', 'acme/services/.github/workflows/ci.yml@refs/heads/main'],
+    ['GITHUB_RUN_ID', 'not-a-run'],
+    ['GITHUB_WORKSPACE', '/different/workspace'],
+  ]) {
+    assert.throws(
+      () =>
+        assertNativeWorkflowExecutorContext(root, service, {
+          ...validGithubContext,
+          [name]: value,
+        }),
+      /registered manual protected-main native executor/i,
+      name,
+    )
+  }
+})
+
+test('registered wrapper issues a bounded package-build capability in the same executor', async () => {
+  const fixture = await mkdtemp(join(tmpdir(), 'native-workflow-capability-'))
+  const fakePnpm = join(fixture, 'pnpm')
+  const marker = join(fixture, 'guard-ran')
+  await writeFile(
+    fakePnpm,
+    `#!/bin/sh
+set -eu
+cd "$GITHUB_WORKSPACE/services/admin"
+node ../../scripts/native-workflow.mjs package-guard
+case " $* " in
+  *" build "*)
+    node ../../scripts/native-workflow.mjs package-guard
+    if node ../../scripts/native-workflow.mjs package-guard 2>/dev/null; then exit 91; fi
+    ;;
+  *)
+    if node ../../scripts/native-workflow.mjs package-guard 2>/dev/null; then exit 92; fi
+    ;;
+esac
+printf guarded > "$RUNNER_TEMP/guard-ran"
+`,
+  )
+  await chmod(fakePnpm, 0o700)
+  const github = {
+    ...validGithubContext,
+    GITHUB_WORKSPACE: process.cwd(),
+    GITHUB_WORKFLOW_REF: 'acme/services/.github/workflows/tauri-build.yml@refs/heads/main',
+    RUNNER_TEMP: fixture,
+    PATH: `${fixture}${delimiter}${process.env.PATH}`,
+  }
+  try {
+    for (const action of ['build-macos', 'init-ios', 'init-android']) {
+      await execFileAsync(
+        process.execPath,
+        [join(process.cwd(), 'scripts/native-workflow.mjs'), 'admin', action],
+        { cwd: process.cwd(), env: github },
+      )
+    }
+    assert.equal(await readFile(marker, 'utf8'), 'guarded')
+
+    await assert.rejects(
+      execFileAsync(
+        process.execPath,
+        [join(process.cwd(), 'scripts/native-workflow.mjs'), 'package-guard'],
+        { cwd: join(process.cwd(), 'services/admin'), env: github },
+      ),
+      (error) => {
+        assert.match(error.stderr, /native workflow package-build capability/i)
+        return true
+      },
+    )
+  } finally {
+    await rm(fixture, { recursive: true, force: true })
+  }
 })

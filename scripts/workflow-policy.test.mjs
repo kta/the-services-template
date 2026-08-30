@@ -307,9 +307,16 @@ jobs:
 ${overrides}`
 }
 
-test('native workflow policy validates actual trigger, job, step, and pin nodes', () => {
+test('native workflow policy validates actual trigger, job, step, and pin nodes', async () => {
+  const checkedIn = await readFile(
+    join(process.cwd(), '.github/workflows/example-tauri-build.yml'),
+    'utf8',
+  )
   assert.deepEqual(
-    inspectNativeWorkflowPolicy('.github/workflows/booking.yml', nativeWorkflow(), nativeService),
+    inspectNativeWorkflowPolicy('.github/workflows/example-tauri-build.yml', checkedIn, {
+      directory: 'example_tauri_service',
+      package: '@app/example_tauri_service',
+    }),
     [],
   )
   for (const trigger of ['pull_request_target', 'workflow_run', 'issue_comment']) {
@@ -686,6 +693,50 @@ test('registered native workflow exact profile covers runner, uses, with, and fu
       /reviewed exact job profile/i,
     )
   }
+})
+
+function withoutNativeJob(source, jobName) {
+  const start = source.indexOf(`\n  ${jobName}:\n`)
+  assert.notEqual(start, -1, `missing fixture job ${jobName}`)
+  const remaining = source.slice(start + 1)
+  const next = remaining.search(/\n {2}[a-z][a-z0-9-]*:\n/)
+  return next < 0 ? source.slice(0, start) : source.slice(0, start) + remaining.slice(next)
+}
+
+test('registered native workflow requires the exact reviewed platform job set', async () => {
+  const source = await readFile(
+    join(process.cwd(), '.github/workflows/example-tauri-build.yml'),
+    'utf8',
+  )
+  const service = {
+    directory: 'example_tauri_service',
+    package: '@app/example_tauri_service',
+  }
+  for (const jobName of [
+    'macos-universal',
+    'ios-simulator',
+    'android-debug-apk',
+    'android-debug-aab',
+  ]) {
+    assert.match(
+      inspectNativeWorkflowPolicy(
+        '.github/workflows/example-tauri-build.yml',
+        withoutNativeJob(source, jobName),
+        service,
+      ).join('\n'),
+      new RegExp(`job set.*missing ${jobName}`, 'i'),
+    )
+  }
+
+  const unknownJob = `${source}\n  rogue-native:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo rogue\n`
+  assert.match(
+    inspectNativeWorkflowPolicy(
+      '.github/workflows/example-tauri-build.yml',
+      unknownJob,
+      service,
+    ).join('\n'),
+    /job set.*extra rogue-native/i,
+  )
 })
 
 test('native wrapper must be launched through the captured trusted absolute Node path', () => {

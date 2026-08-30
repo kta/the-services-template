@@ -1,6 +1,7 @@
 import type { Organization } from '@app/contracts'
 import type { Fetcher } from '@cloudflare/workers-types'
 import { describe, expect, it, vi } from 'vitest'
+import { orchestrateDomainSyncIdentities } from '../src/worker/domain-sync-orchestration.mjs'
 import {
   configuredDomainSyncEnvironments,
   listDomainOrgs,
@@ -27,6 +28,49 @@ function binding(response: Response | Error) {
 }
 
 describe('admin → domain service binding timeout boundary', () => {
+  it.each(['parallel', 'sequential'] as const)(
+    'runs the same %s orchestration across three computed tuples and continues after the first failure',
+    async (concurrency) => {
+      const identities = [
+        { directory: 'booking', binding: 'BOOKING', secret: 'ADMIN_TO_BOOKING_KEY' },
+        { directory: 'inventory', binding: 'INVENTORY', secret: 'ADMIN_TO_INVENTORY_KEY' },
+        { directory: 'shipping', binding: 'SHIPPING', secret: 'ADMIN_TO_SHIPPING_KEY' },
+      ]
+      const environment = Object.fromEntries(
+        identities.flatMap((identity) => [
+          [identity.binding, { fetch: vi.fn() }],
+          [identity.secret, `${identity.directory}-key`],
+        ]),
+      )
+      const calls: Array<{ directory: string; binding: unknown; key: string }> = []
+      const failures: string[] = []
+
+      const successful = await orchestrateDomainSyncIdentities(
+        environment,
+        identities,
+        async (target) => {
+          calls.push(target)
+          if (target.directory === 'booking') throw new Error('booking unavailable')
+          return true
+        },
+        {
+          concurrency,
+          onFailure(identity) {
+            failures.push(identity.directory)
+          },
+        },
+      )
+
+      expect(successful).toBe(false)
+      expect(calls.map(({ directory }) => directory)).toEqual(['booking', 'inventory', 'shipping'])
+      expect(calls.map(({ binding }) => binding)).toEqual(
+        identities.map((identity) => environment[identity.binding]),
+      )
+      expect(calls.map(({ key }) => key)).toEqual(['booking-key', 'inventory-key', 'shipping-key'])
+      expect(failures).toEqual(['booking'])
+    },
+  )
+
   it('adds an AbortSignal timeout to org sync requests', async () => {
     const { fetchSpy, fetch } = binding(Response.json(org))
     const result = await syncOrgToDomain(

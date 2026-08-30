@@ -1,12 +1,129 @@
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { resolveDomainSyncIdentity as resolveAdminDomainSyncIdentity } from '../services/admin/src/worker/domain-sync-identity.mjs'
+import * as ts from 'typescript/unstable/ast'
+import { API as TypeScriptAPI } from 'typescript/unstable/sync'
+import { orchestrateDomainSyncIdentities as orchestrateAdminDomainSyncIdentities } from '../services/admin/src/worker/domain-sync-orchestration.mjs'
 import { parseJsonc, productionDomainIdentity } from './check-production-config.mjs'
 import { parseGithubWorkflow } from './workflow-policy.mjs'
 
 function mapping(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : undefined
+}
+
+const ADMIN_ORCHESTRATION_MODULE = './domain-sync-orchestration.mjs'
+const ADMIN_ORCHESTRATION_EXPORT = 'orchestrateDomainSyncIdentities'
+
+function unwrapCallExpression(expression) {
+  let current = expression
+  while (current && (ts.isAwaitExpression(current) || ts.isParenthesizedExpression(current))) {
+    current = current.expression
+  }
+  return ts.isCallExpression(current) ? current : undefined
+}
+
+function callsAdminOrchestration(expression) {
+  const call = unwrapCallExpression(expression)
+  return ts.isIdentifier(call?.expression) && call.expression.text === ADMIN_ORCHESTRATION_EXPORT
+}
+
+function hasNamedOrchestrationImport(sourceFile) {
+  return sourceFile.statements.some((statement) => {
+    if (
+      !ts.isImportDeclaration(statement) ||
+      !ts.isStringLiteral(statement.moduleSpecifier) ||
+      statement.moduleSpecifier.text !== ADMIN_ORCHESTRATION_MODULE
+    ) {
+      return false
+    }
+    const bindings = statement.importClause?.namedBindings
+    return (
+      bindings &&
+      ts.isNamedImports(bindings) &&
+      bindings.elements.some(
+        (element) =>
+          element.name.text === ADMIN_ORCHESTRATION_EXPORT &&
+          (element.propertyName?.text ?? element.name.text) === ADMIN_ORCHESTRATION_EXPORT,
+      )
+    )
+  })
+}
+
+function declaredFunction(sourceFile, name) {
+  return sourceFile.statements.find(
+    (statement) =>
+      ts.isFunctionDeclaration(statement) && statement.name?.text === name && statement.body,
+  )
+}
+
+function containsDirectDomainIteration(functionNode) {
+  let forbidden = false
+  function visit(node) {
+    if (forbidden) return
+    if (
+      ts.isForStatement(node) ||
+      ts.isForInStatement(node) ||
+      ts.isForOfStatement(node) ||
+      (ts.isCallExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === 'resolveDomainSyncIdentity')
+    ) {
+      forbidden = true
+      return
+    }
+    node.forEachChild(visit)
+  }
+  functionNode.body?.forEachChild(visit)
+  return forbidden
+}
+
+function validatesAdminOrchestrationCallPath(sourceFile, functionName, mode) {
+  if (!hasNamedOrchestrationImport(sourceFile)) return false
+  const functionNode = declaredFunction(sourceFile, functionName)
+  if (!functionNode?.body || containsDirectDomainIteration(functionNode)) return false
+  if (mode === 'return') {
+    const returns = functionNode.body.statements.filter(ts.isReturnStatement)
+    return callsAdminOrchestration(returns.at(-1)?.expression)
+  }
+  return functionNode.body.statements.some(
+    (statement) =>
+      ts.isExpressionStatement(statement) && callsAdminOrchestration(statement.expression),
+  )
+}
+
+export async function validateAdminDomainOrchestrationFiles(root) {
+  const paths = {
+    sync: join(root, 'services/admin/src/worker/sync.ts'),
+    worker: join(root, 'services/admin/src/worker/index.ts'),
+  }
+  const violations = []
+  const typeScriptApi = new TypeScriptAPI({ cwd: root })
+  const snapshot = typeScriptApi.updateSnapshot({ openFiles: Object.values(paths) })
+  try {
+    const sourceFile = (path) => {
+      const project = snapshot.getDefaultProjectForFile(path) ?? snapshot.getProjects()[0]
+      return project?.program.getSourceFile(path)
+    }
+    const sync = sourceFile(paths.sync)
+    if (
+      !sync ||
+      !validatesAdminOrchestrationCallPath(sync, 'syncOrgToConfiguredDomains', 'return')
+    ) {
+      violations.push(
+        'services/admin/src/worker/sync.ts production domain orchestration call path must return the shared executable orchestrator',
+      )
+    }
+    const worker = sourceFile(paths.worker)
+    if (!worker || !validatesAdminOrchestrationCallPath(worker, 'scheduled', 'statement')) {
+      violations.push(
+        'services/admin/src/worker/index.ts scheduled domain orchestration call path must execute the shared executable orchestrator',
+      )
+    }
+  } finally {
+    snapshot.dispose()
+    typeScriptApi.close()
+  }
+  return violations
 }
 
 function steps(workflow, jobName) {
@@ -59,7 +176,7 @@ function parseRuntimeDomainIdentityTuples(value, violations) {
   })
 }
 
-function validateExecutableRuntimeDomainAdapter(domainIdentities, resolver, violations) {
+function validateExecutableRuntimeDomainOrchestration(domainIdentities, orchestrator, violations) {
   const environment = Object.create(null)
   const expected = new Map()
   for (const identity of domainIdentities) {
@@ -69,22 +186,46 @@ function validateExecutableRuntimeDomainAdapter(domainIdentities, resolver, viol
     environment[identity.secret] = secret
     expected.set(identity.directory, { binding, secret })
   }
-  for (const identity of domainIdentities) {
+  for (const pathName of ['request sync', 'scheduled reconcile']) {
+    const calls = []
     try {
-      const resolved = resolver(environment, identity)
-      const target = expected.get(identity.directory)
-      if (
-        resolved?.directory !== identity.directory ||
-        resolved?.binding !== target?.binding ||
-        resolved?.key !== target?.secret
-      ) {
+      const result = orchestrator(
+        environment,
+        domainIdentities,
+        (resolved, identity) => {
+          calls.push({ resolved, identity })
+          return true
+        },
+        { concurrency: 'parallel' },
+      )
+      if (!result || typeof result.then !== 'function') {
         violations.push(
-          `admin executable runtime domain adapter must resolve ${identity.directory} through ${identity.binding} and ${identity.secret}`,
+          `admin executable runtime domain orchestration ${pathName} must return a Promise`,
         )
       }
+      result?.catch?.(() => {})
     } catch (error) {
       violations.push(
-        `admin executable runtime domain adapter failed for ${identity.directory}: ${error instanceof Error ? error.message : 'failure'}`,
+        `admin executable runtime domain orchestration ${pathName} failed: ${error instanceof Error ? error.message : 'failure'}`,
+      )
+    }
+    for (const [index, identity] of domainIdentities.entries()) {
+      const call = calls[index]
+      const target = expected.get(identity.directory)
+      if (
+        call?.identity !== identity ||
+        call?.resolved?.directory !== identity.directory ||
+        call?.resolved?.binding !== target?.binding ||
+        call?.resolved?.key !== target?.secret
+      ) {
+        violations.push(
+          `admin executable runtime domain orchestration ${pathName} must call ${identity.directory} through ${identity.binding} and ${identity.secret}`,
+        )
+      }
+    }
+    if (calls.length !== domainIdentities.length) {
+      violations.push(
+        `admin executable runtime domain orchestration ${pathName} must call every catalog domain exactly once`,
       )
     }
   }
@@ -770,9 +911,9 @@ export function validateServiceWiringSources(catalog, sources, adapters = {}) {
         parseRuntimeDomainIdentityTuples(adminConfig.vars?.ADMIN_DOMAIN_IDENTITIES, violations),
         violations,
       )
-      validateExecutableRuntimeDomainAdapter(
+      validateExecutableRuntimeDomainOrchestration(
         domainIdentities,
-        adapters.resolveDomainSyncIdentity ?? resolveAdminDomainSyncIdentity,
+        adapters.orchestrateDomainSyncIdentities ?? orchestrateAdminDomainSyncIdentities,
         violations,
       )
 
@@ -1054,15 +1195,18 @@ export async function validateServiceWiring(root, catalog) {
     readFile(join(root, 'services/ops/wrangler.jsonc'), 'utf8'),
     readFile(join(root, 'services/ops/src/index.ts'), 'utf8'),
   ])
-  return validateServiceWiringSources(catalog, {
-    makefile,
-    packageJson,
-    ci,
-    bootstrap,
-    productionChecker,
-    adminConfig,
-    adminGeneratedEnv,
-    opsConfig,
-    opsSource,
-  })
+  return [
+    ...validateServiceWiringSources(catalog, {
+      makefile,
+      packageJson,
+      ci,
+      bootstrap,
+      productionChecker,
+      adminConfig,
+      adminGeneratedEnv,
+      opsConfig,
+      opsSource,
+    }),
+    ...(await validateAdminDomainOrchestrationFiles(root)),
+  ]
 }

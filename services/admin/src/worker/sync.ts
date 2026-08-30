@@ -3,10 +3,14 @@ import type { AppType as ExampleAppType } from '@app/example_service'
 import type { Fetcher } from '@cloudflare/workers-types'
 import { hc } from 'hono/client'
 import { z } from 'zod'
-import { type DomainSyncIdentity, resolveDomainSyncIdentity } from './domain-sync-identity.mjs'
+import {
+  type DomainSyncIdentity,
+  orchestrateDomainSyncIdentities,
+  resolveDomainSyncIdentity,
+} from './domain-sync-orchestration.mjs'
 
-export type { DomainSyncIdentity } from './domain-sync-identity.mjs'
-export { resolveDomainSyncIdentity } from './domain-sync-identity.mjs'
+export type { DomainSyncIdentity } from './domain-sync-orchestration.mjs'
+export { resolveDomainSyncIdentity } from './domain-sync-orchestration.mjs'
 
 /**
  * admin → catalog deployable domain の service binding helper。
@@ -109,17 +113,17 @@ export async function syncOrgToConfiguredDomains(
     console.error('failed to parse configured domain sync identities', error)
     return false
   }
-  const results = await Promise.all(
-    identities.map(async (identity) => {
-      try {
-        return await syncOrgToDomain(resolveDomainSyncIdentity(environment, identity), org)
-      } catch (error) {
+  return orchestrateDomainSyncIdentities(
+    environment,
+    identities,
+    (target) => syncOrgToDomain(target, org),
+    {
+      concurrency: 'parallel',
+      onFailure(identity, error) {
         console.error(`failed to resolve domain sync target ${identity.directory}`, error)
-        return false
-      }
-    }),
+      },
+    },
   )
-  return results.every(Boolean)
 }
 
 export async function syncOrgToDomains(

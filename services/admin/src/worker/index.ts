@@ -48,12 +48,12 @@ import {
   refreshTokens,
   users,
 } from './db/schema'
+import { orchestrateDomainSyncIdentities } from './domain-sync-orchestration.mjs'
 import { reconcileOrgs } from './reconcile'
 import {
   configuredDomainSyncIdentities,
   type DomainSyncIdentity,
   listDomainOrgs,
-  resolveDomainSyncIdentity,
   syncOrgToConfiguredDomains,
   syncOrgToDomain,
 } from './sync'
@@ -703,9 +703,10 @@ async function scheduled(_event: unknown, env: Bindings, _ctx?: unknown): Promis
     await reportReconcileFailure(env, 'configuration', error)
     return
   }
-  for (const identity of identities) {
-    try {
-      const syncEnv = resolveDomainSyncIdentity(env, identity)
+  await orchestrateDomainSyncIdentities(
+    env,
+    identities,
+    async (syncEnv) => {
       const result = await reconcileOrgs({
         // 全行を 1 クエリで取り、resync にそのまま持ち回す(org ごとの再 SELECT = N+1
         // を避ける。全 org ドリフト時に D1 の 50 クエリ/呼 上限を踏まないため)。
@@ -746,10 +747,12 @@ async function scheduled(_event: unknown, env: Bindings, _ctx?: unknown): Promis
       if (result.drift.length > 0) {
         console.warn(`org sync drift reconciled for ${syncEnv.directory}`, result)
       }
-    } catch (error) {
-      await reportReconcileFailure(env, identity.directory, error)
-    }
-  }
+    },
+    {
+      concurrency: 'sequential',
+      onFailure: (identity, error) => reportReconcileFailure(env, identity.directory, error),
+    },
+  )
 }
 
 export default { fetch: app.fetch, scheduled }

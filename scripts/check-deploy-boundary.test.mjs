@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { resolveDomainSyncIdentity } from '../services/admin/src/worker/domain-sync-identity.mjs'
+import { resolveDomainSyncIdentity } from '../services/admin/src/worker/domain-sync-orchestration.mjs'
 import {
   loadServiceCatalog,
   loadServiceRepositoryCatalog,
