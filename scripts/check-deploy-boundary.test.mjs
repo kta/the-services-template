@@ -316,16 +316,27 @@ test('regular verify runs Rust checks for exactly the native service manifests',
   assert.doesNotMatch(rustChecks, /(?:@app\/)?example_service|services\/example_service\/src-tauri/)
 })
 
-test('native artifact workflow and Make targets exclude the Web-only template', async () => {
+test('native artifact workflow excludes the Web-only template', async () => {
   const workflow = await readFile(join(root, '.github/workflows/example-tauri-build.yml'), 'utf8')
-  const makefile = await readFile(join(root, 'Makefile'), 'utf8')
   assert.match(workflow, /@app\/example_tauri_service/)
   assert.match(workflow, /services\/example_tauri_service\/src-tauri/)
   assert.doesNotMatch(workflow, /@app\/example_service|services\/example_service\/src-tauri/)
+})
+
+function assertNoWebTemplateNativeMakefileReference(source) {
+  assert.doesNotMatch(source, /^\S*example_service\S*tauri\S*:/m)
+  assert.doesNotMatch(source, /@app\/example_service\b[^\n]*\b(?:tauri|build:tauri)\b/)
+  assert.doesNotMatch(source, /services\/example_service\/src-tauri/)
+}
+
+test('Makefile excludes Web-template native commands without rejecting its Web target', async () => {
+  const webOnlyTarget = 'dev/example_service:\n\tpnpm --filter @app/example_service dev\n'
+  assert.doesNotThrow(() => assertNoWebTemplateNativeMakefileReference(webOnlyTarget))
+
+  const makefile = await readFile(join(root, 'Makefile'), 'utf8')
+  assertNoWebTemplateNativeMakefileReference(makefile)
   assert.match(makefile, /^dev\/example_tauri_service\/tauri:/m)
   assert.match(makefile, /^build\/example_tauri_service\/tauri:/m)
-  assert.doesNotMatch(makefile, /^dev\/example_service\/tauri:/m)
-  assert.doesNotMatch(makefile, /^build\/example_service\/tauri:/m)
 })
 
 test('every GitHub Action reference is pinned to a full commit SHA', async () => {

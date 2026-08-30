@@ -224,6 +224,60 @@ for (const [asset, category, files] of [
     },
   ],
   [
+    '@tauri-apps API optional dependency',
+    'dependency',
+    {
+      'services/example_service/package.json': JSON.stringify({
+        optionalDependencies: { '@tauri-apps/api': 'catalog:' },
+      }),
+    },
+  ],
+  [
+    '@tauri-apps CLI optional dependency',
+    'dependency',
+    {
+      'services/example_service/package.json': JSON.stringify({
+        optionalDependencies: { '@tauri-apps/cli': 'catalog:' },
+      }),
+    },
+  ],
+  [
+    '@tauri-apps plugin optional dependency',
+    'dependency',
+    {
+      'services/example_service/package.json': JSON.stringify({
+        optionalDependencies: { '@tauri-apps/plugin-fs': 'catalog:' },
+      }),
+    },
+  ],
+  [
+    '@tauri-apps API peer dependency',
+    'dependency',
+    {
+      'services/example_service/package.json': JSON.stringify({
+        peerDependencies: { '@tauri-apps/api': 'catalog:' },
+      }),
+    },
+  ],
+  [
+    '@tauri-apps CLI peer dependency',
+    'dependency',
+    {
+      'services/example_service/package.json': JSON.stringify({
+        peerDependencies: { '@tauri-apps/cli': 'catalog:' },
+      }),
+    },
+  ],
+  [
+    '@tauri-apps plugin peer dependency',
+    'dependency',
+    {
+      'services/example_service/package.json': JSON.stringify({
+        peerDependencies: { '@tauri-apps/plugin-opener': 'catalog:' },
+      }),
+    },
+  ],
+  [
     'tauri package script',
     'script',
     {
@@ -306,14 +360,52 @@ test('requires the Tauri template to use the native invoke transport', async () 
   )
 })
 
-for (const path of Object.keys(platformOverlays)) {
-  test(`requires ${path.split('/').at(-1)} to keep its platform configuration`, async () => {
-    await withFixture(
-      separatedTemplateFiles({ [path]: JSON.stringify({ bundle: {} }) }),
-      async (root) => {
-        assertTauriTemplateViolation(await validateTauriBoundary(root), path.split('/').at(-1))
-      },
-    )
+for (const [name, path, overlay] of [
+  [
+    'Android minSdkVersion',
+    'services/example_tauri_service/src-tauri/tauri.android.conf.json',
+    { bundle: { android: {} } },
+  ],
+  [
+    'Android minSdkVersion value',
+    'services/example_tauri_service/src-tauri/tauri.android.conf.json',
+    { bundle: { android: { minSdkVersion: 25 } } },
+  ],
+  [
+    'iOS minimumSystemVersion',
+    'services/example_tauri_service/src-tauri/tauri.ios.conf.json',
+    { bundle: { iOS: {} } },
+  ],
+  [
+    'iOS minimumSystemVersion value',
+    'services/example_tauri_service/src-tauri/tauri.ios.conf.json',
+    { bundle: { iOS: { minimumSystemVersion: '15.0' } } },
+  ],
+  [
+    'macOS app target',
+    'services/example_tauri_service/src-tauri/tauri.macos.conf.json',
+    { bundle: { macOS: { minimumSystemVersion: '10.13' } } },
+  ],
+  [
+    'macOS app target value',
+    'services/example_tauri_service/src-tauri/tauri.macos.conf.json',
+    { bundle: { targets: ['dmg'], macOS: { minimumSystemVersion: '10.13' } } },
+  ],
+  [
+    'macOS minimumSystemVersion',
+    'services/example_tauri_service/src-tauri/tauri.macos.conf.json',
+    { bundle: { targets: ['app'], macOS: {} } },
+  ],
+  [
+    'macOS minimumSystemVersion value',
+    'services/example_tauri_service/src-tauri/tauri.macos.conf.json',
+    { bundle: { targets: ['app'], macOS: { minimumSystemVersion: '11.0' } } },
+  ],
+]) {
+  test(`requires ${name} in the Tauri template platform overlay`, async () => {
+    await withFixture(separatedTemplateFiles({ [path]: JSON.stringify(overlay) }), async (root) => {
+      assertTauriTemplateViolation(await validateTauriBoundary(root), path.split('/').at(-1))
+    })
   })
 }
 
