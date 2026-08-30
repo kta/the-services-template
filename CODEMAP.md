@@ -59,7 +59,7 @@ and required tests; the sibling `CLAUDE.md` is a symlink to that same source.
 
 | Service | Runtime bindings |
 |---|---|
-| `admin` | D1, `EXAMPLE_SERVICE`, `NOTIFIER`, Cron（login lockout は D1 の原子的カウンタ） |
+| `admin` | D1, `NOTIFIER`, catalog の deployable domain bindings, Cron（login lockout は D1 の原子的カウンタ）。ローカル dev のみ `EXAMPLE_SERVICE` scaffold binding を Vite config が追加する。 |
 | `example_service` | D1, `NOTIFIER` |
 | `example_tauri_service` | D1, `NOTIFIER` |
 | `notifier` | `DEDUPE` KV |

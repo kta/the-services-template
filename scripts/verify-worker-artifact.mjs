@@ -332,7 +332,7 @@ function archiveEntries(archivePath) {
   }
 }
 
-export function verifyWorkerArtifactArchive(archivePath, services) {
+function verifyWorkerArtifactArchive(archivePath, services) {
   const listing = archiveEntries(resolve(archivePath))
   validateArchiveEntries(listing.entries, listing.verboseEntries, services)
   return true

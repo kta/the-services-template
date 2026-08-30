@@ -6,12 +6,13 @@ import { fileURLToPath } from 'node:url'
 import { effectiveValues, parseJsonc } from './check-production-config.mjs'
 import { isProductionDomainAuthReady } from './require-production-domain-auth.mjs'
 import { loadServiceRepositoryCatalog } from './service-catalog.mjs'
+import { validateServiceWiring } from './service-wiring.mjs'
 import { inspectWorkflowPolicy } from './workflow-policy.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const violations = []
-const credentialedProductionWorkflows = new Set(['ci.yml', 'production-bootstrap.yml'])
 const serviceCatalog = await loadServiceRepositoryCatalog(root)
+violations.push(...(await validateServiceWiring(root, serviceCatalog)))
 
 export function isFixedProductionDeployScript(script, service) {
   return script === `node ../../scripts/production-deploy.mjs ${service}`
@@ -32,13 +33,6 @@ function adminToDomainSecretName(service) {
   if (typeof service !== 'string') return null
   const suffix = service.replaceAll('-', '_').toUpperCase()
   return /^[A-Z][A-Z0-9_]*$/.test(suffix) ? `ADMIN_TO_${suffix}_KEY` : null
-}
-
-function workflowStepBlock(step) {
-  const start = workflow.indexOf(`- name: ${step}`)
-  if (start < 0) return ''
-  const end = workflow.indexOf('\n      - ', start + 1)
-  return workflow.slice(start, end < 0 ? undefined : end)
 }
 
 const workflow = await readFile(join(root, '.github/workflows/ci.yml'), 'utf8')
@@ -107,11 +101,6 @@ requireMatch(
   /production-worker-bundles\.tar\.gz/,
   'production build must publish the reviewed Worker bundle archive',
 )
-requireMatch(
-  buildJob,
-  /verify-worker-artifact\.mjs[\s\S]*?production-worker-manifest\.json/,
-  'production build must verify and manifest every Worker output',
-)
 if (
   /id-token:\s*write|environment:\s*production|CLOUDFLARE_(?:API_TOKEN|ACCOUNT_ID)/.test(buildJob)
 ) {
@@ -145,21 +134,6 @@ requireMatch(
 )
 requireMatch(
   deployJob,
-  /Verify reviewed production service configs before credentials[\s\S]*?check-production-config\.mjs/,
-  'ci production deploy must validate every reviewed Worker config before credentials',
-)
-requireMatch(
-  deployJob,
-  /Verify remote production secret names before any write[\s\S]*?workers\/scripts[\s\S]*?JWT_PRIVATE_KEY/,
-  'ci production deploy must reject stale or unexpected remote secret names before writes',
-)
-requireMatch(
-  deployJob,
-  /Verify remote production secret names before any write[\s\S]*?worker_name="\$\{service\/\/_\/-\}"[\s\S]*?workers\/scripts\/\$worker_name\/secrets/,
-  'ci production deploy must inspect each Worker through the reviewed Cloudflare API path',
-)
-requireMatch(
-  deployJob,
   /Capture trusted production tool paths[\s\S]*?realpath[\s\S]*?resolved inside the checkout[\s\S]*?stat -c/,
   'ci production deploy must reject repository-controlled tool executables',
 )
@@ -167,11 +141,6 @@ requireMatch(
   deployJob,
   /actions\/download-artifact@[0-9a-f]{40}/,
   'credentialed deploy must download the reviewed build artifact',
-)
-requireMatch(
-  deployJob,
-  /verify-worker-artifact\.mjs[\s\S]*?--archive[\s\S]*?--install-root/,
-  'credentialed deploy must verify and install the Worker artifact before Wrangler',
 )
 if (/(?:pnpm|npm|yarn)\s+[^\n]*\brun\s+build\b/.test(deployJob)) {
   violations.push('credentialed deploy must not execute a repository build script')
@@ -192,47 +161,6 @@ for (const workflowPath of await readdir(join(root, '.github/workflows'))) {
     if (!/persist-credentials:\s*false/.test(block)) {
       violations.push(`${workflowPath} checkout must disable persisted credentials`)
     }
-  }
-  if (!credentialedProductionWorkflows.has(workflowPath)) {
-    if (/CLOUDFLARE_(?:API_TOKEN|ACCOUNT_ID)|secrets\.PRODUCTION_/.test(source)) {
-      violations.push(`${workflowPath} must not receive production Cloudflare credentials`)
-    }
-    if (/\bwrangler\s+(?:deploy|d1|r2)\b/.test(source)) {
-      violations.push(`${workflowPath} must not invoke raw production Wrangler commands`)
-    }
-    if (/id-token:\s*write/.test(source)) {
-      violations.push(`${workflowPath} must not mint a production OIDC token`)
-    }
-  }
-  if (workflowPath === 'tauri-build.yml' || workflowPath === 'example-tauri-build.yml') {
-    requireMatch(
-      source,
-      /ANDROID_PLATFORM_API:\s*35/,
-      `${workflowPath} must pin the Android platform API used by verification artifacts`,
-    )
-    requireMatch(
-      source,
-      /ANDROID_NDK_VERSION:\s*27\.2\.12479018/,
-      `${workflowPath} must pin the Android NDK used by verification artifacts`,
-    )
-    requireMatch(
-      source,
-      /XCODEGEN_VERSION:\s*2\.46\.0/,
-      `${workflowPath} must pin the XcodeGen version used by verification artifacts`,
-    )
-    if (/sort -V\s*\|\s*tail -1/.test(source)) {
-      violations.push(`${workflowPath} must not select the latest Android SDK/NDK dynamically`)
-    }
-    requireMatch(
-      source,
-      /test "\$\(xcodegen --version\)" = "Version: \$\{XCODEGEN_VERSION\}"/,
-      `${workflowPath} must fail if the installed XcodeGen version drifts`,
-    )
-    requireMatch(
-      source,
-      /Check pinned Rust toolchain[\s\S]*?rustc --version[\s\S]*?1\.88\.0/,
-      `${workflowPath} must fail if the Rust toolchain drifts`,
-    )
   }
 }
 
@@ -365,16 +293,6 @@ requireMatch(
   /actions\/upload-artifact@[0-9a-f]{40}/,
   'bootstrap build must publish a pinned Worker artifact',
 )
-requireMatch(
-  bootstrapBuildJob,
-  /verify-worker-artifact\.mjs[\s\S]*?production-worker-manifest\.json/,
-  'bootstrap build must verify and manifest every Worker output',
-)
-requireMatch(
-  bootstrapBuildJob,
-  /require-production-domain-auth\.mjs/,
-  'bootstrap build must block copied domains until production auth is reviewed',
-)
 if (
   /id-token:\s*write|environment:\s*production|CLOUDFLARE_(?:API_TOKEN|ACCOUNT_ID)|secrets\.PRODUCTION_/.test(
     bootstrapBuildJob,
@@ -392,11 +310,6 @@ requireMatch(
   bootstrapJob,
   /actions\/download-artifact@[0-9a-f]{40}/,
   'bootstrap must download the reviewed Worker artifact',
-)
-requireMatch(
-  bootstrapJob,
-  /verify-worker-artifact\.mjs[\s\S]*?--archive[\s\S]*?--install-root/,
-  'bootstrap must verify and install the Worker artifact before credentials are used',
 )
 if (/(?:pnpm|npm|yarn)\s+[^\n]*\brun\s+build\b/.test(bootstrapJob)) {
   violations.push('credentialed bootstrap must not execute a repository build script')
@@ -433,11 +346,6 @@ requireMatch(
 )
 requireMatch(
   bootstrapWorkflow,
-  /Verify reviewed production service configs before credentials[\s\S]*?check-production-config\.mjs/,
-  'production bootstrap must validate every reviewed Worker config before credentials',
-)
-requireMatch(
-  bootstrapWorkflow,
   /Verify Cloudflare account and D1 resource identities[\s\S]*?d1\/database/,
   'production bootstrap must verify the actual Cloudflare account and D1 identities',
 )
@@ -445,21 +353,6 @@ requireMatch(
   bootstrapWorkflow,
   /require-production-bootstrap\.mjs/,
   'production secret bootstrap must invoke the bootstrap guard',
-)
-requireMatch(
-  bootstrapWorkflow,
-  /Bootstrap production Workers with fixed secret bundles[\s\S]*--secrets-file/,
-  'production secret bootstrap must use fixed, explicitly allowlisted secret bundles',
-)
-requireMatch(
-  bootstrapWorkflow,
-  /Verify remote production secret names before any write[\s\S]*?workers\/scripts[\s\S]*?JWT_PRIVATE_KEY/,
-  'production bootstrap must reject stale or unexpected remote secret names before writes',
-)
-requireMatch(
-  bootstrapWorkflow,
-  /Verify remote production secret names before any write[\s\S]*?worker_name="\$\{service\/\/_\/-\}"[\s\S]*?workers\/scripts\/\$worker_name\/secrets/,
-  'production secret bootstrap must inspect each Worker through the reviewed Cloudflare API path',
 )
 requireMatch(
   bootstrapWorkflow,
@@ -500,11 +393,6 @@ requireMatch(
   bootstrapWorkflow,
   /DOMAIN_SERVICE:\s*\$\{\{\s*inputs\.domain_service\s*\}\}/,
   'production secret bootstrap must pass the manual input through the environment',
-)
-requireMatch(
-  bootstrapWorkflow,
-  /\[\[\s*!\s*"\$DOMAIN_SERVICE"\s*=~\s*\^\[a-z\]\[a-z0-9_\]\{0,62\}\$|\|\|\s*"\$DOMAIN_SERVICE"\s*==\s*admin/,
-  'production secret bootstrap must validate the domain service before shell use',
 )
 
 const restoreScript = await readFile(join(root, 'scripts/restore-d1.mjs'), 'utf8')
@@ -768,57 +656,7 @@ for (const { directory: service } of serviceCatalog.services.filter(
     violations.push(`Makefile must not expose local production deploy target ${service}`)
   }
 
-  const packageName = `@app/${service}`
-  const buildStep = `Build ${service} (no Cloudflare credentials)`
-  const migrationStep = `Apply ${service} remote migrations`
-  const deployStep = `Deploy ${service}`
-  const stepPositions = [buildStep, migrationStep, deployStep].map((step) =>
-    workflow.indexOf(`- name: ${step}`),
-  )
-  const [buildPosition, migrationPosition, deployPosition] = stepPositions
-  if (
-    stepPositions.some((position) => position < 0) ||
-    buildPosition >= migrationPosition ||
-    migrationPosition >= deployPosition
-  ) {
-    violations.push(
-      `CI must explicitly build, migrate, and deploy copied domain ${service} in order`,
-    )
-  }
-  const buildBlock = workflowStepBlock(buildStep)
-  const migrationBlock = workflowStepBlock(migrationStep)
-  const deployBlock = workflowStepBlock(deployStep)
-  if (!buildBlock.includes(`pnpm --filter ${packageName} run build`)) {
-    violations.push(`${service} CI build step must use the package build command`)
-  }
-  if (/CLOUDFLARE_(?:API_TOKEN|ACCOUNT_ID)/.test(buildBlock)) {
-    violations.push(`${service} CI build step must not receive Cloudflare credentials`)
-  }
-  if (/(?:pnpm|npm|yarn)\s+[^\n]*\brun\s+db:migrate:remote\b/.test(migrationBlock)) {
-    violations.push(`${service} CI migration step must not invoke a package lifecycle command`)
-  }
-  if (!/wrangler\s+d1\s+migrations\s+apply[\s\S]*--remote/.test(migrationBlock)) {
-    violations.push(`${service} CI migration step must use a fixed Wrangler migration command`)
-  }
-  if (/(?:pnpm|npm|yarn)\s+[^\n]*\brun\s+deploy\b/.test(deployBlock)) {
-    violations.push(`${service} CI deploy step must not invoke a package lifecycle command`)
-  }
-  if (!/wrangler\s+deploy[\s\S]*--no-bundle/.test(deployBlock)) {
-    violations.push(`${service} CI deploy step must use a fixed no-bundle Wrangler command`)
-  }
   const workerName = service.replaceAll('_', '-')
-  let adminDomainBinding
-  try {
-    const config = parseJsonc(adminConfigSource)
-    adminDomainBinding = Array.isArray(config.services)
-      ? config.services.find((entry) => entry?.binding === 'EXAMPLE_SERVICE')?.service
-      : undefined
-  } catch {
-    adminDomainBinding = undefined
-  }
-  if (adminDomainBinding !== workerName) {
-    violations.push(`admin must bind EXAMPLE_SERVICE to the copied domain ${workerName}`)
-  }
   const suffix = service.toUpperCase()
   if (!new RegExp(`"${suffix}_DB_ID"`).test(opsConfigSource)) {
     violations.push(`ops wrangler config must declare ${suffix}_DB_ID`)

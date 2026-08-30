@@ -4,12 +4,20 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { loadServiceCatalog, validateServiceCatalog } from './service-catalog.mjs'
+import {
+  loadServiceCatalog,
+  loadServiceRepositoryCatalog,
+  validateServiceCatalog,
+} from './service-catalog.mjs'
+import { validateServiceWiring } from './service-wiring.mjs'
+import { inspectNativeWorkflowPolicy } from './workflow-policy.mjs'
 
 const root = process.cwd()
 
 test('production CI deploy is push-only on protected main', async () => {
   const workflow = await readFile(join(root, '.github/workflows/ci.yml'), 'utf8')
+  const catalog = await loadServiceRepositoryCatalog(root)
+  assert.deepEqual(await validateServiceWiring(root, catalog), [])
   assert.match(
     workflow,
     /if:\s*github\.event_name == 'push' && github\.ref == 'refs\/heads\/main' && github\.ref_protected == true/,
@@ -25,7 +33,7 @@ test('production CI deploy is push-only on protected main', async () => {
   assert.match(workflow, /name: Terraform format and validate[\s\S]*run: pnpm run infra:check/)
   assert.match(workflow, /build-production:[\s\S]*needs: \[verify\]/)
   assert.match(workflow, /build-production:[\s\S]*actions\/upload-artifact@[0-9a-f]{40}/)
-  assert.match(workflow, /verify-worker-artifact\.mjs[\s\S]*production-worker-manifest\.json/)
+  assert.match(workflow, /production-artifacts\.mjs ci package admin notifier ops/)
   assert.doesNotMatch(
     workflow.slice(workflow.indexOf('\n  build-production:'), workflow.indexOf('\n  deploy:')),
     /id-token:\s*write|environment:\s*production|CLOUDFLARE_(?:API_TOKEN|ACCOUNT_ID)/,
@@ -48,16 +56,13 @@ test('production CI deploy is push-only on protected main', async () => {
   )
   assert.match(
     workflow.slice(workflow.indexOf('\n  deploy:')),
-    /verify-worker-artifact\.mjs[\s\S]*--archive[\s\S]*--install-root/,
+    /production-artifacts\.mjs ci install admin notifier ops/,
   )
   assert.match(
     workflow,
     /Verify GitHub production environment policy[\s\S]*check-github-production-environment\.mjs/,
   )
-  assert.match(
-    workflow,
-    /Verify remote production secret names before any write[\s\S]*workers\/scripts[\s\S]*JWT_PRIVATE_KEY/,
-  )
+  assert.match(workflow, /production-service\.mjs admin remote-secrets/)
   assert.match(workflow, /Capture trusted production tool paths[\s\S]*realpath[\s\S]*stat -c/)
   assert.doesNotMatch(workflow.slice(workflow.indexOf('\n  deploy:')), /require-github-verify\.mjs/)
   assert.doesNotMatch(workflow.slice(workflow.indexOf('\n  deploy:')), /run build/)
@@ -66,8 +71,9 @@ test('production CI deploy is push-only on protected main', async () => {
     /(?:pnpm|npm|yarn)\s+[^\n]*\brun\s+(?:deploy|db:migrate:remote)\b/,
   )
   assert.doesNotMatch(workflow, /cloudflare\/wrangler-action@/)
-  assert.match(workflow, /exec wrangler deploy dist\/index\.js --no-bundle/)
-  assert.match(workflow, /exec wrangler d1 migrations apply DB --remote/)
+  assert.doesNotMatch(workflow, /exec wrangler (?:deploy|d1 migrations apply)/)
+  assert.match(workflow, /production-service\.mjs admin migrate/)
+  assert.match(workflow, /production-service\.mjs notifier deploy/)
 })
 
 test('production write entry points are CI-only and cannot be reached through Make/package lifecycle', async () => {
@@ -115,12 +121,12 @@ test('production write entry points are CI-only and cannot be reached through Ma
   assert.match(bootstrapWorkflow, /environment:\s*production/)
   assert.match(bootstrapWorkflow, /require-production-bootstrap\.mjs/)
   assert.match(bootstrapWorkflow, /build-production:[\s\S]*needs: \[build-production\]/)
-  assert.match(bootstrapWorkflow, /build-production:[\s\S]*verify-worker-artifact\.mjs/)
-  assert.match(bootstrapWorkflow, /bootstrap:[\s\S]*actions\/download-artifact@[0-9a-f]{40}/)
   assert.match(
     bootstrapWorkflow,
-    /bootstrap:[\s\S]*verify-worker-artifact\.mjs[\s\S]*--archive[\s\S]*--install-root/,
+    /build-production:[\s\S]*production-artifacts\.mjs bootstrap package/,
   )
+  assert.match(bootstrapWorkflow, /bootstrap:[\s\S]*actions\/download-artifact@[0-9a-f]{40}/)
+  assert.match(bootstrapWorkflow, /bootstrap:[\s\S]*production-artifacts\.mjs bootstrap install/)
   assert.doesNotMatch(
     bootstrapWorkflow.slice(
       bootstrapWorkflow.indexOf('\n  build-production:'),
@@ -128,14 +134,8 @@ test('production write entry points are CI-only and cannot be reached through Ma
     ),
     /id-token:\s*write|environment:\s*production|CLOUDFLARE_(?:API_TOKEN|ACCOUNT_ID)|secrets\.PRODUCTION_/,
   )
-  assert.match(
-    bootstrapWorkflow,
-    /Bootstrap production Workers with fixed secret bundles[\s\S]*--secrets-file/,
-  )
-  assert.match(
-    bootstrapWorkflow,
-    /Verify remote production secret names before any write[\s\S]*workers\/scripts[\s\S]*JWT_PRIVATE_KEY/,
-  )
+  assert.match(bootstrapWorkflow, /production-service\.mjs admin bootstrap/)
+  assert.match(bootstrapWorkflow, /production-service\.mjs admin remote-secrets-bootstrap/)
   assert.match(
     bootstrapWorkflow,
     /Capture trusted production tool paths[\s\S]*realpath[\s\S]*stat -c/,
@@ -154,20 +154,8 @@ test('production write entry points are CI-only and cannot be reached through Ma
   assert.match(bootstrapWorkflow, /persist-credentials:\s*false/)
   assert.match(bootstrapWorkflow, /DOMAIN_SERVICE:\s*\$\{\{\s*inputs\.domain_service\s*\}\}/)
   assert.equal(
-    bootstrapWorkflow.match(/service-catalog\.mjs require-deployable "\$DOMAIN_SERVICE"/g)?.length,
+    bootstrapWorkflow.match(/production-service\.mjs "\$DOMAIN_SERVICE" guard-domain/g)?.length,
     2,
-  )
-  const bootstrapDomainGuards = bootstrapWorkflow
-    .split('\n')
-    .filter((line) => line.includes('if [[ ! "$DOMAIN_SERVICE" =~'))
-  assert.equal(bootstrapDomainGuards.length, 2)
-  for (const guard of bootstrapDomainGuards) {
-    assert.match(guard, /"\$DOMAIN_SERVICE" == example_service/)
-    assert.match(guard, /"\$DOMAIN_SERVICE" == example_tauri_service/)
-  }
-  assert.match(
-    bootstrapWorkflow,
-    /\[\[\s*!\s*"\$DOMAIN_SERVICE"\s*=~\s*\^\[a-z\]\[a-z0-9_\]\*\$|\|\|\s*"\$DOMAIN_SERVICE"\s*==\s*admin/,
   )
   const restoreScript = await readFile(join(root, 'scripts/restore-d1.mjs'), 'utf8')
   assert.match(restoreScript, /require-production-provisioning\.mjs/)
@@ -296,16 +284,23 @@ test('root agent instructions keep service registration inside the CI-only produ
 test('manual artifact workflows do not receive Cloudflare credentials', async () => {
   for (const service of (await loadServiceCatalog(root)).filter((entry) => entry.native)) {
     const workflow = await readFile(join(root, service.nativeWorkflow), 'utf8')
+    assert.deepEqual(inspectNativeWorkflowPolicy(service.nativeWorkflow, workflow, service), [])
     assert.match(workflow, /workflow_dispatch:/)
     assert.doesNotMatch(workflow, /CLOUDFLARE_(?:API_TOKEN|ACCOUNT_ID)/)
     assert.doesNotMatch(workflow, /wrangler\s+deploy/)
-    assert.match(workflow, /check-tauri-boundary\.mjs/)
-    assert.match(workflow, /check-tauri-artifact\.mjs/)
+    assert.match(
+      workflow,
+      new RegExp(`node scripts/native-workflow\\.mjs ${service.directory} boundary`),
+    )
+    assert.match(
+      workflow,
+      new RegExp(`node scripts/native-workflow\\.mjs ${service.directory} verify-`),
+    )
     assert.match(workflow, /ANDROID_PLATFORM_API:\s*35/)
     assert.match(workflow, /ANDROID_NDK_VERSION:\s*27\.2\.12479018/)
     assert.match(workflow, /XCODEGEN_VERSION:\s*2\.46\.0/)
     assert.doesNotMatch(workflow, /sort -V\s*\|\s*tail -1/)
-    assert.match(workflow, /test "\$\(xcodegen --version\)" = "Version: \$\{XCODEGEN_VERSION\}"/)
+    assert.doesNotMatch(workflow, /(?:build:tauri|tauri\s+(?:build|ios|android))/)
   }
 })
 
@@ -338,17 +333,16 @@ test('native artifact workflows exactly match catalog native services', async ()
   )
   for (const service of nativeServices) {
     const workflow = await readFile(join(root, service.nativeWorkflow), 'utf8')
-    assert.match(workflow, new RegExp(service.package.replace('/', '\\/')))
-    assert.match(workflow, new RegExp(`services/${service.directory}/src-tauri`))
+    assert.match(
+      workflow,
+      new RegExp(`node scripts/native-workflow\\.mjs ${service.directory} (?:boundary|build-)`),
+    )
   }
   const webServices = catalog.filter((service) => !service.native)
   for (const service of webServices) {
     for (const nativeService of nativeServices) {
       const workflow = await readFile(join(root, nativeService.nativeWorkflow), 'utf8')
-      assert.doesNotMatch(
-        workflow,
-        new RegExp(`${service.package}|services/${service.directory}/src-tauri`),
-      )
+      assert.doesNotMatch(workflow, new RegExp(`native-workflow\\.mjs ${service.directory} `))
     }
   }
 })
@@ -390,9 +384,13 @@ test('an additional catalog native service needs no Make or deploy-test hard-cod
     await writeFile(join(fixture, 'services/booking/package.json'), '{"name":"@app/booking"}\n')
     await writeFile(join(fixture, 'services/booking/src/web/App.tsx'), 'export {}\n')
     await writeFile(join(fixture, 'Makefile'), await readFile(join(root, 'Makefile'), 'utf8'))
+    const referenceWorkflow = await readFile(
+      join(root, '.github/workflows/example-tauri-build.yml'),
+      'utf8',
+    )
     await writeFile(
       join(fixture, service.nativeWorkflow),
-      `on:\n  workflow_dispatch: {}\nenv:\n  ANDROID_PLATFORM_API: 35\n  ANDROID_NDK_VERSION: 27.2.12479018\n  XCODEGEN_VERSION: 2.46.0\njobs:\n  build:\n    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true\n    runs-on: ubuntu-latest\n    steps:\n      - run: node scripts/check-tauri-boundary.mjs\n      - run: pnpm --filter @app/booking build:tauri\n      - run: node scripts/check-tauri-artifact.mjs services/booking/src-tauri/target\n`,
+      referenceWorkflow.replaceAll('example_tauri_service', 'booking'),
     )
     const result = await validateServiceCatalog(fixture)
     assert.deepEqual(result.violations, [])
@@ -431,7 +429,8 @@ test('only the two reviewed production workflows may carry production capabiliti
     assert.doesNotMatch(source, /\bwrangler\s+(?:deploy|d1|r2)\b/)
     assert.doesNotMatch(source, /id-token:\s*write/)
   }
-  const boundary = await readFile(join(root, 'scripts/check-deploy-boundary.mjs'), 'utf8')
-  assert.match(boundary, /credentialedProductionWorkflows/)
-  assert.match(boundary, /secrets\\\.PRODUCTION_/)
+  const policy = await readFile(join(root, 'scripts/workflow-policy.mjs'), 'utf8')
+  assert.match(policy, /\['ci\.yml', 'deploy'\]/)
+  assert.match(policy, /\['production-bootstrap\.yml', 'bootstrap'\]/)
+  assert.match(policy, /secrets\\\.PRODUCTION_/)
 })

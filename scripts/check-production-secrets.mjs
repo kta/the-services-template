@@ -69,6 +69,22 @@ export function parseProductionSecretResponse(body) {
   return body.result
 }
 
+export function productionSecretGuard(args) {
+  if (!Array.isArray(args) || args.length > 1) {
+    throw new Error('remote secret inspection accepts one reviewed mode')
+  }
+  if (args.length === 0) {
+    return { guardScript: 'require-production-provisioning.mjs', allowMissingWorker: false }
+  }
+  if (args[0] === '--deploy') {
+    return { guardScript: 'require-production-deploy.mjs', allowMissingWorker: false }
+  }
+  if (args[0] === '--allow-missing-worker') {
+    return { guardScript: 'require-production-provisioning.mjs', allowMissingWorker: true }
+  }
+  throw new Error('remote secret inspection accepts one reviewed mode')
+}
+
 async function fetchProductionSecretEntries(accountId, workerName, apiToken, fetchImpl = fetch) {
   const response = await fetchImpl(productionWorkerSecretsUrl(accountId, workerName), {
     headers: {
@@ -153,19 +169,24 @@ function fail(message) {
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [service, ...args] = process.argv.slice(2)
-  const allowMissingWorker = args.length === 1 && args[0] === '--allow-missing-worker'
-  if (!isProductionSecretProvisioningService(service) || (args.length > 0 && !allowMissingWorker)) {
-    fail('usage: check-production-secrets.mjs <service> [--allow-missing-worker]')
+  let guard
+  try {
+    guard = productionSecretGuard(args)
+  } catch {
+    guard = undefined
+  }
+  if (!isProductionSecretProvisioningService(service) || !guard) {
+    fail('usage: check-production-secrets.mjs <service> [--deploy|--allow-missing-worker]')
   } else {
     try {
       // This helper is also a direct CLI entry point. Establish the reviewed
       // checkout boundary without giving its code a Cloudflare credential.
       const { execFileSync } = await import('node:child_process')
-      execFileSync(
-        process.execPath,
-        [resolve(root, 'scripts/require-production-provisioning.mjs')],
-        { cwd: root, stdio: 'inherit', env: productionStaticEnvironment(process.env) },
-      )
+      execFileSync(process.execPath, [resolve(root, `scripts/${guard.guardScript}`)], {
+        cwd: root,
+        stdio: 'inherit',
+        env: productionStaticEnvironment(process.env),
+      })
       const config = parseJsonc(
         await readFile(resolve(root, `services/${service}/wrangler.jsonc`), 'utf8'),
       )
@@ -192,7 +213,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         fetch,
       )
       const result = validateProductionSecretNames(service, entries, options)
-      if (result.unexpected.length || (!allowMissingWorker && result.missing.length)) {
+      if (result.unexpected.length || (!guard.allowMissingWorker && result.missing.length)) {
         fail(
           `${service} secret names do not match policy (missing: ${result.missing.join(', ') || 'none'}; unexpected: ${result.unexpected.join(', ') || 'none'})`,
         )
@@ -200,7 +221,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         console.log(`production secret names for ${service}: ok`)
       }
     } catch (error) {
-      if (allowMissingWorker && error?.code === 'WORKER_NOT_FOUND') {
+      if (guard.allowMissingWorker && error?.code === 'WORKER_NOT_FOUND') {
         console.log(
           `production secret names for ${service}: Worker not found; bootstrap may create it`,
         )

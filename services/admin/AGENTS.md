@@ -11,7 +11,7 @@ adminは運営コンソールであり、次の唯一の源泉である。
 - login、access token、refresh token rotation/revocation、rate limit
 - domain serviceへのorganization同期とhourly reconciliation
 
-React SPAとHono APIを1 Workerで配信し、admin専用D1を所有する。login lockout は D1 の原子的カウンタで管理する。`EXAMPLE_SERVICE` と `NOTIFIER` は外向きservice bindingであり、他domain DBを直接読まない。
+React SPAとHono APIを1 Workerで配信し、admin専用D1を所有する。login lockout は D1 の原子的カウンタで管理する。本番では catalog の deployable domain binding と `NOTIFIER` だけを持ち、`EXAMPLE_SERVICE` scaffold binding は Vite のローカル dev config だけが追加する。他domain DBを直接読まない。
 
 ## 構成と入口
 

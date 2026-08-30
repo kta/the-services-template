@@ -18,15 +18,12 @@
       "migrations_dir": "migrations"
     }
   ],
-  // Service bindings (no internet hop). EXAMPLE_SERVICE: org sync + hourly
-  // reconcile. NOTIFIER: invite / ops mails via POST /api/internal/send.
-  // フォーク時: example_service は本番にデプロイされない(production deploy chain 対象外)
-  // ため、この binding は本番では宙に浮く。雛形を自ドメインサービスへ差し替える
-  // 際に service 名を必ず張り替えること(docs/howto/deploy.md §4)。
-  "services": [
-    { "binding": "EXAMPLE_SERVICE", "service": "example-service" },
-    { "binding": "NOTIFIER", "service": "notifier" }
-  ],
+  // Production service bindings (no internet hop). The non-deployable
+  // example_service scaffold is injected only by vite.config.ts in dev mode.
+  // A copied deployable domain must be added here together with its catalog
+  // registration; repository validation requires the sets to match exactly.
+  // NOTIFIER handles invite / ops mails via POST /api/internal/send.
+  "services": [{ "binding": "NOTIFIER", "service": "notifier" }],
   // Hourly org reconcile (admin ↔ domain sync-drift check). UTC only; the
   // domain's 2h lease tolerates one missed run before failing closed.
   "triggers": { "crons": ["0 * * * *"] },

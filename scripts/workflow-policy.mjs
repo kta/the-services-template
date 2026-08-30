@@ -1,6 +1,10 @@
 import { spawnSync } from 'node:child_process'
 
 const MAX_WORKFLOW_BYTES = 1024 * 1024
+const MAX_YAML_NODES = 10_000
+const MAX_YAML_DEPTH = 64
+const MAX_YAML_MAPPING_WIDTH = 2_048
+const YAML_PARSER_TIMEOUT_MS = 3_000
 const PRODUCTION_WORKFLOWS = new Map([
   ['ci.yml', 'deploy'],
   ['production-bootstrap.yml', 'bootstrap'],
@@ -25,8 +29,15 @@ const NATIVE_PLATFORM_PINS = {
 const RUBY_YAML_TO_JSON = `
 require 'yaml'
 require 'json'
+require 'set'
 
-def reject_unsafe_nodes(node)
+MAX_YAML_NODES = ${MAX_YAML_NODES}
+MAX_YAML_DEPTH = ${MAX_YAML_DEPTH}
+MAX_YAML_MAPPING_WIDTH = ${MAX_YAML_MAPPING_WIDTH}
+
+def reject_unsafe_nodes(node, state, depth = 0)
+  state[:nodes] += 1
+  raise 'maximum YAML node count exceeded' if state[:nodes] > MAX_YAML_NODES
   if node.respond_to?(:tag) && node.tag
     raise "explicit YAML tags are not allowed: #{node.tag}"
   end
@@ -34,23 +45,28 @@ def reject_unsafe_nodes(node)
   when Psych::Nodes::Alias
     raise 'YAML aliases are not allowed'
   when Psych::Nodes::Mapping
-    keys = []
+    collection_depth = depth + 1
+    raise 'maximum YAML depth exceeded' if collection_depth > MAX_YAML_DEPTH
+    width = node.children.length / 2
+    raise 'maximum YAML mapping width exceeded' if width > MAX_YAML_MAPPING_WIDTH
+    keys = Set.new
     node.children.each_slice(2) do |key, value|
       unless key.is_a?(Psych::Nodes::Scalar)
         raise 'YAML mapping keys must be scalars'
       end
+      reject_unsafe_nodes(key, state, collection_depth)
       if keys.include?(key.value)
         raise "duplicate YAML mapping key: #{key.value}"
       end
-      keys << key.value
-      reject_unsafe_nodes(value)
+      keys.add(key.value)
+      reject_unsafe_nodes(value, state, collection_depth)
     end
   when Psych::Nodes::Sequence
-    node.children.each { |child| reject_unsafe_nodes(child) }
+    collection_depth = depth + 1
+    raise 'maximum YAML depth exceeded' if collection_depth > MAX_YAML_DEPTH
+    node.children.each { |child| reject_unsafe_nodes(child, state, collection_depth) }
   when Psych::Nodes::Document
-    reject_unsafe_nodes(node.root)
-  when Psych::Nodes::Stream
-    node.children.each { |child| reject_unsafe_nodes(child) }
+    reject_unsafe_nodes(node.root, state, depth)
   end
 end
 
@@ -84,23 +100,33 @@ end
 
 source = STDIN.read
 stream = Psych.parse_stream(source)
-reject_unsafe_nodes(stream)
 documents = stream.children
 raise 'multiple YAML documents are not allowed' unless documents.length == 1
+reject_unsafe_nodes(documents.first, { nodes: 0 })
 value = to_value(documents.first)
 puts JSON.generate(value)
 `
 
-export function parseGithubWorkflow(source) {
+export function parseGithubWorkflow(source, options = {}) {
   if (typeof source !== 'string' || Buffer.byteLength(source, 'utf8') > MAX_WORKFLOW_BYTES) {
     throw new Error('workflow YAML is missing or too large')
   }
-  const result = spawnSync('ruby', ['-e', RUBY_YAML_TO_JSON], {
+  const spawn = options.spawn ?? spawnSync
+  const result = spawn('ruby', ['-e', RUBY_YAML_TO_JSON], {
     input: source,
     encoding: 'utf8',
     maxBuffer: MAX_WORKFLOW_BYTES * 2,
+    timeout: YAML_PARSER_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
   })
-  if (result.error) throw result.error
+  if (result.error?.code === 'ETIMEDOUT') throw new Error('workflow YAML parser timed out')
+  if (result.error?.code === 'ENOBUFS') {
+    throw new Error('workflow YAML parser output exceeded maximum buffer')
+  }
+  if (result.error) throw new Error('workflow YAML parser failed to start')
+  if (result.signal) {
+    throw new Error(`workflow YAML parser terminated by signal ${result.signal}`)
+  }
   if (result.status !== 0) {
     const diagnostic = result.stderr.trim().split('\n')[0] || 'Ruby YAML parser failed'
     throw new Error(diagnostic)
@@ -124,28 +150,104 @@ function isMapping(value) {
   return value && typeof value === 'object' && !Array.isArray(value)
 }
 
-function actualShellCommands(run) {
-  if (typeof run !== 'string') return []
-  return run
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith('#') && !/^echo\b/.test(line))
+const NATIVE_JOB_PROFILES = {
+  'macos-universal': [
+    ['Check native security boundary', 'boundary'],
+    ['Build unsigned universal debug app', 'build-macos'],
+    ['Scan macOS artifact for secrets', 'verify-macos'],
+  ],
+  'ios-simulator': [
+    ['Check native security boundary', 'boundary'],
+    ['Initialize iOS project', 'init-ios'],
+    ['Re-check native security boundary after iOS generation', 'boundary'],
+    ['Build unsigned simulator artifact', 'build-ios'],
+    ['Scan iOS artifact for secrets', 'verify-ios'],
+  ],
+  'android-debug-apk': [
+    ['Check native security boundary', 'boundary'],
+    ['Initialize Android project', 'init-android'],
+    ['Re-check native security boundary after Android generation', 'boundary'],
+    ['Build debug APK', 'build-android-apk'],
+    ['Scan Android APK for secrets', 'verify-android-apk'],
+  ],
+  'android-debug-aab': [
+    ['Check native security boundary', 'boundary'],
+    ['Initialize Android project', 'init-android'],
+    ['Re-check native security boundary after Android generation', 'boundary'],
+    ['Build debug AAB', 'build-android-aab'],
+    ['Scan Android AAB for secrets', 'verify-android-aab'],
+  ],
 }
 
-function nativeCapabilityMaterial(value) {
-  if (!isMapping(value)) return false
-  for (const [name, raw] of Object.entries(value)) {
-    if (/^CLOUDFLARE_(?:API_TOKEN|ACCOUNT_ID)$/.test(name)) return true
-    if (name === 'id-token' && raw === 'write') return true
-    if (/secrets\.PRODUCTION_|secrets\.CLOUDFLARE_/.test(String(raw))) return true
+function containsSecretsContext(value) {
+  if (typeof value === 'string') {
+    return /\$\{\{[\s\S]*?\bsecrets\b[\s\S]*?\}\}/i.test(value)
   }
-  return false
+  if (Array.isArray(value)) return value.some(containsSecretsContext)
+  return (
+    isMapping(value) &&
+    Object.entries(value).some(
+      ([name, child]) => containsSecretsContext(name) || containsSecretsContext(child),
+    )
+  )
+}
+
+function containsCloudflareCapability(value) {
+  if (typeof value === 'string') {
+    return /CLOUDFLARE_(?:API_TOKEN|ACCOUNT_ID)|secrets\.PRODUCTION_/i.test(value)
+  }
+  if (Array.isArray(value)) return value.some(containsCloudflareCapability)
+  if (!isMapping(value)) return false
+  return Object.entries(value).some(
+    ([name, child]) =>
+      /^CLOUDFLARE_(?:API_TOKEN|ACCOUNT_ID)$/i.test(name) ||
+      containsCloudflareCapability(name) ||
+      containsCloudflareCapability(child),
+  )
+}
+
+function exactPermissionsValue(value, expected) {
+  if (!isMapping(value)) return false
+  const actual = Object.keys(value).sort()
+  const keys = Object.keys(expected).sort()
+  return (
+    actual.length === keys.length &&
+    actual.every((key, index) => key === keys[index] && value[key] === expected[key])
+  )
+}
+
+function nativeWrapperCommand(step) {
+  if (typeof step?.run !== 'string') return undefined
+  const match = step.run
+    .trim()
+    .match(/^node scripts\/native-workflow\.mjs ([a-z][a-z0-9_]{0,62}) ([a-z][a-z0-9-]*)$/)
+  return match ? { directory: match[1], action: match[2] } : undefined
+}
+
+function containsDirectNativeCommand(step) {
+  return (
+    typeof step?.run === 'string' &&
+    /\b(?:build:tauri|tauri\s+(?:build|ios\s+(?:init|build)|android\s+(?:init|build)))\b/.test(
+      step.run,
+    )
+  )
+}
+
+function nativeStepHasRootExecution(step) {
+  return (
+    step['working-directory'] === undefined &&
+    step.env === undefined &&
+    step.shell === undefined &&
+    step.if === undefined &&
+    step['continue-on-error'] === undefined
+  )
 }
 
 /**
  * Validate a catalog-owned manual native artifact workflow from parsed YAML
- * nodes. Comments are discarded by the YAML parser and command evidence must
- * be an executable shell line, so an echo or comment cannot satisfy policy.
+ * nodes. Security-critical commands are accepted only as exact single-line
+ * calls to native-workflow.mjs; arbitrary shell text is never command
+ * evidence.
  */
 export function inspectNativeWorkflowPolicy(workflowPath, source, service) {
   const violations = []
@@ -168,9 +270,22 @@ export function inspectNativeWorkflowPolicy(workflowPath, source, service) {
     violations.push(`${workflowPath}: native workflow jobs must be a non-empty mapping`)
     return violations
   }
-  if (nativeCapabilityMaterial(workflow.env) || nativeCapabilityMaterial(workflow.permissions)) {
+  if (!exactPermissionsValue(workflow.permissions, { contents: 'read' })) {
+    violations.push(
+      `${workflowPath}: native workflow effective permissions must be exactly contents: read`,
+    )
+  }
+  if (containsCloudflareCapability(workflow.env) || containsSecretsContext(workflow.env)) {
     violations.push(
       `${workflowPath}: native workflow must not receive a Cloudflare credential or production capability`,
+    )
+  }
+  if (containsSecretsContext(workflow.env)) {
+    violations.push(`${workflowPath}: native workflow env must not use the secrets context`)
+  }
+  if (isMapping(workflow.defaults) && workflow.defaults.run?.['working-directory'] !== undefined) {
+    violations.push(
+      `${workflowPath}: native workflow defaults must execute from the repository root`,
     )
   }
   for (const [name, expected] of Object.entries(NATIVE_PLATFORM_PINS)) {
@@ -190,24 +305,59 @@ export function inspectNativeWorkflowPolicy(workflowPath, source, service) {
     if (job.if !== PROTECTED_MAIN_DISPATCH) {
       violations.push(`${workflowPath}:${jobName} must require the exact protected main predicate`)
     }
-    if (nativeCapabilityMaterial(job.env) || nativeCapabilityMaterial(job.permissions)) {
+    const effectivePermissions = job.permissions ?? workflow.permissions
+    if (!exactPermissionsValue(effectivePermissions, { contents: 'read' })) {
+      violations.push(
+        `${workflowPath}:${jobName} effective permissions must be exactly contents: read`,
+      )
+    }
+    if (Object.hasOwn(job, 'environment')) {
+      violations.push(`${workflowPath}:${jobName} must not declare an environment`)
+    }
+    if (isMapping(job.container) && job.container.credentials !== undefined) {
+      violations.push(`${workflowPath}:${jobName} must not declare container credentials`)
+    }
+    if (
+      objectEntries(job.services).some(([, serviceContainer]) =>
+        Object.hasOwn(isMapping(serviceContainer) ? serviceContainer : {}, 'credentials'),
+      )
+    ) {
+      violations.push(`${workflowPath}:${jobName} must not declare service credentials`)
+    }
+    if (containsCloudflareCapability(job.env) || containsSecretsContext(job.env)) {
       violations.push(
         `${workflowPath}:${jobName} must not receive a Cloudflare credential or production capability`,
       )
+    }
+    if (containsSecretsContext(job.env)) {
+      violations.push(`${workflowPath}:${jobName} env must not use the secrets context`)
+    }
+    if (isMapping(job.defaults) && job.defaults.run?.['working-directory'] !== undefined) {
+      violations.push(`${workflowPath}:${jobName} defaults must execute from the repository root`)
+    }
+    for (const pin of Object.keys(NATIVE_PLATFORM_PINS)) {
+      if (isMapping(job.env) && Object.hasOwn(job.env, pin)) {
+        violations.push(`${workflowPath}:${jobName} must not shadow platform pin ${pin}`)
+      }
     }
     if (!Array.isArray(job.steps) || job.steps.length === 0) {
       violations.push(`${workflowPath}:${jobName} must declare executable steps`)
       continue
     }
-    const commands = []
+    const wrapperSteps = []
     for (const [index, step] of job.steps.entries()) {
       if (!isMapping(step)) {
         violations.push(`${workflowPath}:${jobName}:steps[${index}] must be a mapping`)
         continue
       }
-      if (nativeCapabilityMaterial(step.env)) {
+      if (containsCloudflareCapability(step.env) || containsSecretsContext(step.env)) {
         violations.push(
           `${workflowPath}:${jobName} must not receive a Cloudflare credential or production capability`,
+        )
+      }
+      if (containsSecretsContext(step.env) || containsSecretsContext(step.with)) {
+        violations.push(
+          `${workflowPath}:${jobName}:steps[${index}] must not use the secrets context in env or with`,
         )
       }
       if (typeof step.uses === 'string' && !/@[0-9a-f]{40}$/i.test(step.uses)) {
@@ -220,39 +370,57 @@ export function inspectNativeWorkflowPolicy(workflowPath, source, service) {
           `${workflowPath}:${jobName} must not receive a Cloudflare credential or production capability`,
         )
       }
-      commands.push(...actualShellCommands(step.run))
+      for (const pin of Object.keys(NATIVE_PLATFORM_PINS)) {
+        if (isMapping(step.env) && Object.hasOwn(step.env, pin)) {
+          violations.push(
+            `${workflowPath}:${jobName}:steps[${index}] must not shadow platform pin ${pin}`,
+          )
+        }
+      }
+      const wrapper = nativeWrapperCommand(step)
+      if (wrapper) {
+        wrapperSteps.push({ ...wrapper, name: step.name, step, index })
+        if (!nativeStepHasRootExecution(step)) {
+          violations.push(
+            `${workflowPath}:${jobName}:steps[${index}] native wrapper must use the root working-directory without env/shell/if overrides`,
+          )
+        }
+        if (wrapper.action.startsWith('build-')) {
+          const effectiveEnv = {
+            ...(isMapping(workflow.env) ? workflow.env : {}),
+            ...(isMapping(job.env) ? job.env : {}),
+            ...(isMapping(step.env) ? step.env : {}),
+          }
+          for (const [pin, expected] of Object.entries(NATIVE_PLATFORM_PINS)) {
+            if (String(effectiveEnv[pin]) !== String(expected)) {
+              violations.push(
+                `${workflowPath}:${jobName} build step effective pin ${pin} must be ${expected}`,
+              )
+            }
+          }
+        }
+      }
+      if (containsDirectNativeCommand(step)) {
+        violations.push(
+          `${workflowPath}:${jobName}:steps[${index}] native commands must use the exact native wrapper`,
+        )
+      }
     }
-    if (!commands.some((line) => /^node scripts\/check-tauri-boundary\.mjs(?:\s|$)/.test(line))) {
-      violations.push(`${workflowPath}:${jobName} must run the Tauri boundary checker`)
+    const expectedProfile = NATIVE_JOB_PROFILES[jobName]
+    const actualProfile = wrapperSteps.map(({ name, directory, action }) => [
+      name,
+      directory,
+      action,
+    ])
+    const expectedWithService = expectedProfile?.map(([name, action]) => [
+      name,
+      service.directory,
+      action,
+    ])
+    if (!expectedProfile || JSON.stringify(actualProfile) !== JSON.stringify(expectedWithService)) {
+      violations.push(`${workflowPath}:${jobName} must use the exact native wrapper sequence`)
     }
-    if (!commands.some((line) => /^node scripts\/check-tauri-artifact\.mjs(?:\s|$)/.test(line))) {
-      violations.push(`${workflowPath}:${jobName} must run the Tauri artifact checker`)
-    }
-    const buildPackages = commands
-      .flatMap((line) => [
-        ...line.matchAll(
-          /\bpnpm\s+--filter\s+(@app\/[a-z][a-z0-9_]*)\s+(?:(?:run\s+)?build:tauri|exec\s+tauri\s+(?:build|ios\s+build|android\s+build))/g,
-        ),
-      ])
-      .map((match) => match[1])
-    if (buildPackages.length === 0 || buildPackages.some((name) => name !== service.package)) {
-      violations.push(`${workflowPath}:${jobName} must build only ${service.package}`)
-    }
-    if (
-      !commands.some(
-        (line) =>
-          /^node scripts\/check-tauri-artifact\.mjs(?:\s|$)/.test(line) &&
-          line.includes(`services/${service.directory}/src-tauri`),
-      )
-    ) {
-      violations.push(
-        `${workflowPath}:${jobName} artifact checker must inspect services/${service.directory}/src-tauri`,
-      )
-    }
-    if (
-      commands.some((line) => /\bwrangler\s+deploy\b/.test(line)) ||
-      commands.some((line) => /secrets\.PRODUCTION_|secrets\.CLOUDFLARE_/.test(line))
-    ) {
+    if (containsSecretsContext(job) || containsCloudflareCapability(job)) {
       violations.push(
         `${workflowPath}:${jobName} must not receive a Cloudflare credential or production capability`,
       )
@@ -266,11 +434,8 @@ export function workflowContainsNativeBuild(source) {
   for (const [, job] of objectEntries(workflow.jobs)) {
     if (!Array.isArray(job?.steps)) continue
     for (const step of job.steps) {
-      for (const command of actualShellCommands(step?.run)) {
-        if (/\b(?:build:tauri|tauri\s+(?:build|ios\s+build|android\s+build))\b/.test(command)) {
-          return true
-        }
-      }
+      const wrapper = nativeWrapperCommand(step)
+      if (wrapper?.action.startsWith('build-')) return true
     }
   }
   return false
@@ -385,9 +550,9 @@ function inspectProductionTopology(workflowPath, workflow, jobs, violations) {
 }
 
 /**
- * Inspect actual parsed GitHub workflow jobs. Regex checks remain useful for
- * exact command ordering, but this structural pass prevents a new job,
- * comment, or block-scalar trick from bypassing the credential boundary.
+ * Inspect actual parsed GitHub workflow jobs. Production command identity and
+ * ordering are validated separately from parsed step mappings by
+ * service-wiring.mjs; arbitrary shell strings are never registration evidence.
  */
 export function inspectWorkflowPolicy(workflowPath, source) {
   const violations = []
@@ -415,6 +580,13 @@ export function inspectWorkflowPolicy(workflowPath, source) {
       job && typeof job === 'object' && !Array.isArray(job) ? job.permissions : null
     if (permissions && typeof permissions === 'object' && permissions['id-token'] === 'write') {
       violations.push(`${workflowPath}:${jobName} must not grant id-token: write`)
+    }
+    for (const [index, step] of (Array.isArray(job?.steps) ? job.steps : []).entries()) {
+      if (containsDirectNativeCommand(step)) {
+        violations.push(
+          `${workflowPath}:${jobName}:steps[${index}] direct native commands are forbidden; use native-workflow.mjs`,
+        )
+      }
     }
     if (!credentialedJob) {
       if (hasProductionMarker(job)) {

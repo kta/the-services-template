@@ -316,4 +316,4 @@ Tauri の詳細（TAURI_DEV_HOST、mobile の port forwarding、fixed API origin
   token を受け入れたり、logout/revoke 後も `sid` のない stateless token を長時間受け入れたりしない。
 - 初回 deploy 後に restore.md のリストア訓練を 1 回実施する。
 
-`example_service` と `example_tauri_service` はコピー元の雛形であり、本番対象ではない。フォーク後は自ドメインサービスを production deploy chain、remote migration、ops backup、admin の EXAMPLE_SERVICE binding へ明示的に追加し、`check-deploy-boundary.mjs` が green になってから protected `main` に merge する。
+`example_service` と `example_tauri_service` はコピー元の雛形であり、本番対象ではない。そのため admin の production `wrangler.jsonc` にも scaffold binding は置かず、ローカル開発時だけ Vite config が `EXAMPLE_SERVICE` を追加する。フォーク後は自ドメインサービスを `deployable: true` として catalog、production deploy chain、remote migration、ops backup、admin の EXAMPLE_SERVICE binding へ同時に追加する。production の domain binding 集合は catalog の deployable domain 集合と完全一致させ、`service-catalog.mjs validate-repository` が green になってから protected `main` に merge する。

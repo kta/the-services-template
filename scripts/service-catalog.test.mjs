@@ -62,11 +62,21 @@ async function withRepositoryFixture({ services = [], workerOnlyServices = [] },
       await writeFixture(
         root,
         `services/${service.directory}/package.json`,
-        `${JSON.stringify({ name: service.package })}\n`,
+        `${JSON.stringify({
+          name: service.package,
+          ...(Object.hasOwn(service, 'templateKind')
+            ? {}
+            : { scripts: { build: 'wrangler deploy --dry-run', test: 'vitest run' } }),
+        })}\n`,
       )
       if (Object.hasOwn(service, 'templateKind')) {
         await writeFixture(root, `services/${service.directory}/src/web/App.tsx`, 'export {}\n')
       } else {
+        await writeFixture(
+          root,
+          `services/${service.directory}/wrangler.jsonc`,
+          '{\n  // Worker-only entrypoint\n  "main": "src/index.ts"\n}\n',
+        )
         await writeFixture(root, `services/${service.directory}/src/index.ts`, 'export {}\n')
       }
     }
@@ -79,11 +89,16 @@ async function withRepositoryFixture({ services = [], workerOnlyServices = [] },
 function validNativeWorkflow(service) {
   return `name: ${service.directory} native artifacts
 on:\n  workflow_dispatch: {}
+permissions:\n  contents: read
 env:\n  ANDROID_PLATFORM_API: 35\n  ANDROID_NDK_VERSION: 27.2.12479018\n  XCODEGEN_VERSION: 2.46.0
-jobs:\n  build:\n    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true\n    runs-on: ubuntu-latest
-    steps:\n      - run: node scripts/check-tauri-boundary.mjs
-      - run: pnpm --filter ${service.package} build:tauri
-      - run: node scripts/check-tauri-artifact.mjs services/${service.directory}/src-tauri/target
+jobs:\n  macos-universal:\n    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true\n    runs-on: macos-15
+    steps:
+      - name: Check native security boundary
+        run: node scripts/native-workflow.mjs ${service.directory} boundary
+      - name: Build unsigned universal debug app
+        run: node scripts/native-workflow.mjs ${service.directory} build-macos
+      - name: Scan macOS artifact for secrets
+        run: node scripts/native-workflow.mjs ${service.directory} verify-macos
 `
 }
 
@@ -271,7 +286,12 @@ test('rejects workflow symlinks and orphan native workflows without reading outs
     await writeFixture(
       root,
       '.github/workflows/orphan-build-tauri.yml',
-      'on: {workflow_dispatch: {}}\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: pnpm --filter @app/orphan run build:tauri\n',
+      'on: {workflow_dispatch: {}}\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: node scripts/native-workflow.mjs orphan build-macos\n',
+    )
+    await writeFixture(
+      root,
+      '.github/workflows/printed-native-text.yml',
+      "on: {workflow_dispatch: {}}\njobs:\n  print:\n    runs-on: ubuntu-latest\n    steps:\n      - run: printf '%s\\n' 'build:tauri'\n",
     )
     try {
       const result = await validateServiceCatalog(root)
@@ -279,6 +299,7 @@ test('rejects workflow symlinks and orphan native workflows without reading outs
       assert.match(diagnostic, /booking\.yml.*symbolic link/i)
       assert.match(diagnostic, /orphan\.yml.*not registered.*nativeWorkflow/i)
       assert.match(diagnostic, /orphan-build-tauri\.yml.*not registered.*nativeWorkflow/i)
+      assert.doesNotMatch(diagnostic, /printed-native-text\.yml.*not registered.*nativeWorkflow/i)
       assert.doesNotMatch(diagnostic, /OUTSIDE_WORKFLOW_SENTINEL/)
     } finally {
       await rm(outside, { force: true })
@@ -305,8 +326,7 @@ test('applies native workflow security policy to every catalog workflow', async 
     assert.match(diagnostic, /booking\.yml.*workflow_dispatch/i)
     assert.match(diagnostic, /booking\.yml.*protected main/i)
     assert.match(diagnostic, /booking\.yml.*Cloudflare credential/i)
-    assert.match(diagnostic, /booking\.yml.*boundary checker/i)
-    assert.match(diagnostic, /booking\.yml.*artifact checker/i)
+    assert.match(diagnostic, /booking\.yml.*exact native wrapper sequence/i)
     assert.match(diagnostic, /booking\.yml.*ANDROID_PLATFORM_API/i)
   })
 
@@ -478,4 +498,96 @@ test('rejects worker-only schema drift before returning entries', async () => {
       assert.match(diagnostic, /metrics.*deployable must be boolean/i)
     },
   )
+})
+
+test('requires every service package.json to be a non-array object with the exact name', async () => {
+  const worker = { directory: 'metrics', package: '@app/metrics', deployable: true }
+  for (const value of [null, false, 0, '', [], {}]) {
+    await withRepositoryFixture({ workerOnlyServices: [worker] }, async (root) => {
+      await writeFixture(root, 'services/metrics/package.json', `${JSON.stringify(value)}\n`)
+      const result = await validateServiceCatalog(root)
+      assert.deepEqual(result.workerOnlyServices, [])
+      const diagnostic = result.violations.join('\n')
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        assert.match(diagnostic, /metrics\/package\.json.*non-array object/i)
+      } else {
+        assert.match(diagnostic, /metrics.*package\.json name must be exactly @app\/metrics/i)
+      }
+    })
+  }
+
+  const spa = {
+    directory: 'booking',
+    package: '@app/booking',
+    templateKind: 'web',
+    deployable: false,
+    native: false,
+  }
+  await withCatalogFixture([spa], [spa], async (root) => {
+    await writeFixture(root, 'services/booking/package.json', 'false\n')
+    const result = await validateServiceCatalog(root)
+    assert.deepEqual(result.services, [])
+    assert.match(result.violations.join('\n'), /booking\/package\.json.*non-array object/i)
+  })
+})
+
+test('requires worker-only Wrangler JSONC, contained regular main, and build/test scripts', async () => {
+  const worker = { directory: 'metrics', package: '@app/metrics', deployable: true }
+
+  await withRepositoryFixture({ workerOnlyServices: [worker] }, async (root) => {
+    await writeFixture(root, 'services/metrics/wrangler.jsonc', '{ invalid jsonc\n')
+    const result = await validateServiceCatalog(root)
+    assert.deepEqual(result.workerOnlyServices, [])
+    assert.match(result.violations.join('\n'), /metrics\/wrangler\.jsonc.*invalid JSONC/i)
+  })
+
+  await withRepositoryFixture({ workerOnlyServices: [worker] }, async (root) => {
+    await writeFixture(root, 'services/metrics/wrangler.jsonc', '{"main":"../../outside.ts"}\n')
+    await writeFixture(root, 'outside.ts', 'WORKER_MAIN_OUTSIDE_SENTINEL\n')
+    const result = await validateServiceCatalog(root)
+    assert.deepEqual(result.workerOnlyServices, [])
+    const diagnostic = result.violations.join('\n')
+    assert.match(diagnostic, /metrics.*main.*outside/i)
+    assert.doesNotMatch(diagnostic, /WORKER_MAIN_OUTSIDE_SENTINEL/)
+  })
+
+  await withRepositoryFixture({ workerOnlyServices: [worker] }, async (root) => {
+    const outside = join(root, '..', `worker-main-${process.pid}.ts`)
+    await writeFile(outside, 'WORKER_MAIN_SYMLINK_SENTINEL\n')
+    await rm(join(root, 'services/metrics/src/index.ts'))
+    await symlink(outside, join(root, 'services/metrics/src/index.ts'))
+    try {
+      const result = await validateServiceCatalog(root)
+      assert.deepEqual(result.workerOnlyServices, [])
+      const diagnostic = result.violations.join('\n')
+      assert.match(diagnostic, /metrics.*main.*symbolic link/i)
+      assert.doesNotMatch(diagnostic, /WORKER_MAIN_SYMLINK_SENTINEL/)
+    } finally {
+      await rm(outside, { force: true })
+    }
+  })
+
+  await withRepositoryFixture({ workerOnlyServices: [worker] }, async (root) => {
+    await writeFixture(
+      root,
+      'services/metrics/package.json',
+      '{"name":"@app/metrics","scripts":{"build":"","test":false}}\n',
+    )
+    const result = await validateServiceCatalog(root)
+    assert.deepEqual(result.workerOnlyServices, [])
+    const diagnostic = result.violations.join('\n')
+    assert.match(diagnostic, /metrics.*scripts\.build.*non-empty string/i)
+    assert.match(diagnostic, /metrics.*scripts\.test.*non-empty string/i)
+  })
+})
+
+test('rejects a package-only worker directory with no Wrangler config or source entry', async () => {
+  const worker = { directory: 'metrics', package: '@app/metrics', deployable: true }
+  await withRepositoryFixture({ workerOnlyServices: [worker] }, async (root) => {
+    await rm(join(root, 'services/metrics/wrangler.jsonc'))
+    await rm(join(root, 'services/metrics/src'), { recursive: true, force: true })
+    const result = await validateServiceCatalog(root)
+    assert.deepEqual(result.workerOnlyServices, [])
+    assert.match(result.violations.join('\n'), /metrics\/wrangler\.jsonc.*missing/i)
+  })
 })

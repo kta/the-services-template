@@ -12,14 +12,6 @@ function steps(workflow, jobName) {
   return Array.isArray(value) ? value.filter((step) => mapping(step)) : []
 }
 
-function shellSource(jobSteps) {
-  return jobSteps
-    .flatMap((step) => (typeof step.run === 'string' ? step.run.split('\n') : []))
-    .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith('#') && !/^echo\b/.test(line))
-    .join('\n')
-}
-
 function compareCollection(label, expectedValues, actualValues, violations) {
   const counts = new Map()
   for (const value of actualValues) counts.set(value, (counts.get(value) ?? 0) + 1)
@@ -49,33 +41,74 @@ function parseWorkflow(label, source, violations) {
   }
 }
 
-function multilineCommandArguments(source, commandName, argumentPattern) {
-  const values = []
-  const lines = source.split('\n')
-  for (let index = 0; index < lines.length; index += 1) {
-    if (!lines[index].includes(commandName)) continue
-    let command = lines[index]
-    while (command.trimEnd().endsWith('\\') && index + 1 < lines.length) {
-      index += 1
-      command += `\n${lines[index]}`
-    }
-    for (const match of command.matchAll(argumentPattern)) values.push(match[1])
+const GITHUB_EXPRESSION = '$' + '{{'
+const TRUSTED_NODE = `${GITHUB_EXPRESSION} steps.trusted-tools.outputs.node }}`
+const TRUSTED_PNPM = `${GITHUB_EXPRESSION} steps.trusted-tools.outputs.pnpm }}`
+const DOMAIN_SERVICE_INPUT = `${GITHUB_EXPRESSION} inputs.domain_service }}`
+const DOMAIN_SERVICE = '"$DOMAIN_SERVICE"'
+
+function exactRootStep(jobSteps, name, run, label, violations, options = {}) {
+  const matches = jobSteps
+    .map((step, index) => ({ step, index }))
+    .filter(({ step }) => step.name === name)
+  if (matches.length !== 1) {
+    violations.push(`${label} must use the exact wrapper exactly once`)
+    return { index: -1, step: undefined, valid: false }
   }
-  return values
+  const result = matches[0]
+  let valid = true
+  if (result.step.run !== run) {
+    violations.push(`${label} must use the exact wrapper`)
+    valid = false
+  }
+  const allowedFields = new Set(['name', 'run', 'env'])
+  if (options.id !== undefined) allowedFields.add('id')
+  const unreviewedFields = Object.keys(result.step).filter((field) => !allowedFields.has(field))
+  if (unreviewedFields.length > 0) {
+    violations.push(
+      `${label} must execute as the exact root step; unreviewed fields ${unreviewedFields.join(', ')}`,
+    )
+    valid = false
+  }
+  if (options.id !== undefined && result.step.id !== options.id) {
+    violations.push(`${label} must use the exact step id ${options.id}`)
+    valid = false
+  }
+  if (result.step.env !== undefined && !mapping(result.step.env)) {
+    violations.push(`${label} env must be a mapping`)
+    valid = false
+  }
+  const allowedEnv = new Set(options.allowedEnv ?? [])
+  if (options.domain) allowedEnv.add('DOMAIN_SERVICE')
+  if (options.pnpm) allowedEnv.add('PRODUCTION_PNPM_PATH')
+  const unreviewedEnv = Object.keys(mapping(result.step.env) ?? {}).filter(
+    (name) => !allowedEnv.has(name),
+  )
+  if (unreviewedEnv.length > 0) {
+    violations.push(`${label} contains unreviewed env ${unreviewedEnv.join(', ')}`)
+    valid = false
+  }
+  if (options.domain) {
+    if (mapping(result.step.env)?.DOMAIN_SERVICE !== DOMAIN_SERVICE_INPUT) {
+      violations.push(`${label} must receive the exact catalog domain input through DOMAIN_SERVICE`)
+      valid = false
+    }
+  }
+  if (options.pnpm) {
+    if (mapping(result.step.env)?.PRODUCTION_PNPM_PATH !== TRUSTED_PNPM) {
+      violations.push(`${label} must receive the trusted production pnpm path`)
+      valid = false
+    }
+  }
+  return { ...result, valid }
 }
 
-function bootstrapHasGuard(workflow, jobName) {
-  const jobSteps = steps(workflow, jobName)
-  const guardIndex = jobSteps.findIndex(
-    (step) =>
-      typeof step.run === 'string' &&
-      /service-catalog\.mjs\s+require-deployable\s+["']?\$DOMAIN_SERVICE["']?/.test(step.run),
-  )
-  if (guardIndex < 0) return false
-  const credentialIndex = jobSteps.findIndex((step) =>
-    /CLOUDFLARE_(?:API_TOKEN|ACCOUNT_ID)|secrets\.PRODUCTION_/.test(JSON.stringify(step)),
-  )
-  return credentialIndex < 0 || guardIndex < credentialIndex
+function requireReviewedOrder(label, registrations, violations) {
+  const indices = registrations.map(({ index }) => index)
+  if (indices.some((index) => index < 0)) return
+  if (indices.some((index, position) => position > 0 && index <= indices[position - 1])) {
+    violations.push(`${label} wrapper steps must follow the reviewed order`)
+  }
 }
 
 export function validateServiceWiringSources(catalog, sources) {
@@ -87,7 +120,6 @@ export function validateServiceWiringSources(catalog, sources) {
     (service) => service.deployable,
   )
   const productionDirectories = productionEntries.map((service) => service.directory)
-  const productionPackages = productionEntries.map((service) => service.package)
   const migrationDirectories = catalog.services
     .filter((service) => service.deployable)
     .map((service) => service.directory)
@@ -163,78 +195,132 @@ export function validateServiceWiringSources(catalog, sources) {
   }
   compareCollection('manual E2E matrix', spaDirectories, e2eDirectories, violations)
 
-  const buildSource = shellSource(steps(ci, 'build-production'))
+  const buildSteps = steps(ci, 'build-production')
   const deploySteps = steps(ci, 'deploy')
-  const deploySource = shellSource(deploySteps)
-  const buildPackages = [
-    ...buildSource.matchAll(/pnpm\s+--filter\s+(@app\/[a-z][a-z0-9_]*)\s+run\s+build\b/g),
-  ].map((match) => match[1])
-  compareCollection('production build', productionPackages, buildPackages, violations)
-  const artifactServices = multilineCommandArguments(
-    buildSource,
-    'verify-worker-artifact.mjs',
-    /--service\s+([a-z][a-z0-9_]*)/g,
+  const buildRegistrations = productionDirectories.map((directory) =>
+    exactRootStep(
+      buildSteps,
+      `Build ${directory} (no Cloudflare credentials)`,
+      `node scripts/production-service.mjs ${directory} build`,
+      `production build step ${directory}`,
+      violations,
+    ),
   )
-  compareCollection(
-    'production artifact verifier',
-    productionDirectories,
-    artifactServices,
+  const expectedProductionArgv = productionDirectories.join(' ')
+  const packageRegistration = exactRootStep(
+    buildSteps,
+    'Verify and package production Worker bundles',
+    `node scripts/production-artifacts.mjs ci package ${expectedProductionArgv}`,
+    `production package must exactly use catalog services: expected ${expectedProductionArgv.replaceAll(' ', ', ')}`,
     violations,
   )
-  const tarServices = [...buildSource.matchAll(/\bservices\/([a-z][a-z0-9_]*)\/dist\b/g)].map(
-    (match) => match[1],
+  const digestRegistration = exactRootStep(
+    buildSteps,
+    'Record exact Worker bundle digest',
+    'node scripts/production-artifacts.mjs ci record-digest',
+    'production digest step',
+    violations,
+    { id: 'package-worker-artifact' },
   )
-  compareCollection('production tar paths', productionDirectories, tarServices, violations)
-  const installServices = multilineCommandArguments(
-    deploySource,
-    'verify-worker-artifact.mjs',
-    /--service\s+([a-z][a-z0-9_]*)/g,
-  )
-  compareCollection(
-    'production install verifier',
-    productionDirectories,
-    installServices,
+  requireReviewedOrder(
+    'production build',
+    [...buildRegistrations, packageRegistration, digestRegistration],
     violations,
   )
-  const configServices = multilineCommandArguments(
-    deploySource,
-    'check-production-config.mjs',
-    /check-production-config\.mjs\s+([a-z][a-z0-9_]*)/g,
+
+  const verifyDigestRegistration = exactRootStep(
+    deploySteps,
+    'Verify exact build artifact digest before credentials',
+    'node scripts/production-artifacts.mjs ci verify-digest',
+    'production archive digest verifier',
+    violations,
+    { allowedEnv: ['EXPECTED_BUNDLE_SHA256'] },
   )
-  compareCollection('production config verifier', productionDirectories, configServices, violations)
-  const migrationServices = deploySteps
-    .filter(
-      (step) =>
-        /^Apply [a-z][a-z0-9_]* remote migrations$/.test(step.name ?? '') &&
-        /wrangler\s+d1\s+migrations\s+apply\b[\s\S]*--remote/.test(step.run ?? ''),
+  const installRegistration = exactRootStep(
+    deploySteps,
+    'Verify and install reviewed production Worker bundles',
+    `${TRUSTED_NODE} scripts/production-artifacts.mjs ci install ${expectedProductionArgv}`,
+    `production install must exactly use catalog services: expected ${expectedProductionArgv.replaceAll(' ', ', ')}`,
+    violations,
+  )
+  const configRegistrations = productionDirectories.map((directory) =>
+    exactRootStep(
+      deploySteps,
+      `Verify ${directory} production config before credentials`,
+      `${TRUSTED_NODE} scripts/production-service.mjs ${directory} config`,
+      `production config step ${directory}`,
+      violations,
+      { allowedEnv: ['CLOUDFLARE_ACCOUNT_ID', 'PATH'] },
+    ),
+  )
+  const remoteSecretRegistrations = productionDirectories.map((directory) =>
+    exactRootStep(
+      deploySteps,
+      `Verify ${directory} remote production secret names`,
+      `${TRUSTED_NODE} scripts/production-service.mjs ${directory} remote-secrets`,
+      `production remote-secret step ${directory}`,
+      violations,
+      { allowedEnv: ['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID'] },
+    ),
+  )
+  const deployRegistrations = []
+  const notifier = productionEntries.find((service) => service.directory === 'notifier')
+  if (notifier) {
+    deployRegistrations.push(
+      exactRootStep(
+        deploySteps,
+        'Deploy notifier',
+        `${TRUSTED_NODE} scripts/production-service.mjs notifier deploy`,
+        'production deploy step notifier',
+        violations,
+        { pnpm: true, allowedEnv: ['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID'] },
+      ),
     )
-    .map((step) => step.name.match(/^Apply ([a-z][a-z0-9_]*) remote migrations$/)[1])
-  compareCollection('production migration', migrationDirectories, migrationServices, violations)
-  const deployServices = deploySteps
-    .filter(
-      (step) =>
-        /^Deploy [a-z][a-z0-9_]*$/.test(step.name ?? '') &&
-        /wrangler\s+deploy\b[\s\S]*--no-bundle/.test(step.run ?? ''),
-    )
-    .map((step) => step.name.match(/^Deploy ([a-z][a-z0-9_]*)$/)[1])
-  compareCollection('production deploy', productionDirectories, deployServices, violations)
-  for (const step of deploySteps.filter((step) =>
-    /^Deploy [a-z][a-z0-9_]*$/.test(step.name ?? ''),
-  )) {
-    const directory = step.name.slice('Deploy '.length)
-    if (step['working-directory'] !== `services/${directory}`) {
-      violations.push(`production deploy identity mismatch for ${directory}: working-directory`)
-    }
   }
-  const remoteSecretServices = multilineCommandArguments(
-    deploySource,
-    'check_remote_secret_names ',
-    /check_remote_secret_names\s+([a-z][a-z0-9_]*)/g,
-  )
-  compareCollection(
-    'production remote-secret verifier',
-    productionDirectories,
-    remoteSecretServices,
+  for (const directory of migrationDirectories) {
+    deployRegistrations.push(
+      exactRootStep(
+        deploySteps,
+        `Apply ${directory} remote migrations`,
+        `${TRUSTED_NODE} scripts/production-service.mjs ${directory} migrate`,
+        `production migration step ${directory}`,
+        violations,
+        { pnpm: true, allowedEnv: ['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID'] },
+      ),
+      exactRootStep(
+        deploySteps,
+        `Deploy ${directory}`,
+        `${TRUSTED_NODE} scripts/production-service.mjs ${directory} deploy`,
+        `production deploy step ${directory}`,
+        violations,
+        { pnpm: true, allowedEnv: ['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID'] },
+      ),
+    )
+  }
+  for (const service of productionEntries.filter(
+    (candidate) =>
+      !migrationDirectories.includes(candidate.directory) && candidate.directory !== 'notifier',
+  )) {
+    deployRegistrations.push(
+      exactRootStep(
+        deploySteps,
+        `Deploy ${service.directory}`,
+        `${TRUSTED_NODE} scripts/production-service.mjs ${service.directory} deploy`,
+        `production deploy step ${service.directory}`,
+        violations,
+        { pnpm: true, allowedEnv: ['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID'] },
+      ),
+    )
+  }
+  requireReviewedOrder(
+    'production',
+    [
+      verifyDigestRegistration,
+      installRegistration,
+      ...configRegistrations,
+      ...remoteSecretRegistrations,
+      ...deployRegistrations,
+    ],
     violations,
   )
 
@@ -279,12 +365,9 @@ export function validateServiceWiringSources(catalog, sources) {
       const adminDomainBindings = (adminConfig.services ?? [])
         .filter((entry) => entry?.binding !== 'NOTIFIER')
         .map((entry) => String(entry.service).replaceAll('-', '_'))
-      const expectedAdminDomains = domainDirectories.length
-        ? domainDirectories
-        : ['example_service']
       compareCollection(
         'admin production domain binding',
-        expectedAdminDomains,
+        domainDirectories,
         adminDomainBindings,
         violations,
       )
@@ -294,53 +377,214 @@ export function validateServiceWiringSources(catalog, sources) {
   }
 
   const bootstrap = parseWorkflow('production-bootstrap.yml', sources.bootstrap ?? '', violations)
+  const bootstrapBuildSteps = steps(bootstrap, 'build-production')
+  const bootstrapCredentialedSteps = steps(bootstrap, 'bootstrap')
+  const buildGuard = exactRootStep(
+    bootstrapBuildSteps,
+    'Validate copied domain input before package selection',
+    `node scripts/production-service.mjs ${DOMAIN_SERVICE} guard-domain`,
+    'production-bootstrap.yml build-production catalog domain guard',
+    violations,
+    { domain: true },
+  )
+  const credentialedGuard = exactRootStep(
+    bootstrapCredentialedSteps,
+    'Require a catalog deployable domain before credentials',
+    `node scripts/production-service.mjs ${DOMAIN_SERVICE} guard-domain`,
+    'production-bootstrap.yml bootstrap catalog domain guard',
+    violations,
+    { domain: true },
+  )
+  const firstCredentialedStep = bootstrapCredentialedSteps.findIndex((step) =>
+    /CLOUDFLARE_(?:API_TOKEN|ACCOUNT_ID)|secrets\.PRODUCTION_/.test(JSON.stringify(step)),
+  )
   if (
-    !bootstrapHasGuard(bootstrap, 'build-production') ||
-    !bootstrapHasGuard(bootstrap, 'bootstrap')
+    !buildGuard.valid ||
+    !credentialedGuard.valid ||
+    (firstCredentialedStep >= 0 && credentialedGuard.index >= firstCredentialedStep)
   ) {
     violations.push(
-      'production-bootstrap.yml both jobs must run catalog require-deployable before credentials',
+      'production-bootstrap.yml both jobs must use the exact catalog domain guard before credentials',
     )
   }
-  const bootstrapBuild = shellSource(steps(bootstrap, 'build-production'))
-  const bootstrapCredentialed = shellSource(steps(bootstrap, 'bootstrap'))
-  for (const [label, source, pattern] of [
-    [
-      'build command',
-      bootstrapBuild,
-      /pnpm\s+--filter\s+["']@app\/\$DOMAIN_SERVICE["']\s+run\s+build/,
-    ],
-    [
-      'build verifier',
-      bootstrapBuild,
-      /verify-worker-artifact\.mjs[\s\S]*--service\s+["']\$DOMAIN_SERVICE["']/,
-    ],
-    ['tar path', bootstrapBuild, /["']services\/\$DOMAIN_SERVICE\/dist["']/],
-    [
-      'install verifier',
-      bootstrapCredentialed,
-      /verify-worker-artifact\.mjs[\s\S]*--service\s+["']\$DOMAIN_SERVICE["']/,
-    ],
-    [
-      'config verifier',
-      bootstrapCredentialed,
-      /check-production-config\.mjs\s+["']\$DOMAIN_SERVICE["']/,
-    ],
-    [
-      'remote-secret verifier',
-      bootstrapCredentialed,
-      /check_remote_secret_names\s+["']\$DOMAIN_SERVICE["']/,
-    ],
-    ['migration', bootstrapCredentialed, /wrangler\s+d1\s+migrations\s+apply\b[\s\S]*--remote/],
-    [
-      'deploy',
-      bootstrapCredentialed,
-      /wrangler\s+deploy\s+["']dist\/\$\{\{ inputs\.domain_service \}\}\/index\.js["']/,
-    ],
-  ]) {
-    if (!pattern.test(source))
-      violations.push(`production-bootstrap.yml is missing domain ${label}`)
-  }
+  const bootstrapBuildRegistrations = [
+    buildGuard,
+    exactRootStep(
+      bootstrapBuildSteps,
+      'Build admin without Cloudflare credentials',
+      'node scripts/production-service.mjs admin build',
+      'production-bootstrap.yml admin build step',
+      violations,
+    ),
+    exactRootStep(
+      bootstrapBuildSteps,
+      'Build notifier without Cloudflare credentials',
+      'node scripts/production-service.mjs notifier build',
+      'production-bootstrap.yml notifier build step',
+      violations,
+    ),
+    exactRootStep(
+      bootstrapBuildSteps,
+      'Build ops without Cloudflare credentials',
+      'node scripts/production-service.mjs ops build',
+      'production-bootstrap.yml ops build step',
+      violations,
+    ),
+    exactRootStep(
+      bootstrapBuildSteps,
+      'Build copied domain without Cloudflare credentials',
+      `node scripts/production-service.mjs ${DOMAIN_SERVICE} build`,
+      'production-bootstrap.yml copied domain build step',
+      violations,
+      { domain: true },
+    ),
+    exactRootStep(
+      bootstrapBuildSteps,
+      'Verify and package production Worker bundles',
+      `node scripts/production-artifacts.mjs bootstrap package admin notifier ops ${DOMAIN_SERVICE}`,
+      'production-bootstrap.yml package step',
+      violations,
+      { domain: true },
+    ),
+    exactRootStep(
+      bootstrapBuildSteps,
+      'Record exact Worker bundle digest',
+      'node scripts/production-artifacts.mjs bootstrap record-digest',
+      'production-bootstrap.yml digest step',
+      violations,
+      { id: 'package-worker-artifact' },
+    ),
+  ]
+  requireReviewedOrder(
+    'production-bootstrap.yml build-production',
+    bootstrapBuildRegistrations,
+    violations,
+  )
+
+  const bootstrapConfigServices = ['admin', 'notifier', 'ops']
+  const bootstrapSequence = [
+    credentialedGuard,
+    exactRootStep(
+      bootstrapCredentialedSteps,
+      'Verify exact build artifact digest before credentials',
+      'node scripts/production-artifacts.mjs bootstrap verify-digest',
+      'production-bootstrap.yml archive digest verifier',
+      violations,
+      { allowedEnv: ['EXPECTED_BUNDLE_SHA256'] },
+    ),
+    exactRootStep(
+      bootstrapCredentialedSteps,
+      'Verify and install reviewed production Worker bundles',
+      `${TRUSTED_NODE} scripts/production-artifacts.mjs bootstrap install admin notifier ops ${DOMAIN_SERVICE}`,
+      'production-bootstrap.yml install step',
+      violations,
+      { domain: true },
+    ),
+    exactRootStep(
+      bootstrapCredentialedSteps,
+      'Require protected main bootstrap boundary',
+      `${TRUSTED_NODE} scripts/require-production-bootstrap.mjs`,
+      'production-bootstrap.yml protected-main guard',
+      violations,
+      { allowedEnv: ['PATH'] },
+    ),
+    ...bootstrapConfigServices.map((directory) =>
+      exactRootStep(
+        bootstrapCredentialedSteps,
+        `Verify ${directory} production config before credentials`,
+        `${TRUSTED_NODE} scripts/production-service.mjs ${directory} config`,
+        `production-bootstrap.yml ${directory} config step`,
+        violations,
+        { allowedEnv: ['CLOUDFLARE_ACCOUNT_ID', 'PATH'] },
+      ),
+    ),
+    exactRootStep(
+      bootstrapCredentialedSteps,
+      'Verify copied domain production config before credentials',
+      `${TRUSTED_NODE} scripts/production-service.mjs ${DOMAIN_SERVICE} config`,
+      'production-bootstrap.yml copied domain config step',
+      violations,
+      { domain: true, allowedEnv: ['CLOUDFLARE_ACCOUNT_ID', 'PATH'] },
+    ),
+    ...['admin', 'notifier'].map((directory) =>
+      exactRootStep(
+        bootstrapCredentialedSteps,
+        `Verify ${directory} remote production secret names`,
+        `${TRUSTED_NODE} scripts/production-service.mjs ${directory} remote-secrets-bootstrap`,
+        `production-bootstrap.yml ${directory} remote-secret step`,
+        violations,
+        { allowedEnv: ['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID'] },
+      ),
+    ),
+    exactRootStep(
+      bootstrapCredentialedSteps,
+      'Verify copied domain remote production secret names',
+      `${TRUSTED_NODE} scripts/production-service.mjs ${DOMAIN_SERVICE} remote-secrets-bootstrap`,
+      'production-bootstrap.yml copied domain remote-secret step',
+      violations,
+      {
+        domain: true,
+        allowedEnv: ['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID'],
+      },
+    ),
+    exactRootStep(
+      bootstrapCredentialedSteps,
+      'Verify ops remote production secret names',
+      `${TRUSTED_NODE} scripts/production-service.mjs ops remote-secrets-bootstrap`,
+      'production-bootstrap.yml ops remote-secret step',
+      violations,
+      { allowedEnv: ['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID'] },
+    ),
+    exactRootStep(
+      bootstrapCredentialedSteps,
+      'Bootstrap notifier',
+      `${TRUSTED_NODE} scripts/production-service.mjs notifier bootstrap`,
+      'production-bootstrap.yml notifier bootstrap step',
+      violations,
+      { pnpm: true, allowedEnv: ['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID'] },
+    ),
+    exactRootStep(
+      bootstrapCredentialedSteps,
+      'Bootstrap admin',
+      `${TRUSTED_NODE} scripts/production-service.mjs admin bootstrap`,
+      'production-bootstrap.yml admin bootstrap step',
+      violations,
+      { pnpm: true, allowedEnv: ['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID'] },
+    ),
+    exactRootStep(
+      bootstrapCredentialedSteps,
+      'Apply copied domain remote migrations',
+      `${TRUSTED_NODE} scripts/production-service.mjs ${DOMAIN_SERVICE} migrate`,
+      'production-bootstrap.yml copied domain migration step',
+      violations,
+      {
+        domain: true,
+        pnpm: true,
+        allowedEnv: ['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID'],
+      },
+    ),
+    exactRootStep(
+      bootstrapCredentialedSteps,
+      'Bootstrap copied domain',
+      `${TRUSTED_NODE} scripts/production-service.mjs ${DOMAIN_SERVICE} bootstrap`,
+      'production-bootstrap.yml copied domain bootstrap step',
+      violations,
+      {
+        domain: true,
+        pnpm: true,
+        allowedEnv: ['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID'],
+      },
+    ),
+    exactRootStep(
+      bootstrapCredentialedSteps,
+      'Bootstrap ops',
+      `${TRUSTED_NODE} scripts/production-service.mjs ops bootstrap`,
+      'production-bootstrap.yml ops bootstrap step',
+      violations,
+      { pnpm: true, allowedEnv: ['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID'] },
+    ),
+  ]
+  requireReviewedOrder('production-bootstrap.yml bootstrap', bootstrapSequence, violations)
   if (!/loadServiceRepositoryCatalog/.test(sources.productionChecker)) {
     violations.push('production checker must consume the validated service catalog')
   }

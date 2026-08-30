@@ -23,6 +23,7 @@ Web 専用サービスまで native app として扱われる CI 負荷をなく
 | `CI-TPL-04` | 通常 PR verify で Web-only 雛形を Rust/Tauri 対象にしない。 | `scripts/check-deploy-boundary.test.mjs` |
 | `STATIC-TPL-05` | Tauri 雛形の必須 native 資産欠落・security boundary 違反を検出する。 | `scripts/check-tauri-boundary.test.mjs` |
 | `STATIC-TPL-06` | Web-only 雛形への Tauri 資産・依存・scripts 混入を検出する。 | `scripts/check-tauri-boundary.test.mjs` |
+| `STATIC-TPL-07` | `deployable: false` の雛形を production build/deploy/D1/ops/admin domain binding の全 surface から除外し、production の domain binding 集合を catalog の `deployable: true` domain 集合と完全一致させる。雛形 binding がローカル開発に必要な場合は production config ではなく dev-only config で追加する。 | `scripts/service-wiring.test.mjs`, `scripts/check-production-config.test.mjs` |
 
 ### スコープ外
 
@@ -36,6 +37,7 @@ Web 専用サービスまで native app として扱われる CI 負荷をなく
 - `services/example_tauri_service`: Web + Tauri のコピー元。
 - `.agents/skills/new-service/SKILL.md`: 種別質問、コピー元、選択別の作業手順。
 - CI workflow、Makefile、package scripts、Tauri boundary scripts: 対象を種別に応じて限定し、登録整合性を検査する。
+- `service-catalog.json`: production surface と admin domain binding の単一ソース。`example_service` の開発用 binding は admin の Vite dev config だけで注入し、production `wrangler.jsonc` には残さない。
 - API 契約・DB スキーマ差分: なし。既存の Zod/Hono RPC/D1 境界を維持する。
 - 却下案: Web 雛形へ Tauri overlay を後付けする方式。生成ロジックと完成形検証が複雑になるため採用しない。
 

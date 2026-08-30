@@ -201,6 +201,59 @@ function firstBinding(config, collection, binding) {
   return asObject(entries.find((entry) => asObject(entry)?.binding === binding))
 }
 
+function compareExactServiceCollection(label, expected, actual, violations) {
+  const counts = new Map()
+  for (const service of actual) counts.set(service, (counts.get(service) ?? 0) + 1)
+  const missing = []
+  for (const service of expected) {
+    const count = counts.get(service) ?? 0
+    if (count === 0) missing.push(service)
+    else counts.set(service, count - 1)
+  }
+  const extra = []
+  for (const [service, count] of counts) {
+    for (let index = 0; index < count; index += 1) extra.push(service)
+  }
+  if (missing.length || extra.length) {
+    const parts = []
+    if (missing.length) parts.push(`missing ${missing.join(', ')}`)
+    if (extra.length) parts.push(`extra ${extra.join(', ')}`)
+    violations.push(
+      `${label} must exactly match the deployable domain catalog: ${parts.join('; ')}`,
+    )
+  }
+}
+
+function expectedDeployableDomainsFromCatalog(source) {
+  const catalog = JSON.parse(source)
+  if (!catalog || typeof catalog !== 'object' || Array.isArray(catalog)) {
+    throw new Error('service-catalog.json must contain an object')
+  }
+  if (!Array.isArray(catalog.services)) {
+    throw new Error('service-catalog.json must contain a services array')
+  }
+  const directories = new Set()
+  const expected = []
+  for (const [index, entry] of catalog.services.entries()) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`service-catalog.json services[${index}] must be an object`)
+    }
+    const { directory, package: packageName, deployable } = entry
+    if (
+      typeof directory !== 'string' ||
+      !/^[a-z][a-z0-9_]{0,62}$/.test(directory) ||
+      packageName !== `@app/${directory}` ||
+      typeof deployable !== 'boolean' ||
+      directories.has(directory)
+    ) {
+      throw new Error(`service-catalog.json services[${index}] has invalid identity`)
+    }
+    directories.add(directory)
+    if (deployable && directory !== 'admin') expected.push(directory)
+  }
+  return expected
+}
+
 export function effectiveValues(config) {
   const vars = asObject(config.vars) ?? Object.create(null)
   const d1 = firstBinding(config, 'd1_databases', 'DB')
@@ -367,7 +420,17 @@ export function validateProductionConfig(source, service, environment = {}, opti
   switch (service) {
     case 'admin':
       requireNonPlaceholder(values.adminDatabaseId, 'admin database_id', violations)
-      if (
+      if (Array.isArray(options.expectedDomainServices)) {
+        const actualDomainServices = (Array.isArray(config.services) ? config.services : [])
+          .filter((entry) => asObject(entry)?.binding !== 'NOTIFIER')
+          .map((entry) => asString(asObject(entry)?.service).replaceAll('-', '_') || '<invalid>')
+        compareExactServiceCollection(
+          'admin production domain bindings',
+          options.expectedDomainServices,
+          actualDomainServices,
+          violations,
+        )
+      } else if (
         asString(values.adminDomainService) === 'example-service' ||
         !asString(values.adminDomainService)
       ) {
@@ -467,6 +530,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     console.error('usage: check-production-config.mjs <admin|domain|notifier|ops>')
     process.exitCode = 2
   } else {
+    const expectedDomainServices = expectedDeployableDomainsFromCatalog(
+      await readFile(join(root, 'service-catalog.json'), 'utf8'),
+    )
     const configPath = join(root, `services/${service}/wrangler.jsonc`)
     const opsConfig = parseJsonc(await readFile(join(root, 'services/ops/wrangler.jsonc'), 'utf8'))
     const reviewedDatabaseIds = {}
@@ -496,6 +562,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         reviewedAccountId: asString(effectiveValues(opsConfig).opsAccountId),
         allowedOpsDatabaseVars,
         reviewedDatabaseIds,
+        expectedDomainServices,
       },
     )
     if (violations.length > 0) {

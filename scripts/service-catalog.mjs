@@ -3,6 +3,7 @@
 import { lstat, readdir, readFile, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { parseJsonc } from './check-production-config.mjs'
 import { inspectNativeWorkflowPolicy, workflowContainsNativeBuild } from './workflow-policy.mjs'
 
 const DEFAULT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -82,6 +83,65 @@ async function readRegularFile(path, label, violations, containmentRoot) {
     violations.push(`${label} ${reason}`)
     return undefined
   }
+}
+
+function validatePackageIdentity(packageJson, packageName, label, violations) {
+  if (!packageJson || typeof packageJson !== 'object' || Array.isArray(packageJson)) {
+    violations.push(`${label} must contain a non-array object`)
+    return undefined
+  }
+  if (packageJson.name !== packageName) {
+    violations.push(
+      `${label} name must be exactly ${packageName}; workspace package does not match catalog`,
+    )
+    return undefined
+  }
+  return packageJson
+}
+
+async function validateWorkerOnlyFiles(serviceRoot, serviceReal, worker, packageJson, violations) {
+  const { directory } = worker
+  const scripts =
+    packageJson && typeof packageJson.scripts === 'object' && !Array.isArray(packageJson.scripts)
+      ? packageJson.scripts
+      : undefined
+  for (const name of ['build', 'test']) {
+    if (typeof scripts?.[name] !== 'string' || scripts[name].trim() === '') {
+      violations.push(`${directory}: package.json scripts.${name} must be a non-empty string`)
+    }
+  }
+
+  const configLabel = `services/${directory}/wrangler.jsonc`
+  const configSource = await readRegularFile(
+    join(serviceRoot, 'wrangler.jsonc'),
+    configLabel,
+    violations,
+    serviceReal,
+  )
+  if (configSource === undefined) return
+
+  let config
+  try {
+    config = parseJsonc(configSource)
+  } catch (error) {
+    violations.push(`${configLabel} has invalid JSONC: ${error.message}`)
+    return
+  }
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
+    violations.push(`${configLabel} must contain a non-array object`)
+    return
+  }
+  if (typeof config.main !== 'string' || config.main.trim() === '') {
+    violations.push(`${directory}: worker main must be a non-empty relative path`)
+    return
+  }
+  const main = config.main
+  const mainPath = resolve(serviceReal, main)
+  if (isAbsolute(main) || main.includes('\\') || !isInside(serviceReal, mainPath)) {
+    violations.push(`${directory}: worker main ${main} resolves outside the service directory`)
+    return
+  }
+  await readRegularFile(mainPath, `${directory}: worker main ${main}`, violations, serviceReal)
 }
 
 export async function validateServiceCatalog(root = DEFAULT_ROOT) {
@@ -210,11 +270,12 @@ export async function validateServiceCatalog(root = DEFAULT_ROOT) {
       violations,
       serviceReal,
     )
-    if (packageJson && packageJson.name !== packageName) {
-      violations.push(
-        `${directory}: catalog package ${String(packageName)} does not match workspace package ${String(packageJson.name)}`,
-      )
-    }
+    validatePackageIdentity(
+      packageJson,
+      packageName,
+      `services/${directory}/package.json`,
+      violations,
+    )
     await safeDirectory(
       join(serviceRoot, 'src', 'web'),
       `services/${directory}/src/web`,
@@ -277,11 +338,13 @@ export async function validateServiceCatalog(root = DEFAULT_ROOT) {
       violations,
       serviceReal,
     )
-    if (packageJson && packageJson.name !== packageName) {
-      violations.push(
-        `${directory}: catalog package ${packageName} does not match workspace package ${String(packageJson.name)}`,
-      )
-    }
+    const normalizedPackage = validatePackageIdentity(
+      packageJson,
+      packageName,
+      `services/${directory}/package.json`,
+      violations,
+    )
+    await validateWorkerOnlyFiles(serviceRoot, serviceReal, worker, normalizedPackage, violations)
     try {
       const webInfo = await lstat(join(serviceRoot, 'src', 'web'))
       if (webInfo) violations.push(`${directory}: worker-only service must not contain src/web`)

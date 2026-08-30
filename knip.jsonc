@@ -2,7 +2,7 @@
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "treatConfigHintsAsErrors": true,
   "ignoreDependencies": ["^cloudflare(:.*)?$"],
-  "ignoreBinaries": ["make", "ruby", "terraform"],
+  "ignoreBinaries": ["make", "terraform"],
   "ignoreFiles": [
     ".agents/skills/design-select/scripts/**",
     "scripts/check-new-service-skill.mjs",

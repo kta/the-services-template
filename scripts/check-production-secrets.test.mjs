@@ -3,9 +3,29 @@ import test from 'node:test'
 import {
   isProductionSecretProvisioningService,
   parseProductionSecretResponse,
+  productionSecretGuard,
   productionWorkerSecretsUrl,
   validateProductionSecretNames,
 } from './check-production-secrets.mjs'
+
+test('selects one exact checkout guard for deploy versus bootstrap remote inspection', () => {
+  assert.deepEqual(productionSecretGuard([]), {
+    guardScript: 'require-production-provisioning.mjs',
+    allowMissingWorker: false,
+  })
+  assert.deepEqual(productionSecretGuard(['--deploy']), {
+    guardScript: 'require-production-deploy.mjs',
+    allowMissingWorker: false,
+  })
+  assert.deepEqual(productionSecretGuard(['--allow-missing-worker']), {
+    guardScript: 'require-production-provisioning.mjs',
+    allowMissingWorker: true,
+  })
+  assert.throws(
+    () => productionSecretGuard(['--deploy', '--allow-missing-worker']),
+    /one reviewed mode/i,
+  )
+})
 
 test('uses the structured Cloudflare Worker secret endpoint and fails closed on malformed responses', () => {
   assert.equal(

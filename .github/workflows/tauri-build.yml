@@ -33,7 +33,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Check native security boundary
-        run: node scripts/check-tauri-boundary.mjs
+        run: node scripts/native-workflow.mjs admin boundary
       - name: Check pinned Rust toolchain
         run: test "$(rustc --version | awk '{print $2}')" = "1.88.0"
       - name: Install universal Rust targets
@@ -43,14 +43,9 @@ jobs:
           xcodebuild -version
           pod --version
       - name: Build unsigned universal debug app
-        run: >-
-          pnpm --filter @app/admin exec tauri build
-          --debug
-          --bundles app
-          --target universal-apple-darwin
-          --no-sign
+        run: node scripts/native-workflow.mjs admin build-macos
       - name: Scan macOS artifact for secrets
-        run: node scripts/check-tauri-artifact.mjs services/admin/src-tauri/target/universal-apple-darwin/debug/bundle/macos/Admin.app
+        run: node scripts/native-workflow.mjs admin verify-macos
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: tauri-macos-universal-debug
@@ -73,7 +68,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Check native security boundary
-        run: node scripts/check-tauri-boundary.mjs
+        run: node scripts/native-workflow.mjs admin boundary
       - name: Check pinned Rust toolchain
         run: test "$(rustc --version | awk '{print $2}')" = "1.88.0"
       - name: Install iOS simulator Rust target
@@ -86,17 +81,13 @@ jobs:
           pod --version
           test "$(xcodegen --version)" = "Version: ${XCODEGEN_VERSION}"
       - name: Initialize iOS project
-        run: pnpm --filter @app/admin exec tauri ios init --ci --skip-targets-install
+        run: node scripts/native-workflow.mjs admin init-ios
       - name: Re-check native security boundary after iOS generation
-        run: node scripts/check-tauri-boundary.mjs
+        run: node scripts/native-workflow.mjs admin boundary
       - name: Build unsigned simulator artifact
-        run: >-
-          pnpm --filter @app/admin exec tauri ios build
-          --debug
-          --target aarch64-sim
-          --no-sign
+        run: node scripts/native-workflow.mjs admin build-ios
       - name: Scan iOS artifact for secrets
-        run: node scripts/check-tauri-artifact.mjs services/admin/src-tauri/gen/apple/build
+        run: node scripts/native-workflow.mjs admin verify-ios
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: tauri-ios-simulator
@@ -124,7 +115,7 @@ jobs:
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
       - run: pnpm install --frozen-lockfile
       - name: Check native security boundary
-        run: node scripts/check-tauri-boundary.mjs
+        run: node scripts/native-workflow.mjs admin boundary
       - name: Check pinned Rust toolchain
         run: test "$(rustc --version | awk '{print $2}')" = "1.88.0"
       - name: Install Android SDK prerequisites
@@ -136,9 +127,9 @@ jobs:
       - name: Install Android Rust target
         run: rustup target add aarch64-linux-android
       - name: Initialize Android project
-        run: pnpm --filter @app/admin exec tauri android init --ci --skip-targets-install
+        run: node scripts/native-workflow.mjs admin init-android
       - name: Re-check native security boundary after Android generation
-        run: node scripts/check-tauri-boundary.mjs
+        run: node scripts/native-workflow.mjs admin boundary
       - name: Align NDK with generated Gradle project
         shell: bash
         run: |
@@ -151,9 +142,9 @@ jobs:
           ndk_version="$(rg -o 'ndkVersion[[:space:]]*=[[:space:]]*"[^"]+"' services/admin/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*"([^"]+)".*/\1/' | head -1)"
           test "$ndk_version" = "$ANDROID_NDK_VERSION"
       - name: Build debug APK
-        run: pnpm --filter @app/admin exec tauri android build --debug --apk --target aarch64
+        run: node scripts/native-workflow.mjs admin build-android-apk
       - name: Scan Android APK for secrets
-        run: node scripts/check-tauri-artifact.mjs services/admin/src-tauri/gen/android/app/build/outputs/apk
+        run: node scripts/native-workflow.mjs admin verify-android-apk
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: tauri-android-debug-apk
@@ -181,7 +172,7 @@ jobs:
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
       - run: pnpm install --frozen-lockfile
       - name: Check native security boundary
-        run: node scripts/check-tauri-boundary.mjs
+        run: node scripts/native-workflow.mjs admin boundary
       - name: Check pinned Rust toolchain
         run: test "$(rustc --version | awk '{print $2}')" = "1.88.0"
       - name: Install Android SDK prerequisites
@@ -193,9 +184,9 @@ jobs:
       - name: Install Android Rust target
         run: rustup target add aarch64-linux-android
       - name: Initialize Android project
-        run: pnpm --filter @app/admin exec tauri android init --ci --skip-targets-install
+        run: node scripts/native-workflow.mjs admin init-android
       - name: Re-check native security boundary after Android generation
-        run: node scripts/check-tauri-boundary.mjs
+        run: node scripts/native-workflow.mjs admin boundary
       - name: Align NDK with generated Gradle project
         shell: bash
         run: |
@@ -208,9 +199,9 @@ jobs:
           ndk_version="$(rg -o 'ndkVersion[[:space:]]*=[[:space:]]*"[^"]+"' services/admin/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*"([^"]+)".*/\1/' | head -1)"
           test "$ndk_version" = "$ANDROID_NDK_VERSION"
       - name: Build debug AAB
-        run: pnpm --filter @app/admin exec tauri android build --debug --aab --target aarch64
+        run: node scripts/native-workflow.mjs admin build-android-aab
       - name: Scan Android AAB for secrets
-        run: node scripts/check-tauri-artifact.mjs services/admin/src-tauri/gen/android/app/build/outputs/bundle
+        run: node scripts/native-workflow.mjs admin verify-android-aab
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: tauri-android-debug-aab

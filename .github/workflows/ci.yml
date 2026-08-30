@@ -120,26 +120,17 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile --ignore-scripts
-      - name: Build notifier (no Cloudflare credentials)
-        run: pnpm --filter @app/notifier run build
       - name: Build admin (no Cloudflare credentials)
-        run: pnpm --filter @app/admin run build
+        run: node scripts/production-service.mjs admin build
+      - name: Build notifier (no Cloudflare credentials)
+        run: node scripts/production-service.mjs notifier build
       - name: Build ops (no Cloudflare credentials)
-        run: pnpm --filter @app/ops run build
+        run: node scripts/production-service.mjs ops build
       - name: Verify and package production Worker bundles
-        run: |
-          node scripts/verify-worker-artifact.mjs \
-            --service admin \
-            --service notifier \
-            --service ops
-          tar --create --gzip --file=production-worker-bundles.tar.gz -- \
-            production-worker-manifest.json \
-            services/admin/dist \
-            services/notifier/dist \
-            services/ops/dist
+        run: node scripts/production-artifacts.mjs ci package admin notifier ops
       - name: Record exact Worker bundle digest
         id: package-worker-artifact
-        run: echo "bundle_sha256=$(sha256sum production-worker-bundles.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+        run: node scripts/production-artifacts.mjs ci record-digest
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         id: upload-worker-artifact
         with:
@@ -189,11 +180,7 @@ jobs:
       - name: Verify exact build artifact digest before credentials
         env:
           EXPECTED_BUNDLE_SHA256: ${{ needs.build-production.outputs.bundle_sha256 }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          [[ "$EXPECTED_BUNDLE_SHA256" =~ ^[0-9a-f]{64}$ ]]
-          printf '%s  %s\n' "$EXPECTED_BUNDLE_SHA256" "$GITHUB_WORKSPACE/production-worker-bundles.tar.gz" | sha256sum --check --strict
+        run: node scripts/production-artifacts.mjs ci verify-digest
       - name: Capture trusted production tool paths
         id: trusted-tools
         shell: bash
@@ -242,13 +229,7 @@ jobs:
           PATH: ${{ steps.trusted-tools.outputs.path }}
         run: ${{ steps.trusted-tools.outputs.node }} scripts/require-production-deploy.mjs
       - name: Verify and install reviewed production Worker bundles
-        run: |
-          ${{ steps.trusted-tools.outputs.node }} scripts/verify-worker-artifact.mjs \
-            --archive "$GITHUB_WORKSPACE/production-worker-bundles.tar.gz" \
-            --install-root "$GITHUB_WORKSPACE" \
-            --service admin \
-            --service notifier \
-            --service ops
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/production-artifacts.mjs ci install admin notifier ops
       - name: Verify GitHub production environment policy
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -258,15 +239,21 @@ jobs:
       - name: Resolve reviewed production resource identities before credentials
         id: reviewed-resources
         run: ${{ steps.trusted-tools.outputs.node }} scripts/production-resource-identities.mjs
-      - name: Verify reviewed production service configs before credentials
+      - name: Verify admin production config before credentials
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ steps.reviewed-resources.outputs.account_id }}
           PATH: ${{ steps.trusted-tools.outputs.path }}
-        run: |
-          set -euo pipefail
-          ${{ steps.trusted-tools.outputs.node }} scripts/check-production-config.mjs admin
-          ${{ steps.trusted-tools.outputs.node }} scripts/check-production-config.mjs notifier
-          ${{ steps.trusted-tools.outputs.node }} scripts/check-production-config.mjs ops
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/production-service.mjs admin config
+      - name: Verify notifier production config before credentials
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.reviewed-resources.outputs.account_id }}
+          PATH: ${{ steps.trusted-tools.outputs.path }}
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/production-service.mjs notifier config
+      - name: Verify ops production config before credentials
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.reviewed-resources.outputs.account_id }}
+          PATH: ${{ steps.trusted-tools.outputs.path }}
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/production-service.mjs ops config
       - name: Verify Cloudflare account and D1 resource identities
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -322,50 +309,21 @@ jobs:
               '.success == true and .result.id == $id and .result.name == $name' >/dev/null
           done < <(printf '%s' "$REVIEWED_D1_IDENTITIES" | jq -c '.[]')
           echo 'Cloudflare account and D1 resource identities: verified'
-      - name: Verify remote production secret names before any write
+      - name: Verify admin remote production secret names
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          check_remote_secret_names() {
-            local service="$1"
-            shift
-            local raw status response expected_json worker_name
-            worker_name="${service//_/-}"
-            response="$(curl --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 10 \
-              --header 'accept: application/json' \
-              --header "authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-              --write-out $'\n%{http_code}' \
-              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/$worker_name/secrets")"
-            status="${response##*$'\n'}"
-            raw="${response%$'\n'*}"
-            if [[ "$status" == 404 ]]; then
-              echo "production Worker $worker_name was not found" >&2
-              return 1
-            fi
-            if [[ "$status" != 200 ]]; then
-              echo "remote secret-name inspection failed for $service (HTTP $status)" >&2
-              return 1
-            fi
-            expected_json="$(printf '%s\n' "$@" | jq -R -s 'split("\n") | map(select(length > 0)) | sort')"
-            if ! printf '%s' "$raw" | jq -e --argjson expected "$expected_json" '
-              .success == true and (.result | type == "array") and
-              (.result | all(.[]; type == "object" and (.name | type == "string") and (.name | test("^[A-Z][A-Z0-9_]*$")))) and
-              (.result | map(.name) | sort) == $expected
-            ' >/dev/null; then
-              echo "remote secret names do not exactly match the reviewed policy for $service" >&2
-              return 1
-            fi
-          }
-          check_remote_secret_names admin \
-            DOMAIN_TO_ADMIN_KEY ADMIN_TO_EXAMPLE_SERVICE_KEY ADMIN_TO_NOTIFIER_KEY \
-            JWT_PRIVATE_KEY JWT_PUBLIC_KEY AUTH_PEPPER
-          check_remote_secret_names notifier \
-            ADMIN_TO_NOTIFIER_KEY DOMAIN_TO_NOTIFIER_KEY OPS_TO_NOTIFIER_KEY RESEND_API_KEY
-          check_remote_secret_names ops \
-            OPS_TO_NOTIFIER_KEY D1_EXPORT_API_TOKEN R2_POLICY_CHECK_API_TOKEN BACKUP_SIGNING_PRIVATE_KEY
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/production-service.mjs admin remote-secrets
+      - name: Verify notifier remote production secret names
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/production-service.mjs notifier remote-secrets
+      - name: Verify ops remote production secret names
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/production-service.mjs ops remote-secrets
       - name: Verify R2 backup bucket privacy
         run: |
           set -euo pipefail
@@ -391,23 +349,23 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        working-directory: services/notifier
-        run: ${{ steps.trusted-tools.outputs.pnpm }} --config.offline=true exec wrangler deploy dist/index.js --no-bundle --config=wrangler.jsonc
+          PRODUCTION_PNPM_PATH: ${{ steps.trusted-tools.outputs.pnpm }}
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/production-service.mjs notifier deploy
       - name: Apply admin remote migrations
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        working-directory: services/admin
-        run: ${{ steps.trusted-tools.outputs.pnpm }} --config.offline=true exec wrangler d1 migrations apply DB --remote
+          PRODUCTION_PNPM_PATH: ${{ steps.trusted-tools.outputs.pnpm }}
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/production-service.mjs admin migrate
       - name: Deploy admin
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        working-directory: services/admin
-        run: ${{ steps.trusted-tools.outputs.pnpm }} --config.offline=true exec wrangler deploy dist/admin/index.js --no-bundle --config=wrangler.jsonc --assets=dist/client
+          PRODUCTION_PNPM_PATH: ${{ steps.trusted-tools.outputs.pnpm }}
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/production-service.mjs admin deploy
       - name: Deploy ops
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        working-directory: services/ops
-        run: ${{ steps.trusted-tools.outputs.pnpm }} --config.offline=true exec wrangler deploy dist/index.js --no-bundle --config=wrangler.jsonc
+          PRODUCTION_PNPM_PATH: ${{ steps.trusted-tools.outputs.pnpm }}
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/production-service.mjs ops deploy

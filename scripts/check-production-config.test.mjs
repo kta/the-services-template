@@ -39,6 +39,49 @@ test('production config accepts concrete admin values', () => {
   assert.deepEqual(violations, [])
 })
 
+test('admin production bindings exactly match the catalog deployable domain set', () => {
+  const base = {
+    name: 'admin',
+    d1_databases: [{ binding: 'DB', database_id: '12345678-1234-1234-1234-123456789abc' }],
+    services: [{ binding: 'NOTIFIER', service: 'notifier' }],
+    vars: {
+      APP_ENV: 'production',
+      OPS_ALERT_EMAIL: 'ops@example.com',
+      INVITE_BASE_URL: 'https://admin.example.com',
+    },
+  }
+  assert.deepEqual(
+    validateProductionConfig(JSON.stringify(base), 'admin', {}, { expectedDomainServices: [] }),
+    [],
+  )
+
+  const scaffold = structuredClone(base)
+  scaffold.services.unshift({ binding: 'EXAMPLE_SERVICE', service: 'example-service' })
+  assert.match(
+    validateProductionConfig(
+      JSON.stringify(scaffold),
+      'admin',
+      {},
+      {
+        expectedDomainServices: [],
+      },
+    ).join('\n'),
+    /admin production domain bindings.*extra example_service/i,
+  )
+
+  assert.match(
+    validateProductionConfig(
+      JSON.stringify(base),
+      'admin',
+      {},
+      {
+        expectedDomainServices: ['booking'],
+      },
+    ).join('\n'),
+    /admin production domain bindings.*missing booking/i,
+  )
+})
+
 test('notifier and ops reject operational placeholders', () => {
   assert.ok(
     validateProductionConfig(
