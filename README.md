@@ -79,6 +79,8 @@ protected `main` の production workflow に登録します。
 
 `example_service` は Web-only で、`src-tauri`、Tauri 依存・scripts、native CI を持ちません。`example_tauri_service` は Tauri v2 の完成形雛形です。`make dev/example_tauri_service/tauri` が Worker/Vite dev server と native window をまとめて起動します。同じ :5175 を使う Web dev server とは同時に起動しません。iOS/Android 実機の HMR では `TAURI_DEV_HOST=<開発端末から到達できる host>` と必要な port forwarding を設定します。desktop / iOS / Android の前提と unsigned artifact の手順は [`docs/howto/tauri-example-service.md`](./docs/howto/tauri-example-service.md) を参照してください。
 
+SPA サービスの directory/package、Web/Tauri 種別、production deploy 可否、native CI 対象の単一ソースは root [`service-catalog.json`](./service-catalog.json) です。サービスをコピーしたら catalog へ登録し、`node scripts/service-catalog.mjs validate` で workspace、Make、CI/workflow の境界を確認します。
+
 `make build/<service>/tauri` は Worker を deploy せず、Tauri 用の相対 asset bundle だけを `services/<service>/dist/tauri` に作ります。`make dev/<service>/tauri` は対応する Vite/Worker dev server と native window を起動します。Tauri の macOS/iOS/Android unsigned artifact は GitHub Actions の `workflow_dispatch` で検証できますが、本番 credential や署名鍵は渡しません。
 
 通常 CI の TypeScript/coverage/E2E 導線は両雛形を維持します。Rust fmt/test/clippy と native boundary/static build は `admin` と Tauri 対応雛形だけが対象で、重い macOS/iOS/Android artifact build は手動 `workflow_dispatch` です。

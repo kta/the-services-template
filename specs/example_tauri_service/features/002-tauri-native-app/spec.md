@@ -1,4 +1,4 @@
-# example_tauri_service Tauri Native App
+# example_tauri_service Tauri native app
 
 - ステータス: Approved
 

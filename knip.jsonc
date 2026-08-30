@@ -5,7 +5,9 @@
   "ignoreBinaries": ["ruby", "terraform"],
   "ignoreFiles": [
     ".agents/skills/design-select/scripts/**",
+    "scripts/check-new-service-skill.mjs",
     "scripts/tauri-dev-host.d.mts",
+    "scripts/without-git-local-env.mjs",
     "scripts/web-csp.d.mts"
   ],
   "workspaces": {

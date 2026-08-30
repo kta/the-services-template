@@ -28,4 +28,4 @@ specs/
 - 曖昧箇所は `[要確認: ...]`。解消まで実装に進まない（`docs/constitution/SDD_CONSTITUTION.md`）。
 - いつ spec が要るか・書き方 → `docs/spec-workflow/SPEC_WORKFLOW.md`。
 
-現行サービス: [`example_service`](./example_service/) / [`admin`](./admin/) / 横断 [`shared`](./shared/) / [`infra`](./infra/)
+現行サービス: [`example_service`](./example_service/) / [`example_tauri_service`](./example_tauri_service/) / [`admin`](./admin/) / 横断 [`shared`](./shared/) / [`infra`](./infra/)

@@ -47,8 +47,9 @@ Rust unit、Vitest、CI workflow に割り当てる。これらを `@e2e-covers`
 `admin` の service spec と infrastructure-only の文書には definition bullet の UC/AC がないため、分母には入らない
 （機械的な免除ではなく、そもそも product behavior を定義していない）。新しい browser
 behavior は Approved spec に UC/AC を付け、この表と E2E mapping を同じ変更で追加する。
-Tauri template separation の `AC-TPL-*` は静的検証要件の表 ID であり、Node/shell/workflow
-test が検証する。Playwright で観測できないため `@e2e-covers` を付けない。
+Tauri template separation は `STATIC-TPL-*` / `CI-TPL-*` という非 UC/AC の検証 ID を使い、
+Node/shell/workflow test が検証する。Playwright で観測できない要件を `AC-*` の表へ置いて
+validator の分母から隠したり、偽の `@e2e-covers` を付けたりしてはならない。
 
 | Spec ID | Playwright scenario |
 |---|---|

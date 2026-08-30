@@ -42,12 +42,12 @@ jobs:
         run: test "$(rustc --version | awk '{print $2}')" = "1.88.0"
       - name: Rust format and Tauri unit tests
         run: |
-          cargo fmt --check --manifest-path services/admin/src-tauri/Cargo.toml
-          cargo test --locked --manifest-path services/admin/src-tauri/Cargo.toml
-          cargo clippy --all-targets --manifest-path services/admin/src-tauri/Cargo.toml -- -D warnings
-          cargo fmt --check --manifest-path services/example_tauri_service/src-tauri/Cargo.toml
-          cargo test --locked --manifest-path services/example_tauri_service/src-tauri/Cargo.toml
-          cargo clippy --all-targets --manifest-path services/example_tauri_service/src-tauri/Cargo.toml -- -D warnings
+          node scripts/service-catalog.mjs native-manifests |
+            while IFS= read -r manifest; do
+              cargo fmt --check --manifest-path "$manifest"
+              cargo test --locked --manifest-path "$manifest"
+              cargo clippy --all-targets --manifest-path "$manifest" -- -D warnings
+            done
       - name: Check agent compatibility
         run: bash scripts/check-agent-compat.sh
       - name: Lint + format
@@ -384,8 +384,9 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      # example_service is the template scaffold and is intentionally absent
-      # from this production chain. Forks add the copied domain package here.
+      # Catalog entries with deployable=false (example_service and
+      # example_tauri_service) are intentionally absent from this production
+      # chain. Forks add the copied domain package here after production review.
       - name: Deploy notifier
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

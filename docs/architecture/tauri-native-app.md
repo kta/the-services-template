@@ -1,6 +1,6 @@
 # admin Tauri ネイティブアプリ設計
 
-この文書は refresh cookie と OS protected store を持つ services/admin の設計である。services/example_tauri_service の雛形向け native shell は refresh API を持たないため、memory-only auth 方針を採用する。導入手順は docs/howto/tauri-example-service.md と docs/howto/tauri-distribution.md、仕様は item テンプレート配下の specs/example_service/features/002-tauri-native-app/spec.md を参照する。
+この文書は refresh cookie と OS protected store を持つ services/admin の設計である。services/example_tauri_service の雛形向け native shell は refresh API を持たないため、memory-only auth 方針を採用する。導入手順は docs/howto/tauri-example-service.md と docs/howto/tauri-distribution.md、仕様は specs/example_tauri_service/features/002-tauri-native-app/spec.md を参照する。
 
 ## 目的と不変条件
 

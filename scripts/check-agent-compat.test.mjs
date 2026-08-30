@@ -60,11 +60,13 @@ const skillFrontmatter = [
   '',
   '# New service',
   '',
+  '## Required template choice',
+  '',
 ]
 const validTemplateChoiceSkill = [
   ...skillFrontmatter,
-  'Before copying, ask the user to choose one template:',
-  '- Web only (recommended): after this answer, copy services/example_service.',
+  'Before copying, ask the user to choose exactly one template and wait for the answer:',
+  '- Web only (recommended and default): after this answer, copy services/example_service.',
   '- Web + Tauri: after this answer, copy services/example_tauri_service.',
   'Do not copy either template before the user answers.',
 ].join('\n')
@@ -83,6 +85,40 @@ test('accepts a new-service skill with both choices and their matching copy sour
     assert.equal(result.code, 0)
   })
 })
+
+for (const [caseName, skill] of [
+  [
+    'contains an unconditional copy command before the choice',
+    validTemplateChoiceSkill.replace(
+      'Before copying,',
+      'Copy services/example_service immediately.\nBefore copying,',
+    ),
+  ],
+  [
+    'contradicts the Tauri mapping after the choice',
+    `${validTemplateChoiceSkill}\nWeb + Tauri: copy services/example_service.`,
+  ],
+  [
+    'duplicates a template choice',
+    `${validTemplateChoiceSkill}\n- Web only: copy services/example_service.`,
+  ],
+  [
+    'does not require exactly one answer',
+    validTemplateChoiceSkill.replace('choose exactly one template', 'choose a template'),
+  ],
+  [
+    'does not identify Web as recommended and default',
+    validTemplateChoiceSkill.replace(' (recommended and default)', ''),
+  ],
+  [
+    'does not wait for the answer',
+    validTemplateChoiceSkill.replace(' and wait for the answer', ''),
+  ],
+]) {
+  test(`rejects a new-service skill that ${caseName}`, async () => {
+    await assertRejectedTemplateChoiceSkill(skill)
+  })
+}
 
 test('rejects a broken CLAUDE.md link in the Tauri template', async () => {
   await withAgentFixture(validTemplateChoiceSkill, async (root) => {

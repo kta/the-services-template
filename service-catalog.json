@@ -1,0 +1,27 @@
+{
+  "services": [
+    {
+      "directory": "admin",
+      "package": "@app/admin",
+      "templateKind": "tauri",
+      "deployable": true,
+      "native": true,
+      "nativeWorkflow": ".github/workflows/tauri-build.yml"
+    },
+    {
+      "directory": "example_service",
+      "package": "@app/example_service",
+      "templateKind": "web",
+      "deployable": false,
+      "native": false
+    },
+    {
+      "directory": "example_tauri_service",
+      "package": "@app/example_tauri_service",
+      "templateKind": "tauri",
+      "deployable": false,
+      "native": true,
+      "nativeWorkflow": ".github/workflows/example-tauri-build.yml"
+    }
+  ]
+}

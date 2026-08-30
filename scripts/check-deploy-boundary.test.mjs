@@ -150,6 +150,14 @@ test('production write entry points are CI-only and cannot be reached through Ma
   )
   assert.match(bootstrapWorkflow, /persist-credentials:\s*false/)
   assert.match(bootstrapWorkflow, /DOMAIN_SERVICE:\s*\$\{\{\s*inputs\.domain_service\s*\}\}/)
+  const bootstrapDomainGuards = bootstrapWorkflow
+    .split('\n')
+    .filter((line) => line.includes('if [[ ! "$DOMAIN_SERVICE" =~'))
+  assert.equal(bootstrapDomainGuards.length, 2)
+  for (const guard of bootstrapDomainGuards) {
+    assert.match(guard, /"\$DOMAIN_SERVICE" == example_service/)
+    assert.match(guard, /"\$DOMAIN_SERVICE" == example_tauri_service/)
+  }
   assert.match(
     bootstrapWorkflow,
     /\[\[\s*!\s*"\$DOMAIN_SERVICE"\s*=~\s*\^\[a-z\]\[a-z0-9_\]\*\$|\|\|\s*"\$DOMAIN_SERVICE"\s*==\s*admin/,
@@ -308,19 +316,38 @@ function workflowStep(workflow, name) {
 test('regular verify runs Rust checks for exactly the native service manifests', async () => {
   const workflow = await readFile(join(root, '.github/workflows/ci.yml'), 'utf8')
   const rustChecks = workflowStep(workflow, 'Rust format and Tauri unit tests')
-  const manifests = [...rustChecks.matchAll(/--manifest-path\s+([^\s]+)/g)].map((match) => match[1])
-  assert.deepEqual([...new Set(manifests)].sort(), [
-    'services/admin/src-tauri/Cargo.toml',
-    'services/example_tauri_service/src-tauri/Cargo.toml',
-  ])
+  assert.match(rustChecks, /node scripts\/service-catalog\.mjs native-manifests/)
+  assert.match(rustChecks, /while IFS= read -r manifest/)
+  assert.match(rustChecks, /cargo fmt --check --manifest-path "\$manifest"/)
+  assert.match(rustChecks, /cargo test --locked --manifest-path "\$manifest"/)
+  assert.match(rustChecks, /cargo clippy --all-targets --manifest-path "\$manifest" -- -D warnings/)
+  assert.doesNotMatch(rustChecks, /services\/[a-z0-9_]+\/src-tauri\/Cargo\.toml/)
   assert.doesNotMatch(rustChecks, /(?:@app\/)?example_service|services\/example_service\/src-tauri/)
 })
 
-test('native artifact workflow excludes the Web-only template', async () => {
-  const workflow = await readFile(join(root, '.github/workflows/example-tauri-build.yml'), 'utf8')
-  assert.match(workflow, /@app\/example_tauri_service/)
-  assert.match(workflow, /services\/example_tauri_service\/src-tauri/)
-  assert.doesNotMatch(workflow, /@app\/example_service|services\/example_service\/src-tauri/)
+test('native artifact workflows exactly match catalog native services', async () => {
+  const catalog = JSON.parse(await readFile(join(root, 'service-catalog.json'), 'utf8'))
+  const nativeServices = catalog.services.filter((service) => service.native)
+  assert.deepEqual(nativeServices.map((service) => service.directory).sort(), [
+    'admin',
+    'example_tauri_service',
+  ])
+  assert.equal(new Set(nativeServices.map((service) => service.nativeWorkflow)).size, 2)
+  for (const service of nativeServices) {
+    const workflow = await readFile(join(root, service.nativeWorkflow), 'utf8')
+    assert.match(workflow, new RegExp(service.package.replace('/', '\\/')))
+    assert.match(workflow, new RegExp(`services/${service.directory}/src-tauri`))
+  }
+  const webServices = catalog.services.filter((service) => !service.native)
+  for (const service of webServices) {
+    for (const nativeService of nativeServices) {
+      const workflow = await readFile(join(root, nativeService.nativeWorkflow), 'utf8')
+      assert.doesNotMatch(
+        workflow,
+        new RegExp(`${service.package}|services/${service.directory}/src-tauri`),
+      )
+    }
+  }
 })
 
 function assertNoWebTemplateNativeMakefileReference(source) {
@@ -335,8 +362,9 @@ test('Makefile excludes Web-template native commands without rejecting its Web t
 
   const makefile = await readFile(join(root, 'Makefile'), 'utf8')
   assertNoWebTemplateNativeMakefileReference(makefile)
-  assert.match(makefile, /^dev\/example_tauri_service\/tauri:/m)
-  assert.match(makefile, /^build\/example_tauri_service\/tauri:/m)
+  assert.match(makefile, /^dev\/%\/tauri:/m)
+  assert.match(makefile, /^build\/%\/tauri:/m)
+  assert.match(makefile, /service-catalog\.mjs require-native \$\*/)
 })
 
 test('every GitHub Action reference is pinned to a full commit SHA', async () => {

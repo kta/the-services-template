@@ -1,11 +1,11 @@
 # サービス仕様: example_service
 
-- パッケージ: `services/example_service` (`@app/example_service`) + `services/example_service (src/web)` (`@app/example_service`)
+- パッケージ: `services/example_service` (`@app/example_service`)
 - 所有 D1: `example_service`
 - ステータス: Approved（テンプレートの参照実装）
 
 ## 目的・責務
-**コピー元の汎用サービス**。新しいドメインを作るときの雛形。汎用エンティティ `item`（title + body）の CRUD と、テナントスコープ・JWT 認証・非同期通知・cross-D1 同期の「形」を一通り示す。
+**Web-only のコピー元サービス**。新しいドメインを作るときの雛形。汎用エンティティ `item`（title + body）の CRUD と、テナントスコープ・JWT 認証・非同期通知・cross-D1 同期の「形」を一通り示す。Tauri の native shell は `example_tauri_service` の仕様と実装に分離する。
 
 ## エンティティ（所有データ）
 | エンティティ | 主な属性 | 備考 |

@@ -20,7 +20,8 @@ Do not copy either template before the user answers. Do not infer Tauri from the
 
 1. Copy tracked source from `services/example_service` to `services/<service-name>`, excluding `dist`, `node_modules`, `.wrangler`, `worker-configuration.d.ts`, generated coverage/Playwright output, local `.dev.vars`, and `migrations/*`.
 2. Rename the package to `@app/<service-name>`, the D1 `database_name` to the underscored service name, the Wrangler Worker `name` to its hyphenated DNS-label form, storage keys, and dev/E2E ports. Keep same-origin browser transport and session storage. The generated service must not contain `src-tauri`, `@tauri-apps/*` dependencies, or `tauri` / `tauri:*` / `*:tauri` scripts.
-3. Verify this branch with:
+3. Register the service in root `service-catalog.json` with its directory/package, `templateKind: "web"`, and explicit deployable/native flags. Run `node scripts/service-catalog.mjs validate` so the workspace and catalog cannot drift.
+4. Verify this branch with:
    - `pnpm --filter @app/<service-name> test:all`
    - `pnpm --filter @app/<service-name> typecheck`
    - `pnpm --filter @app/<service-name> e2e`
@@ -30,7 +31,8 @@ Do not copy either template before the user answers. Do not infer Tauri from the
 
 1. Copy tracked source from `services/example_tauri_service` to `services/<service-name>`, excluding `dist`, `node_modules`, `.wrangler`, `worker-configuration.d.ts`, generated coverage/Playwright output, local `.dev.vars`, `migrations/*`, `src-tauri/gen`, and `src-tauri/target`.
 2. Rename every Web and native identity: package, D1, hyphenated Worker name, dev/E2E ports, Tauri `productName` and `identifier`, Rust crate/library, fixed `TAURI_<SERVICE>_API_ORIGIN` build variable and release allowlist, navigation guard, native/browser storage keys, capability description, and Android/iOS/macOS overlays. Do not broaden the release-origin allowlist. Keep Vite `strictPort: true`; `TAURI_DEV_HOST` may affect development HMR only.
-3. Verify this branch with:
+3. Register the service in root `service-catalog.json` with its directory/package, `templateKind: "tauri"`, `native: true`, the reviewed deployable flag, and a unique `nativeWorkflow`. Copy and rename the example Tauri manual artifact workflow to that exact path. Run `node scripts/service-catalog.mjs validate` and `node --test scripts/check-deploy-boundary.test.mjs` to prove CI Rust manifests, Make native targets, and artifact workflows match the catalog native set.
+4. Verify this branch with:
    - `pnpm --filter @app/<service-name> test:all`
    - `pnpm --filter @app/<service-name> typecheck`
    - `pnpm --filter @app/<service-name> e2e`

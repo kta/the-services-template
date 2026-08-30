@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 
-import { lstat, readdir, readFile } from 'node:fs/promises'
+import { lstat, readdir, readFile, realpath } from 'node:fs/promises'
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as ts from 'typescript/unstable/ast'
 import { API as TypeScriptAPI } from 'typescript/unstable/sync'
 import { forbiddenSecretMarkersInText } from './secret-boundary.mjs'
+import { validateServiceCatalog } from './service-catalog.mjs'
 
 const TAURI_TARGETS = [
   {
@@ -52,6 +53,13 @@ const FORBIDDEN_TAURI_PLUGIN_REFERENCE =
   /(?:@tauri-apps\/plugin-[A-Za-z0-9_-]+|tauri-plugin-[A-Za-z0-9_-]+)/g
 const CAPABILITY_EXTENSIONS = new Set(['.json', '.toml'])
 async function filesUnder(directory, includeSymlinks = false) {
+  try {
+    const rootInfo = await lstat(directory)
+    if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) return []
+  } catch (error) {
+    if (error?.code === 'ENOENT') return []
+    throw error
+  }
   let entries
   try {
     entries = await readdir(directory, { withFileTypes: true })
@@ -979,6 +987,55 @@ async function readJson(path) {
   return JSON.parse(await readFile(path, 'utf8'))
 }
 
+function isContainedPath(workspaceRealPath, path) {
+  const rel = relative(workspaceRealPath, path)
+  return (
+    rel !== '..' &&
+    !rel.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) &&
+    !isAbsolute(rel)
+  )
+}
+
+async function validatePathType(workspace, relativeName, expected, violations) {
+  const path = resolve(workspace, relativeName)
+  try {
+    const info = await lstat(path)
+    if (info.isSymbolicLink()) {
+      violations.push(
+        `${relativeName}: symbolic links are forbidden; restore a regular ${expected}`,
+      )
+      return false
+    }
+    if (
+      (expected === 'file' && !info.isFile()) ||
+      (expected === 'directory' && !info.isDirectory())
+    ) {
+      violations.push(`${relativeName}: must be a regular ${expected}`)
+      return false
+    }
+    const [resolved, workspaceRealPath] = await Promise.all([realpath(path), realpath(workspace)])
+    if (!isContainedPath(workspaceRealPath, resolved)) {
+      violations.push(`${relativeName}: real path resolves outside the workspace`)
+      return false
+    }
+    return true
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false
+    violations.push(`${relativeName}: cannot inspect required ${expected}: ${error.message}`)
+    return false
+  }
+}
+
+async function readJsonViolation(workspace, relativeName, violations) {
+  if (!(await validatePathType(workspace, relativeName, 'file', violations))) return undefined
+  try {
+    return await readJson(resolve(workspace, relativeName))
+  } catch (error) {
+    violations.push(`${relativeName}: malformed JSON: ${error.message}`)
+    return undefined
+  }
+}
+
 async function pathExists(path) {
   try {
     await lstat(path)
@@ -989,20 +1046,20 @@ async function pathExists(path) {
   }
 }
 
-async function validateTemplateSeparation(workspace) {
+async function validateTemplateSeparation(workspace, services) {
   const violations = []
-  const webService = 'example_service'
-  const webRoot = `services/${webService}`
-  const webTauriDirectory = `${webRoot}/src-tauri`
-  if (await pathExists(resolve(workspace, webTauriDirectory))) {
-    violations.push(
-      `${webTauriDirectory}: Web-only ${webService} template must not contain a Tauri src-tauri directory; regenerate it from services/example_service`,
-    )
-  }
+  for (const service of services.filter((candidate) => candidate.templateKind === 'web')) {
+    const webRoot = `services/${service.directory}`
+    const webTauriDirectory = `${webRoot}/src-tauri`
+    if (await pathExists(resolve(workspace, webTauriDirectory))) {
+      violations.push(
+        `${webTauriDirectory}: Web-only ${service.directory} service must not contain a Tauri src-tauri directory; remove it or classify the service as tauri in service-catalog.json`,
+      )
+    }
 
-  const webPackagePath = `${webRoot}/package.json`
-  try {
-    const packageJson = await readJson(resolve(workspace, webPackagePath))
+    const webPackagePath = `${webRoot}/package.json`
+    const packageJson = await readJsonViolation(workspace, webPackagePath, violations)
+    if (!packageJson) continue
     for (const section of [
       'dependencies',
       'devDependencies',
@@ -1012,7 +1069,7 @@ async function validateTemplateSeparation(workspace) {
       for (const dependency of Object.keys(packageJson?.[section] ?? {})) {
         if (dependency.startsWith('@tauri-apps/')) {
           violations.push(
-            `${webPackagePath}: Web-only ${webService} template has forbidden Tauri dependency ${dependency} in ${section}; remove it or use services/example_tauri_service`,
+            `${webPackagePath}: Web-only ${service.directory} service has forbidden Tauri dependency ${dependency} in ${section}; remove it or classify the service as tauri in service-catalog.json`,
           )
         }
       }
@@ -1020,15 +1077,12 @@ async function validateTemplateSeparation(workspace) {
     for (const script of Object.keys(packageJson?.scripts ?? {})) {
       if (script === 'tauri' || script.startsWith('tauri:') || script.endsWith(':tauri')) {
         violations.push(
-          `${webPackagePath}: Web-only ${webService} template has forbidden Tauri script ${script}; remove it or use services/example_tauri_service`,
+          `${webPackagePath}: Web-only ${service.directory} service has forbidden Tauri script ${script}; remove it or classify the service as tauri in service-catalog.json`,
         )
       }
     }
-  } catch (error) {
-    if (error?.code !== 'ENOENT') throw error
   }
 
-  const tauriRoot = 'services/example_tauri_service'
   const requiredAssets = [
     'src-tauri/Cargo.toml',
     'src-tauri/tauri.conf.json',
@@ -1039,60 +1093,64 @@ async function validateTemplateSeparation(workspace) {
     'src-tauri/tauri.ios.conf.json',
     'src-tauri/tauri.macos.conf.json',
   ]
-  for (const asset of requiredAssets) {
-    const path = `${tauriRoot}/${asset}`
-    if (!(await pathExists(resolve(workspace, path)))) {
-      violations.push(
-        `${path}: Tauri template example_tauri_service is missing required asset ${asset}; restore it from services/example_tauri_service`,
-      )
+  for (const service of services.filter((candidate) => candidate.templateKind === 'tauri')) {
+    const tauriRoot = `services/${service.directory}`
+    for (const asset of requiredAssets) {
+      const path = `${tauriRoot}/${asset}`
+      if (!(await validatePathType(workspace, path, 'file', violations))) {
+        violations.push(
+          `${path}: Tauri service/template ${service.directory} is missing required asset ${asset}; restore the complete native service or change its catalog classification`,
+        )
+      }
     }
-  }
 
-  const originPath = `${tauriRoot}/src-tauri/src/origin.rs`
-  if (await pathExists(resolve(workspace, originPath))) {
-    const source = await readFile(resolve(workspace, originPath), 'utf8')
-    if (
-      !/APPROVED_RELEASE_ORIGINS/.test(source) ||
-      !/APPROVED_RELEASE_ORIGINS\.contains\(/.test(source)
-    ) {
-      violations.push(
-        `${originPath}: Tauri template src/origin.rs must enforce its fixed APPROVED_RELEASE_ORIGINS allowlist`,
-      )
+    const originPath = `${tauriRoot}/src-tauri/src/origin.rs`
+    if (await validatePathType(workspace, originPath, 'file', violations)) {
+      const source = await readFile(resolve(workspace, originPath), 'utf8')
+      if (
+        !/APPROVED_RELEASE_ORIGINS/.test(source) ||
+        !/APPROVED_RELEASE_ORIGINS\.contains\(/.test(source)
+      ) {
+        violations.push(
+          `${originPath}: Tauri service/template ${service.directory} must enforce its fixed APPROVED_RELEASE_ORIGINS allowlist`,
+        )
+      }
     }
-  }
 
-  const transportPath = `${tauriRoot}/src/web/platform/transport.ts`
-  if (await pathExists(resolve(workspace, transportPath))) {
-    const source = await readFile(resolve(workspace, transportPath), 'utf8')
-    if (
-      !/@tauri-apps\/api\/core/.test(source) ||
-      !/invoke(?:<[^>]+>)?\(\s*['"]api_request['"]/.test(source)
-    ) {
-      violations.push(
-        `${transportPath}: Tauri template platform/transport.ts must invoke the allowlisted native api_request command`,
-      )
+    const transportPath = `${tauriRoot}/src/web/platform/transport.ts`
+    if (await validatePathType(workspace, transportPath, 'file', violations)) {
+      const source = await readFile(resolve(workspace, transportPath), 'utf8')
+      if (
+        !/@tauri-apps\/api\/core/.test(source) ||
+        !/invoke(?:<[^>]+>)?\(\s*['"]api_request['"]/.test(source)
+      ) {
+        violations.push(
+          `${transportPath}: Tauri service/template ${service.directory} must invoke the allowlisted native api_request command`,
+        )
+      }
     }
-  }
 
-  for (const [asset, valid] of [
-    ['tauri.android.conf.json', (config) => config?.bundle?.android?.minSdkVersion === 24],
-    ['tauri.ios.conf.json', (config) => config?.bundle?.iOS?.minimumSystemVersion === '14.0'],
-    [
-      'tauri.macos.conf.json',
-      (config) =>
-        Array.isArray(config?.bundle?.targets) &&
-        config.bundle.targets.length === 1 &&
-        config.bundle.targets[0] === 'app' &&
-        config?.bundle?.macOS?.minimumSystemVersion === '10.13',
-    ],
-  ]) {
-    const path = `${tauriRoot}/src-tauri/${asset}`
-    if (!(await pathExists(resolve(workspace, path)))) continue
-    const config = await readJson(resolve(workspace, path))
-    if (!valid(config)) {
-      violations.push(
-        `${path}: Tauri template ${asset} must retain the reviewed platform minimums and bundle target`,
-      )
+    for (const [asset, valid] of [
+      ['tauri.android.conf.json', (config) => config?.bundle?.android?.minSdkVersion === 24],
+      ['tauri.ios.conf.json', (config) => config?.bundle?.iOS?.minimumSystemVersion === '14.0'],
+      [
+        'tauri.macos.conf.json',
+        (config) =>
+          Array.isArray(config?.bundle?.targets) &&
+          config.bundle.targets.length === 1 &&
+          config.bundle.targets[0] === 'app' &&
+          config?.bundle?.macOS?.minimumSystemVersion ===
+            (service.directory === 'admin' ? '10.15' : '10.13'),
+      ],
+    ]) {
+      const path = `${tauriRoot}/src-tauri/${asset}`
+      const config = await readJsonViolation(workspace, path, violations)
+      if (!config) continue
+      if (!valid(config)) {
+        violations.push(
+          `${path}: Tauri service/template ${service.directory} ${asset} must retain the reviewed platform minimums and bundle target`,
+        )
+      }
     }
   }
 
@@ -1128,34 +1186,21 @@ async function dynamicTauriTarget(workspace, service) {
   }
 }
 
-async function discoverTauriTargets(workspace) {
-  const targets = [...TAURI_TARGETS]
-  const known = new Set(TAURI_TARGETS.map((target) => target.name))
-  let entries
-  try {
-    entries = await readdir(resolve(workspace, 'services'), { withFileTypes: true })
-  } catch (error) {
-    if (error?.code === 'ENOENT') return targets
-    throw error
-  }
-  for (const entry of entries) {
-    if (!entry.isDirectory() || known.has(entry.name)) continue
-    const tauriPath = resolve(workspace, 'services', entry.name, 'src-tauri')
-    let info
-    try {
-      info = await lstat(tauriPath)
-    } catch (error) {
-      if (error?.code === 'ENOENT') continue
-      throw error
-    }
-    if (!info.isDirectory()) continue
-    targets.push(await dynamicTauriTarget(workspace, entry.name))
-  }
-  return targets
+async function catalogTauriTargets(workspace, services) {
+  const known = new Map(TAURI_TARGETS.map((target) => [target.name, target]))
+  return Promise.all(
+    services
+      .filter((service) => service.native)
+      .map(
+        (service) =>
+          known.get(service.directory) ?? dynamicTauriTarget(workspace, service.directory),
+      ),
+  )
 }
 
 async function validateTarget(workspace, target) {
   const violations = []
+  await validatePathType(workspace, target.tauriDirectory, 'directory', violations)
   const webRoot = resolve(workspace, target.webDirectory)
   const allWebSources = []
   for (const path of await filesUnder(webRoot, true)) {
@@ -1205,24 +1250,18 @@ async function validateTarget(workspace, target) {
     typeScriptApi.close()
   }
 
-  const configPath = resolve(workspace, target.tauriConfig)
-  try {
-    if ((await lstat(configPath)).isSymbolicLink()) {
-      violations.push(`${target.tauriConfig}: symbolic links are forbidden`)
-    } else {
-      const config = await readJson(configPath)
-      checkCsp(violations, config, target)
-      checkTauriWindows(violations, target.tauriConfig, config)
-      checkTauriCapabilities(violations, target.tauriConfig, config)
-      checkTauriConfigPlugins(violations, target.tauriConfig, config)
-    }
-  } catch (error) {
-    if (error?.code === 'ENOENT') {
-      violations.push(`${target.tauriConfig}: required Tauri config file is missing`)
-    } else throw error
+  const config = await readJsonViolation(workspace, target.tauriConfig, violations)
+  if (config) {
+    checkCsp(violations, config, target)
+    checkTauriWindows(violations, target.tauriConfig, config)
+    checkTauriCapabilities(violations, target.tauriConfig, config)
+    checkTauriConfigPlugins(violations, target.tauriConfig, config)
+  } else if (!(await pathExists(resolve(workspace, target.tauriConfig)))) {
+    violations.push(`${target.tauriConfig}: required Tauri config file is missing`)
   }
 
   const capabilitiesRoot = resolve(workspace, target.capabilitiesDirectory)
+  await validatePathType(workspace, target.capabilitiesDirectory, 'directory', violations)
   const capabilityFiles = []
   for (const path of await filesUnder(capabilitiesRoot, true)) {
     if ((await lstat(path)).isSymbolicLink()) {
@@ -1303,12 +1342,17 @@ async function validateTarget(workspace, target) {
 
 async function validateTauriBoundary(root = process.cwd()) {
   const workspace = resolve(root)
-  const targets = await discoverTauriTargets(workspace)
+  const catalog = await validateServiceCatalog(workspace)
+  const targets = await catalogTauriTargets(workspace, catalog.services)
   const [templateViolations, targetViolations] = await Promise.all([
-    validateTemplateSeparation(workspace),
+    validateTemplateSeparation(workspace, catalog.services),
     Promise.all(targets.map((target) => validateTarget(workspace, target))),
   ])
-  return [...templateViolations, ...targetViolations.flat()].sort()
+  return [
+    ...catalog.violations.map((violation) => `service catalog: ${violation}`),
+    ...templateViolations,
+    ...targetViolations.flat(),
+  ].sort()
 }
 
 export { validateTauriBoundary }

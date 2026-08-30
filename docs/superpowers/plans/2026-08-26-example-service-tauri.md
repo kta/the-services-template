@@ -1,5 +1,7 @@
 # example_service Tauri 導入 実装計画
 
+> **Historical / superseded:** この計画は分離前の履歴である。現在の Web + Tauri 雛形と仕様は `services/example_tauri_service` / `specs/example_tauri_service/features/002-tauri-native-app/spec.md` にある。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to execute this plan task-by-task with review checkpoints.
 
 **Goal:** `services/example_service` を、既存 Web 挙動と dev 認証契約を維持したまま、Tauri v2 desktop / iOS / Android shell と安全な native API transport を持つ状態にする。
@@ -8,7 +10,7 @@
 
 **Tech Stack:** Tauri 2、Rust、reqwest、serde、url、Vite、React、Vitest、Cloudflare Vite plugin、GitHub Actions。
 
-**Spec:** `specs/example_service/features/002-tauri-native-app/spec.md`（承認済み）
+**Spec:** `specs/example_tauri_service/features/002-tauri-native-app/spec.md`（承認済み）
 
 ## Global Constraints
 

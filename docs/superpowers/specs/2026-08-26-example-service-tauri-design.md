@@ -1,5 +1,7 @@
 # example_service Tauri 導入 設計
 
+> **Historical / superseded:** この設計は分離前の履歴である。現在の Web + Tauri 雛形は `services/example_tauri_service`、現行仕様は `specs/example_tauri_service/features/002-tauri-native-app/spec.md` を参照する。
+
 ステータス: Approved（2026-08-26、ユーザー承認済み）
 
 ## 目的

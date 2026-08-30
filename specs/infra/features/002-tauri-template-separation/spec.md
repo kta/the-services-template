@@ -17,12 +17,12 @@ Web 専用サービスまで native app として扱われる CI 負荷をなく
 
 | ID | 要件 | 検証層 |
 |---|---|---|
-| `AC-TPL-01` | 新サービス名だけで開始しても Web only / Web + Tauri を質問し、回答前にはコピーしない。 | `scripts/check-agent-compat.test.mjs` |
-| `AC-TPL-02` | Web only は `example_service` から生成し、Tauri 資産・依存・scripts を含めない。 | `scripts/check-agent-compat.test.mjs`, `scripts/check-tauri-boundary.test.mjs` |
-| `AC-TPL-03` | Web + Tauri は `example_tauri_service` から生成し、native transport・固定 origin・capability・platform 設定を引き継ぐ。 | `scripts/check-agent-compat.test.mjs`, `scripts/check-tauri-boundary.test.mjs` |
-| `AC-TPL-04` | 通常 PR verify で Web-only 雛形を Rust/Tauri 対象にしない。 | `scripts/check-deploy-boundary.test.mjs` |
-| `AC-TPL-05` | Tauri 雛形の必須 native 資産欠落・security boundary 違反を検出する。 | `scripts/check-tauri-boundary.test.mjs` |
-| `AC-TPL-06` | Web-only 雛形への Tauri 資産・依存・scripts 混入を検出する。 | `scripts/check-tauri-boundary.test.mjs` |
+| `STATIC-TPL-01` | 新サービス名だけで開始しても Web only / Web + Tauri を質問し、回答前にはコピーしない。 | `scripts/check-agent-compat.test.mjs` |
+| `STATIC-TPL-02` | Web only は `example_service` から生成し、Tauri 資産・依存・scripts を含めない。 | `scripts/check-agent-compat.test.mjs`, `scripts/check-tauri-boundary.test.mjs` |
+| `STATIC-TPL-03` | Web + Tauri は `example_tauri_service` から生成し、native transport・固定 origin・capability・platform 設定を引き継ぐ。 | `scripts/check-agent-compat.test.mjs`, `scripts/check-tauri-boundary.test.mjs` |
+| `CI-TPL-04` | 通常 PR verify で Web-only 雛形を Rust/Tauri 対象にしない。 | `scripts/check-deploy-boundary.test.mjs` |
+| `STATIC-TPL-05` | Tauri 雛形の必須 native 資産欠落・security boundary 違反を検出する。 | `scripts/check-tauri-boundary.test.mjs` |
+| `STATIC-TPL-06` | Web-only 雛形への Tauri 資産・依存・scripts 混入を検出する。 | `scripts/check-tauri-boundary.test.mjs` |
 
 ### スコープ外
 

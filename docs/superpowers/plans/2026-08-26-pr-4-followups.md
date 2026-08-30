@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript、Hono JWT/WebCrypto、Cloudflare Workers/Wrangler、Vite/Tauri v2、GitHub Actions、Make、Vitest、Rust cargo test。
 
-**Spec:** `specs/shared/features/001-asymmetric-access-token/spec.md`、`specs/infra/features/001-protected-production-deploy/spec.md`、`specs/example_service/features/002-tauri-native-app/spec.md`
+**Spec:** `specs/shared/features/001-asymmetric-access-token/spec.md`、`specs/infra/features/001-protected-production-deploy/spec.md`、`specs/example_tauri_service/features/002-tauri-native-app/spec.md`
 
 ## Global Constraints
 

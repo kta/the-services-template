@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="${1:-$(git rev-parse --show-toplevel)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
 fail() {
@@ -59,18 +60,8 @@ fi
 
 new_service_skill=".agents/skills/new-service/SKILL.md"
 if [[ -f "$new_service_skill" ]]; then
-  web_choice_line="$(grep -Ei 'Web only.*services/example_service' "$new_service_skill" || true)"
-  tauri_choice_line="$(grep -Ei 'Web \+ Tauri.*services/example_tauri_service' "$new_service_skill" || true)"
-  [[ -n "$web_choice_line" ]] ||
-    fail "new-service must map the Web only choice to services/example_service"
-  [[ "$web_choice_line" != *"example_tauri_service"* ]] ||
-    fail "new-service must not map the Web only choice to services/example_tauri_service"
-  [[ -n "$tauri_choice_line" ]] ||
-    fail "new-service must map the Web + Tauri choice to services/example_tauri_service"
-  grep -Eiq 'Before copying|before (the user answers|copying)|コピー前' "$new_service_skill" ||
-    fail "new-service must ask for the template choice before copying"
-  grep -Eiq 'Do not copy.*before the user answers|回答前.*コピー.*(しない|してはならない)' "$new_service_skill" ||
-    fail "new-service must forbid copying before the template answer"
+  node "$SCRIPT_DIR/check-new-service-skill.mjs" "$new_service_skill" ||
+    fail "new-service template choice contract is invalid"
 fi
 
 printf 'agent-compat: ok (%s)\n' "$(basename "$ROOT")"

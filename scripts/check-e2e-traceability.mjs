@@ -232,6 +232,19 @@ async function specificationIdentifiers(root) {
       definitions.set(id, [...existing, displayPath])
       if (status === 'Approved') approved.add(id)
     }
+    for (const match of source.matchAll(new RegExp(IDENTIFIER, 'g'))) {
+      const lineStart = source.lastIndexOf('\n', match.index - 1) + 1
+      const lineEnd = source.indexOf('\n', match.index)
+      const line = source.slice(lineStart, lineEnd < 0 ? source.length : lineEnd)
+      if (
+        line.trimStart().startsWith('|') &&
+        !new RegExp(`^[\\t ]*-\\s+${match[0]}:\\s+\\S`).test(line)
+      ) {
+        errors.push(
+          `Specification identifier ${match[0]} in ${displayPath}:${lineAt(source, match.index)} must be a UC/AC definition bullet or use a non-UC/AC verification ID.`,
+        )
+      }
+    }
   }
   for (const [id, paths] of [...definitions.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     if (paths.length > 1) {

@@ -26,7 +26,7 @@ pre-commit:
     #    traceability はここで検証するが、重い Playwright e2e は含めない(手動 / CI 手動トリガ)。
     test:
       priority: 2
-      run: pnpm run test
+      run: mise exec -- node scripts/without-git-local-env.mjs pnpm run test
 
 commit-msg:
   commands:
@@ -50,4 +50,4 @@ pre-push:
     # combined test gate: coverage thresholds + SPA web + E2E traceability
     test:
       priority: 4
-      run: pnpm run test
+      run: mise exec -- node scripts/without-git-local-env.mjs pnpm run test
