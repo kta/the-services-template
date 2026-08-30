@@ -126,6 +126,7 @@ test('builds fixed remote commands without accepting Wrangler overrides', () => 
     productionRestoreCommand('time-travel-restore', {
       database: 'admin',
       timestamp: '2026-08-22T00:00:00.000Z',
+      nowMs: Date.parse('2026-08-28T00:00:00.000Z'),
     }),
     ['d1', 'time-travel', 'restore', 'admin', '--timestamp=2026-08-22T00:00:00.000Z'],
   )
