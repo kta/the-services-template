@@ -46,22 +46,74 @@ async function runAgentCompatibilityCheck(root) {
   }
 }
 
-test('rejects a new-service skill that copies before the required template choice', async () => {
-  await withAgentFixture(
+const skillFrontmatter = [
+  '---',
+  'name: new-service',
+  'description: Creates a service from a selected template.',
+  '---',
+  '',
+  '# New service',
+  '',
+]
+const validTemplateChoiceSkill = [
+  ...skillFrontmatter,
+  'Before copying, ask the user to choose one template:',
+  '- Web only (recommended): after this answer, copy services/example_service.',
+  '- Web + Tauri: after this answer, copy services/example_tauri_service.',
+  'Do not copy either template before the user answers.',
+].join('\n')
+
+async function assertRejectedTemplateChoiceSkill(skill) {
+  await withAgentFixture(skill, async (root) => {
+    const result = await runAgentCompatibilityCheck(root)
+    assert.notEqual(result.code, 0)
+    assert.match(`${result.stderr}${result.stdout}`, /new-service/)
+  })
+}
+
+test('accepts a new-service skill with both choices and their matching copy sources', async () => {
+  await withAgentFixture(validTemplateChoiceSkill, async (root) => {
+    const result = await runAgentCompatibilityCheck(root)
+    assert.equal(result.code, 0)
+  })
+})
+
+for (const [caseName, skill] of [
+  [
+    'copies before the required template choice',
     [
-      '---',
-      'name: new-service',
-      'description: Creates a service from the standard template.',
-      '---',
-      '',
-      '# New service',
-      '',
+      ...skillFrontmatter,
       'Copy services/example_service before collecting any additional input.',
     ].join('\n'),
-    async (root) => {
-      const result = await runAgentCompatibilityCheck(root)
-      assert.notEqual(result.code, 0)
-      assert.match(`${result.stderr}${result.stdout}`, /new-service/)
-    },
-  )
-})
+  ],
+  [
+    'offers only the Web template choice',
+    [
+      ...skillFrontmatter,
+      'Before copying, ask whether the user wants Web only.',
+      'After the answer, copy services/example_service.',
+    ].join('\n'),
+  ],
+  [
+    'maps the Web choice to the Tauri template',
+    [
+      ...skillFrontmatter,
+      'Before copying, ask the user to choose Web only or Web + Tauri.',
+      'Web only: copy services/example_tauri_service.',
+      'Web + Tauri: copy services/example_tauri_service.',
+    ].join('\n'),
+  ],
+  [
+    'maps the Tauri choice to the Web template',
+    [
+      ...skillFrontmatter,
+      'Before copying, ask the user to choose Web only or Web + Tauri.',
+      'Web only: copy services/example_service.',
+      'Web + Tauri: copy services/example_service.',
+    ].join('\n'),
+  ],
+]) {
+  test(`rejects a new-service skill that ${caseName}`, async () => {
+    await assertRejectedTemplateChoiceSkill(skill)
+  })
+}

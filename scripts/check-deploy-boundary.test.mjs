@@ -297,22 +297,35 @@ test('manual artifact workflows do not receive Cloudflare credentials', async ()
   }
 })
 
-test('regular verify does not run Rust checks for the Web-only example template', async () => {
+function workflowStep(workflow, name) {
+  const start = workflow.indexOf(`- name: ${name}`)
+  assert.notEqual(start, -1, `missing workflow step: ${name}`)
+  const next = workflow.indexOf('\n      - name:', start + 1)
+  assert.notEqual(next, -1, `workflow step has no following boundary: ${name}`)
+  return workflow.slice(start, next)
+}
+
+test('regular verify runs Rust checks for exactly the native service manifests', async () => {
   const workflow = await readFile(join(root, '.github/workflows/ci.yml'), 'utf8')
-  const rustChecks = workflow.slice(
-    workflow.indexOf('- name: Rust format and Tauri unit tests'),
-    workflow.indexOf('- name: Check agent compatibility'),
-  )
-  assert.doesNotMatch(rustChecks, /services\/example_service\/src-tauri\//)
+  const rustChecks = workflowStep(workflow, 'Rust format and Tauri unit tests')
+  const manifests = [...rustChecks.matchAll(/--manifest-path\s+([^\s]+)/g)].map((match) => match[1])
+  assert.deepEqual([...new Set(manifests)].sort(), [
+    'services/admin/src-tauri/Cargo.toml',
+    'services/example_tauri_service/src-tauri/Cargo.toml',
+  ])
+  assert.doesNotMatch(rustChecks, /(?:@app\/)?example_service|services\/example_service\/src-tauri/)
 })
 
-test('Tauri build registries include the dedicated Tauri example template', async () => {
+test('native artifact workflow and Make targets exclude the Web-only template', async () => {
   const workflow = await readFile(join(root, '.github/workflows/example-tauri-build.yml'), 'utf8')
   const makefile = await readFile(join(root, 'Makefile'), 'utf8')
   assert.match(workflow, /@app\/example_tauri_service/)
   assert.match(workflow, /services\/example_tauri_service\/src-tauri/)
+  assert.doesNotMatch(workflow, /@app\/example_service|services\/example_service\/src-tauri/)
   assert.match(makefile, /^dev\/example_tauri_service\/tauri:/m)
   assert.match(makefile, /^build\/example_tauri_service\/tauri:/m)
+  assert.doesNotMatch(makefile, /^dev\/example_service\/tauri:/m)
+  assert.doesNotMatch(makefile, /^build\/example_service\/tauri:/m)
 })
 
 test('every GitHub Action reference is pinned to a full commit SHA', async () => {
