@@ -90,7 +90,7 @@ function validNativeWorkflow(service) {
   return `name: ${service.directory} native artifacts
 on:\n  workflow_dispatch: {}
 permissions:\n  contents: read
-env:\n  ANDROID_PLATFORM_API: 35\n  ANDROID_NDK_VERSION: 27.2.12479018\n  XCODEGEN_VERSION: 2.46.0
+env:\n  NODE_VERSION: 22\n  ANDROID_PLATFORM_API: 35\n  ANDROID_NDK_VERSION: 27.2.12479018\n  XCODEGEN_VERSION: 2.46.0
 jobs:\n  macos-universal:\n    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true\n    runs-on: macos-15
     steps:
       - name: Check native security boundary
@@ -290,6 +290,11 @@ test('rejects workflow symlinks and orphan native workflows without reading outs
     )
     await writeFixture(
       root,
+      '.github/workflows/orphan-dynamic-native.yml',
+      'on: {push: {}}\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - env: {ACTION: build-macos}\n        run: node scripts/native-workflow.mjs orphan "$ACTION"\n',
+    )
+    await writeFixture(
+      root,
       '.github/workflows/printed-native-text.yml',
       "on: {workflow_dispatch: {}}\njobs:\n  print:\n    runs-on: ubuntu-latest\n    steps:\n      - run: printf '%s\\n' 'build:tauri'\n",
     )
@@ -299,6 +304,7 @@ test('rejects workflow symlinks and orphan native workflows without reading outs
       assert.match(diagnostic, /booking\.yml.*symbolic link/i)
       assert.match(diagnostic, /orphan\.yml.*not registered.*nativeWorkflow/i)
       assert.match(diagnostic, /orphan-build-tauri\.yml.*not registered.*nativeWorkflow/i)
+      assert.match(diagnostic, /orphan-dynamic-native\.yml.*not registered.*nativeWorkflow/i)
       assert.doesNotMatch(diagnostic, /printed-native-text\.yml.*not registered.*nativeWorkflow/i)
       assert.doesNotMatch(diagnostic, /OUTSIDE_WORKFLOW_SENTINEL/)
     } finally {

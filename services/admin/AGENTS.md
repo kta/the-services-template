@@ -11,7 +11,7 @@ adminは運営コンソールであり、次の唯一の源泉である。
 - login、access token、refresh token rotation/revocation、rate limit
 - domain serviceへのorganization同期とhourly reconciliation
 
-React SPAとHono APIを1 Workerで配信し、admin専用D1を所有する。login lockout は D1 の原子的カウンタで管理する。本番では catalog の deployable domain binding と `NOTIFIER` だけを持ち、`EXAMPLE_SERVICE` scaffold binding は Vite のローカル dev config だけが追加する。他domain DBを直接読まない。
+React SPAとHono APIを1 Workerで配信し、admin専用D1を所有する。login lockout は D1 の原子的カウンタで管理する。本番では catalog の deployable domain binding/key tuple と `NOTIFIER` だけを持ち、domain 0 件なら `ADMIN_DOMAIN_IDENTITIES=[]` として reconcile を skip する。`EXAMPLE_SERVICE` scaffold binding/key は Vite・Miniflare のローカル dev/test config だけが追加する。他domain DBを直接読まない。
 
 ## 構成と入口
 
@@ -33,7 +33,7 @@ React SPAとHono APIを1 Workerで配信し、admin専用D1を所有する。log
 - 認証contractの変更は `packages/contracts` と `packages/shared` を含む設計承認が必要。独自token/cookie形式を足さない。
 - access tokenはresponse bodyからmemoryに保持し、refresh tokenはHttpOnly cookieに置く。localStorageへcredentialを保存しない。
 - passwordはclient-side stretch後の値を受け、server側pepperを組み合わせる。平文passwordやpepperをDB・log・responseへ出さない。
-- `JWT_PRIVATE_KEY`（adminだけが保持）、`JWT_PUBLIC_KEY`、`AUTH_PEPPER`、caller-specific な service-binding key は secret。wrangler vars や repository へ書かない。example_service には `JWT_PUBLIC_KEY`、`ADMIN_TO_EXAMPLE_SERVICE_KEY`、live-session introspection 用の `DOMAIN_TO_ADMIN_KEY` だけを渡す。`DOMAIN_TO_ADMIN_KEY` は admin と domain の両端に置くが、JWT_PRIVATE_KEY や admin → domain 鍵とは別値にする。`AUTH_DEV_PRIVATE_KEY` は local-only dev grant の補助鍵で、本番には置かない。
+- `JWT_PRIVATE_KEY`（adminだけが保持）、`JWT_PUBLIC_KEY`、`AUTH_PEPPER`、caller-specific な service-binding key は secret。wrangler vars や repository へ書かない。本番の各 deployable domain には `JWT_PUBLIC_KEY`、固有の `ADMIN_TO_<DOMAIN>_KEY`、live-session introspection 用の `DOMAIN_TO_ADMIN_KEY` だけを渡す。`DOMAIN_TO_ADMIN_KEY` は admin と domain の両端に置くが、JWT_PRIVATE_KEY や admin → domain 鍵とは別値にする。`ADMIN_TO_EXAMPLE_SERVICE_KEY` は scaffold の dev/test 専用で本番 admin には置かない。`AUTH_DEV_PRIVATE_KEY` は local-only dev grant の補助鍵で、本番には置かない。
 - 401は未認証・期限切れ、403は認証済み権限不足として区別する。
 - roleだけでなく運営organizationかtenant organizationかを検証する。未知routeはdefault-deny。
 - token期限、refresh rotation grace、invite期限、lockout windowは時刻注入し、ちょうど・±1秒をテストする。
@@ -42,7 +42,7 @@ React SPAとHono APIを1 Workerで配信し、admin専用D1を所有する。log
 ## Organizationとbinding境界
 
 - admin D1がorganizationのsource of truth。他serviceのD1へcross-D1 query/JOINしない。
-- syncはHono RPCの `AppType` とservice bindingを使い、`x-internal-key` を付ける。notifier 呼び出しは `x-internal-caller=admin` と `ADMIN_TO_NOTIFIER_KEY` を使い、domain/ops 用鍵を再利用しない。
+- syncはHono RPCの `AppType` とservice bindingを使い、`x-internal-key` を付ける。catalog directory → Worker service/binding/secret の strict convention と `ADMIN_DOMAIN_IDENTITIES` を維持し、production config・required secret・generated `Env`・runtime adapter の tuple を片方向だけ更新しない。notifier 呼び出しは `x-internal-caller=admin` と `ADMIN_TO_NOTIFIER_KEY` を使い、domain/ops 用鍵を再利用しない。
 - create/updateの成功条件とdomain同期失敗時の応答・再検知を既存specに合わせる。best-effort失敗はlog、戻り値、再試行上限をテストする。domain側は受信時刻の2時間 lease が切れると fail closed するため、hourly reconcile の失敗を無音で放置しない。
 - reconciliationは1runの上限、drift、partial failureを維持し、無制限fan-outを入れない。
 - invitation通知が失敗した場合のlink fallbackを消さない。送信成功を偽装しない。

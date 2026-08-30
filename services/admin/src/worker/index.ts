@@ -49,7 +49,12 @@ import {
   users,
 } from './db/schema'
 import { reconcileOrgs } from './reconcile'
-import { listDomainOrgs, type SyncEnv, syncOrgToExampleService } from './sync'
+import {
+  configuredDomainSyncEnvironments,
+  listDomainOrgs,
+  syncOrgToDomain,
+  syncOrgToDomains,
+} from './sync'
 
 // The admin SPA is served by this same Worker (same origin) — no CORS.
 export type Bindings = {
@@ -57,16 +62,14 @@ export type Bindings = {
   // development authentication even if a remote variable is accidentally set.
   APP_ENV: 'development' | 'production' | string
   DB: D1Database
-  // Service binding to the domain Worker (example_service): org sync + reconcile.
-  EXAMPLE_SERVICE: Fetcher
+  // JSON identities for catalog-deployable domain bindings. The template has
+  // none in production; Vite/test config injects example_service explicitly.
+  ADMIN_DOMAIN_IDENTITIES: string
   // Service binding to the notifier Worker (invite / ops mail, best-effort).
   NOTIFIER: Fetcher
   // Caller-specific service-binding keys. Keeping them separate limits the
   // blast radius if a domain/notifier/ops Worker is compromised.
   DOMAIN_TO_ADMIN_KEY: string
-  // The current scaffold has one domain, so the key name is domain-specific.
-  // Forks must use a new ADMIN_TO_<DOMAIN>_KEY name and value per domain.
-  ADMIN_TO_EXAMPLE_SERVICE_KEY: string
   ADMIN_TO_NOTIFIER_KEY: string
   // RS256 signing key. This private key must stay in admin; domain Workers only
   // receive JWT_PUBLIC_KEY and can therefore verify but not mint access tokens.
@@ -84,7 +87,7 @@ export type Bindings = {
   INVITE_BASE_URL?: string
   // hourly 照合ドリフト通知の宛先(検証済み実メール)。未設定なら通知をスキップ。
   OPS_ALERT_EMAIL?: string
-}
+} & Record<string, unknown>
 
 const REFRESH_COOKIE = 'rt'
 const INVITE_TTL_SECONDS = 72 * 60 * 60
@@ -466,7 +469,10 @@ const routes = app
       // Reconcile into the domain D1 via the typed service binding (best-effort).
       // 結果は `synced` で応答に載せる — 失敗を握りつぶすと、無効化やプラン変更が
       // ドメイン側に届いていないことに次の hourly reconcile までオペレータが気づけない。
-      const synced = await syncOrgToExampleService(c.env, toOrganization(org))
+      const synced = await syncOrgToDomains(
+        configuredDomainSyncEnvironments(c.env),
+        toOrganization(org),
+      )
       return c.json({ ...toOrganization(org), synced }, 201)
     },
   )
@@ -501,7 +507,7 @@ const routes = app
       const row = updated[0]
       if (!row) return c.json({ error: 'not_found' }, 404)
       const merged = toOrganization(row)
-      const synced = await syncOrgToExampleService(c.env, merged)
+      const synced = await syncOrgToDomains(configuredDomainSyncEnvironments(c.env), merged)
       return c.json({ ...merged, synced })
     },
   )
@@ -521,7 +527,10 @@ const routes = app
     // synced=false は「admin では無効化済みだがドメイン側はまだ有効」— service
     // binding が失敗した場合、domain の 2h lease が切れるまで API が生き残り得る。
     // UI が警告を出せるよう返す。
-    const synced = await syncOrgToExampleService(c.env, toOrganization(row))
+    const synced = await syncOrgToDomains(
+      configuredDomainSyncEnvironments(c.env),
+      toOrganization(row),
+    )
     return c.json({ id, isDisabled: true as const, synced })
   })
   // Invite a user (staff by default) to an org: user(hash=null) + invitation +
@@ -641,10 +650,10 @@ const LOGIN_RATE_LIMIT_CLEANUP_LIMIT = 1_000
 
 /**
  * Hourly org reconcile (Cron) + auth_events retention. Re-syncs any
- * admin↔domain drift; notifies once per day slot. reconcile 部分は try/catch —
- * ドメイン Worker 未デプロイ等でリストが取れないトポロジ(雛形を実サービスへ
- * 差し替える前)でも cron を throw させないが、失敗自体は通知する(照合が
- * 落ち続けるとドリフトが無限に見えなくなるため)。
+ * admin↔domain drift; notifies once per day slot. deployable domain が 0 件なら
+ * reconcile を skip する。設定済み domain の binding が失敗した場合は cron を
+ * throw させないが、失敗自体は通知する(照合が落ち続けるとドリフトが無限に
+ * 見えなくなるため)。
  */
 async function scheduled(_event: unknown, env: Bindings, _ctx?: unknown): Promise<void> {
   const db = drizzle(env.DB)
@@ -676,42 +685,48 @@ async function scheduled(_event: unknown, env: Bindings, _ctx?: unknown): Promis
   }
 
   try {
-    const syncEnv: SyncEnv = {
-      EXAMPLE_SERVICE: env.EXAMPLE_SERVICE,
-      ADMIN_TO_EXAMPLE_SERVICE_KEY: env.ADMIN_TO_EXAMPLE_SERVICE_KEY,
+    for (const syncEnv of configuredDomainSyncEnvironments(env)) {
+      const result = await reconcileOrgs({
+        // 全行を 1 クエリで取り、resync にそのまま持ち回す(org ごとの再 SELECT = N+1
+        // を避ける。全 org ドリフト時に D1 の 50 クエリ/呼 上限を踏まないため)。
+        listAdminOrgs: async () => {
+          const rows = await db.select().from(organizations)
+          return rows.map((r) => ({
+            id: r.id,
+            name: r.name,
+            plan: r.plan,
+            isDisabled: r.isDisabled === '1',
+            version: r.version,
+            row: r,
+          }))
+        },
+        listDomainOrgs: () => listDomainOrgs(syncEnv),
+        resync: (o) => syncOrgToDomain(syncEnv, toOrganization(o.row)),
+        notifyDrift: async ({ drift, failed, truncated }) => {
+          const alertEmail = configuredAlertEmail(env)
+          if (!alertEmail) {
+            console.warn('sync drift detected but OPS_ALERT_EMAIL is unset', drift)
+            return
+          }
+          // 冪等キーは日付スロット(再実行・リトライで連打しない)。
+          await notify(env, {
+            id: `ops.sync_drift:${syncEnv.directory}:${new Date().toISOString().slice(0, 10)}`,
+            type: 'ops.sync_drift',
+            to: alertEmail,
+            payload: {
+              domain: syncEnv.directory,
+              organizationIds: drift,
+              count: drift.length,
+              failed,
+              truncated,
+            },
+          })
+        },
+      })
+      if (result.drift.length > 0) {
+        console.warn(`org sync drift reconciled for ${syncEnv.directory}`, result)
+      }
     }
-    const result = await reconcileOrgs({
-      // 全行を 1 クエリで取り、resync にそのまま持ち回す(org ごとの再 SELECT = N+1
-      // を避ける。全 org ドリフト時に D1 の 50 クエリ/呼 上限を踏まないため)。
-      listAdminOrgs: async () => {
-        const rows = await db.select().from(organizations)
-        return rows.map((r) => ({
-          id: r.id,
-          name: r.name,
-          plan: r.plan,
-          isDisabled: r.isDisabled === '1',
-          version: r.version,
-          row: r,
-        }))
-      },
-      listDomainOrgs: () => listDomainOrgs(syncEnv),
-      resync: (o) => syncOrgToExampleService(syncEnv, toOrganization(o.row)),
-      notifyDrift: async ({ drift, failed, truncated }) => {
-        const alertEmail = configuredAlertEmail(env)
-        if (!alertEmail) {
-          console.warn('sync drift detected but OPS_ALERT_EMAIL is unset', drift)
-          return
-        }
-        // 冪等キーは日付スロット(再実行・リトライで連打しない)。
-        await notify(env, {
-          id: `ops.sync_drift:${new Date().toISOString().slice(0, 10)}`,
-          type: 'ops.sync_drift',
-          to: alertEmail,
-          payload: { organizationIds: drift, count: drift.length, failed, truncated },
-        })
-      },
-    })
-    if (result.drift.length > 0) console.warn('org sync drift reconciled', result)
   } catch (err) {
     // 照合そのものの失敗(ドメイン側ダウン・caller-specific key 不一致等)。ドリフト通知は
     // 照合成功時にしか出ないので、ここで通知しないと壊れた同期が永久に無音になる。

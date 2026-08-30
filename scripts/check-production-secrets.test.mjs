@@ -43,7 +43,6 @@ test('uses the structured Cloudflare Worker secret endpoint and fails closed on 
 test('accepts exactly the production secret allowlist', () => {
   const result = validateProductionSecretNames('admin', [
     { name: 'DOMAIN_TO_ADMIN_KEY' },
-    { name: 'ADMIN_TO_EXAMPLE_SERVICE_KEY' },
     { name: 'ADMIN_TO_NOTIFIER_KEY' },
     { name: 'JWT_PRIVATE_KEY' },
     { name: 'JWT_PUBLIC_KEY' },
@@ -62,7 +61,10 @@ test('detects stale development or cross-service secret names without reading va
     'AUTH_PEPPER',
     'AUTH_DEV_PRIVATE_KEY',
   ])
-  assert.deepEqual(result, { missing: [], unexpected: ['AUTH_DEV_PRIVATE_KEY'] })
+  assert.deepEqual(result, {
+    missing: [],
+    unexpected: ['ADMIN_TO_EXAMPLE_SERVICE_KEY', 'AUTH_DEV_PRIVATE_KEY'],
+  })
 })
 
 test('reports missing required production secrets', () => {
@@ -107,7 +109,7 @@ test('accepts the domain-specific admin key selected by the copied domain config
         'JWT_PUBLIC_KEY',
         'AUTH_PEPPER',
       ],
-      { domainService: 'booking' },
+      { domainSecrets: ['ADMIN_TO_BOOKING_KEY'] },
     ),
     { missing: [], unexpected: [] },
   )

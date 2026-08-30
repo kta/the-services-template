@@ -21,7 +21,8 @@
   // Production service bindings (no internet hop). The non-deployable
   // example_service scaffold is injected only by vite.config.ts in dev mode.
   // A copied deployable domain must be added here together with its catalog
-  // registration; repository validation requires the sets to match exactly.
+  // registration, required caller secret, and ADMIN_DOMAIN_IDENTITIES tuple;
+  // repository validation requires every field to match exactly.
   // NOTIFIER handles invite / ops mails via POST /api/internal/send.
   "services": [{ "binding": "NOTIFIER", "service": "notifier" }],
   // Hourly org reconcile (admin ↔ domain sync-drift check). UTC only; the
@@ -30,7 +31,6 @@
   "secrets": {
     "required": [
       "DOMAIN_TO_ADMIN_KEY",
-      "ADMIN_TO_EXAMPLE_SERVICE_KEY",
       "ADMIN_TO_NOTIFIER_KEY",
       "JWT_PRIVATE_KEY",
       "JWT_PUBLIC_KEY",
@@ -55,7 +55,10 @@
     "INVITE_BASE_URL": "",
     // Credential-less dev grant is disabled by default and only overridden by
     // a local .dev.vars value. Never set this to true in a production env.
-    "AUTH_DEV_GRANT": "false"
+    "AUTH_DEV_GRANT": "false",
+    // JSON array of {directory,binding,secret} tuples derived from catalog
+    // deployable domains. Empty in this non-deployable template repository.
+    "ADMIN_DOMAIN_IDENTITIES": "[]"
     // INVITE_BASE_URL(任意): 招待リンクの基底 URL の明示オーバーライド。
     // 既定はリクエスト origin から導出されるので通常は不要。
   }

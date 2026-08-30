@@ -24,7 +24,7 @@
 | `POST /api/auth/refresh` | refresh cookie | ローテーション + 再利用検知 |
 | `POST /api/auth/logout` | refresh cookie | 当該セッション revoke |
 | `POST /api/auth/accept-invite` | 招待トークン | パスワード設定 + 招待消費 |
-| `GET/POST /api/organizations` | **operator-org の admin JWT**（default-deny） | 一覧 / 作成 → example_service へ同期 |
+| `GET/POST /api/organizations` | **operator-org の admin JWT**（default-deny） | 一覧 / 作成 → catalog deployable domain へ同期 |
 | `PATCH/DELETE /api/organizations/:id` | 同上 | plan・無効化の更新（DELETE は無効化）→ 同期 |
 | `POST /api/organizations/:id/invitations` | 同上 | ユーザー招待（notifier 経由、失敗時はリンク返却） |
 | `/api/internal/*` | `x-internal-key` | 照合 Cron 等の内部 API |
@@ -34,7 +34,7 @@
 契約: `packages/contracts/src/organization.ts`（`Organization` / `CreateOrganization`）+ `packages/contracts/src/auth.ts`（`LoginRequest` / `InviteRequest` / `AcceptInviteRequest` 等）。
 
 ## cross-D1 同期
-作成時に **service binding `EXAMPLE_SERVICE`** 経由で `example_service` の `POST /api/internal/organizations`（internal-key ガード）を typed `hc` で呼び、org の同期コピーを upsert（idempotent）。cross-D1 JOIN は使わない。失敗は best-effort（`synced: false` とログ）→ hourly 照合 Cron が再同期する（ドリフト時 ops.sync_drift 通知）。domain 側のコピーには受信時刻の同期 lease（2 時間）を持たせ、同期停止時は有効化済みの古い行も 503 `not_synced` で fail closed にする。1 回の照合は無料枠に合わせて 40 件まで再同期し、超過は次回へ送る。
+作成時に catalog の全 deployable domain へ、厳密 convention で導出した service binding と caller key を使って `POST /api/internal/organizations`（internal-key ガード）を typed `hc` で呼び、org の同期コピーを upsert（idempotent）。`ADMIN_DOMAIN_IDENTITIES` の `{directory,binding,secret}` tuple は catalog、production config、generated `Env` と双方向一致させる。cross-D1 JOIN は使わない。いずれかの失敗は best-effort（`synced: false` とログ）→ domain ごとの hourly 照合 Cron が再同期する（ドリフト時 ops.sync_drift 通知）。deployable domain が 0 件なら同期成功として扱い、reconcile を skip する。domain 側のコピーには受信時刻の同期 lease（2 時間）を持たせ、同期停止時は有効化済みの古い行も 503 `not_synced` で fail closed にする。1 回の照合は無料枠に合わせて domain ごとに 40 件まで再同期し、超過は次回へ送る。
 
 ## 既知の制約（本番前に必須）
 - caller-specific な内部鍵（admin → domain、admin → notifier、domain → admin の受信境界）・admin 専用 `JWT_PRIVATE_KEY`・admin の `JWT_PUBLIC_KEY`・`AUTH_PEPPER` を protected production workflow の allowlist 経由で設定（未設定は fail close）。`scripts/put-production-secret.mjs` は validation-only である。内部鍵は別方向で再利用せず、署名用 private key は admin の外へ出さない。

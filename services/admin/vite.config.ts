@@ -30,6 +30,19 @@ export default defineConfig(({ command }) => ({
             ...(config.services ?? []),
             { binding: 'EXAMPLE_SERVICE', service: 'example-service' },
           ]
+          config.vars = {
+            ...config.vars,
+            ADMIN_DOMAIN_IDENTITIES: JSON.stringify([
+              {
+                directory: 'example_service',
+                binding: 'EXAMPLE_SERVICE',
+                secret: 'ADMIN_TO_EXAMPLE_SERVICE_KEY',
+              },
+            ]),
+          }
+          config.secrets = {
+            required: [...(config.secrets?.required ?? []), 'ADMIN_TO_EXAMPLE_SERVICE_KEY'],
+          }
         }
         if (e2eAuth) {
           // E2E builds use test-only credentials without changing the

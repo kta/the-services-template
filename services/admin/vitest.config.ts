@@ -11,6 +11,13 @@ export default defineConfig({
       miniflare: {
         bindings: {
           APP_ENV: 'development',
+          ADMIN_DOMAIN_IDENTITIES: JSON.stringify([
+            {
+              directory: 'example_service',
+              binding: 'EXAMPLE_SERVICE',
+              secret: 'ADMIN_TO_EXAMPLE_SERVICE_KEY',
+            },
+          ]),
           TEST_MIGRATIONS: migrations,
           // wrangler vars から機密を撤去したぶん、テストは自前で dev 値を供給する
           DOMAIN_TO_ADMIN_KEY: 'dev-domain-to-admin-key-000000000000',

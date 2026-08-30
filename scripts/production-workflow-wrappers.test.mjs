@@ -22,11 +22,16 @@ const catalog = {
 }
 
 test('production service wrapper derives selector, cwd, entry, and config from catalog identity', () => {
-  assert.deepEqual(productionServiceInvocation('/workspace', catalog, 'booking', 'build'), {
-    command: 'pnpm',
-    args: ['--filter', '@app/booking', 'run', 'build'],
-    cwd: '/workspace',
-  })
+  assert.deepEqual(
+    productionServiceInvocation('/workspace', catalog, 'booking', 'build', {
+      pnpmPath: '/trusted/pnpm',
+    }),
+    {
+      command: '/trusted/pnpm',
+      args: ['--filter', '@app/booking', 'run', 'build'],
+      cwd: '/workspace',
+    },
+  )
   assert.deepEqual(
     productionServiceInvocation('/workspace', catalog, 'admin', 'migrate', {
       pnpmPath: '/trusted/pnpm',

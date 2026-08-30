@@ -20,6 +20,7 @@ const ALLOWED_PRODUCTION_VARS = {
     'INVITE_BASE_URL',
     'DOMAIN_NOTIFICATION_TO',
     'AUTH_DEV_GRANT',
+    'ADMIN_DOMAIN_IDENTITIES',
   ]),
   notifier: new Set([
     'APP_ENV',
@@ -224,7 +225,20 @@ function compareExactServiceCollection(label, expected, actual, violations) {
   }
 }
 
-function expectedDeployableDomainsFromCatalog(source) {
+export function productionDomainIdentity(directory) {
+  if (typeof directory !== 'string' || !/^[a-z][a-z0-9_]{0,62}$/.test(directory)) {
+    throw new Error(`invalid deployable domain directory: ${directory}`)
+  }
+  const binding = directory.toUpperCase()
+  return {
+    directory,
+    service: directory.replaceAll('_', '-'),
+    binding,
+    secret: `ADMIN_TO_${binding}_KEY`,
+  }
+}
+
+function expectedDeployableDomainIdentitiesFromCatalog(source) {
   const catalog = JSON.parse(source)
   if (!catalog || typeof catalog !== 'object' || Array.isArray(catalog)) {
     throw new Error('service-catalog.json must contain an object')
@@ -249,9 +263,44 @@ function expectedDeployableDomainsFromCatalog(source) {
       throw new Error(`service-catalog.json services[${index}] has invalid identity`)
     }
     directories.add(directory)
-    if (deployable && directory !== 'admin') expected.push(directory)
+    if (deployable && directory !== 'admin') expected.push(productionDomainIdentity(directory))
   }
   return expected
+}
+
+function runtimeDomainIdentityTuples(value, violations) {
+  if (typeof value !== 'string') {
+    violations.push('admin runtime domain identities must be a reviewed JSON array')
+    return []
+  }
+  let parsed
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    violations.push('admin runtime domain identities must be a reviewed JSON array')
+    return []
+  }
+  if (!Array.isArray(parsed)) {
+    violations.push('admin runtime domain identities must be a reviewed JSON array')
+    return []
+  }
+  const tuples = []
+  for (const identity of parsed) {
+    const object = asObject(identity)
+    const keys = object ? Object.keys(object).sort() : []
+    if (
+      !object ||
+      keys.join('|') !== 'binding|directory|secret' ||
+      !asString(object.directory) ||
+      !asString(object.binding) ||
+      !asString(object.secret)
+    ) {
+      tuples.push('<invalid>')
+      continue
+    }
+    tuples.push(`${object.directory}|${object.binding}|${object.secret}`)
+  }
+  return tuples
 }
 
 export function effectiveValues(config) {
@@ -420,7 +469,54 @@ export function validateProductionConfig(source, service, environment = {}, opti
   switch (service) {
     case 'admin':
       requireNonPlaceholder(values.adminDatabaseId, 'admin database_id', violations)
-      if (Array.isArray(options.expectedDomainServices)) {
+      if (Array.isArray(options.expectedDomainIdentities)) {
+        const expectedIdentities = options.expectedDomainIdentities.map((identity) =>
+          productionDomainIdentity(identity.directory),
+        )
+        const expectedBindingTuples = expectedIdentities.map(
+          ({ service: worker, binding }) => `${worker}|${binding}`,
+        )
+        const actualBindingTuples = (Array.isArray(config.services) ? config.services : [])
+          .filter((entry) => asObject(entry)?.binding !== 'NOTIFIER')
+          .map((entry) => {
+            const object = asObject(entry)
+            return object
+              ? `${asString(object.service) || '<invalid>'}|${asString(object.binding) || '<invalid>'}`
+              : '<invalid>'
+          })
+        compareExactServiceCollection(
+          'admin production domain bindings (service|binding tuples)',
+          expectedBindingTuples,
+          actualBindingTuples,
+          violations,
+        )
+
+        const expectedSecrets = expectedIdentities.map(({ secret }) => secret)
+        const actualSecrets = (
+          Array.isArray(asObject(config.secrets)?.required) ? asObject(config.secrets).required : []
+        )
+          .map((name) => asString(name) || '<invalid>')
+          .filter(
+            (name) =>
+              /^ADMIN_TO_[A-Z][A-Z0-9_]*_KEY$/.test(name) && name !== 'ADMIN_TO_NOTIFIER_KEY',
+          )
+        compareExactServiceCollection(
+          'admin production domain secrets',
+          expectedSecrets,
+          actualSecrets,
+          violations,
+        )
+
+        const expectedRuntimeTuples = expectedIdentities.map(
+          ({ directory, binding, secret }) => `${directory}|${binding}|${secret}`,
+        )
+        compareExactServiceCollection(
+          'admin runtime domain identities',
+          expectedRuntimeTuples,
+          runtimeDomainIdentityTuples(asObject(config.vars)?.ADMIN_DOMAIN_IDENTITIES, violations),
+          violations,
+        )
+      } else if (Array.isArray(options.expectedDomainServices)) {
         const actualDomainServices = (Array.isArray(config.services) ? config.services : [])
           .filter((entry) => asObject(entry)?.binding !== 'NOTIFIER')
           .map((entry) => asString(asObject(entry)?.service).replaceAll('-', '_') || '<invalid>')
@@ -530,7 +626,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     console.error('usage: check-production-config.mjs <admin|domain|notifier|ops>')
     process.exitCode = 2
   } else {
-    const expectedDomainServices = expectedDeployableDomainsFromCatalog(
+    const expectedDomainIdentities = expectedDeployableDomainIdentitiesFromCatalog(
       await readFile(join(root, 'service-catalog.json'), 'utf8'),
     )
     const configPath = join(root, `services/${service}/wrangler.jsonc`)
@@ -562,7 +658,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         reviewedAccountId: asString(effectiveValues(opsConfig).opsAccountId),
         allowedOpsDatabaseVars,
         reviewedDatabaseIds,
-        expectedDomainServices,
+        expectedDomainIdentities,
       },
     )
     if (violations.length > 0) {

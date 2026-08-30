@@ -2,6 +2,7 @@ import { accessSync, constants, lstatSync, realpathSync } from 'node:fs'
 import { basename, delimiter, dirname, isAbsolute, relative, resolve } from 'node:path'
 
 const PNPM_EXECUTABLE_PATTERN = /^pnpm(?:\.c?js)?$/
+const NODE_EXECUTABLE_PATTERN = /^node(?:\.exe)?$/
 
 function isInside(path, directory) {
   const relation = relative(directory, path)
@@ -28,7 +29,14 @@ export function resolveProductionPnpm(env = process.env, workspaceRoot = process
           }
           return configured
         })()
-  return validateExecutable(configuredPath, workspaceRoot)
+  return validateExecutable(configuredPath, workspaceRoot, PNPM_EXECUTABLE_PATTERN, 'pnpm')
+}
+
+export function resolveReviewedNode(executable = process.execPath, workspaceRoot = process.cwd()) {
+  if (typeof executable !== 'string' || !isAbsolute(executable)) {
+    throw new Error('reviewed wrapper requires an absolute Node path')
+  }
+  return validateExecutable(executable, workspaceRoot, NODE_EXECUTABLE_PATTERN, 'Node')
 }
 
 function findPathPnpm(pathValue) {
@@ -50,33 +58,33 @@ function findPathPnpm(pathValue) {
   throw new Error('PATH must contain a trusted pnpm executable')
 }
 
-function validateExecutable(configuredPath, workspaceRoot) {
+function validateExecutable(configuredPath, workspaceRoot, executablePattern, label) {
   const checkout = realpathSync(resolve(workspaceRoot))
   if (isInside(resolve(configuredPath), checkout)) {
-    throw new Error('pnpm must not point inside the repository checkout')
+    throw new Error(`${label} must not point inside the repository checkout`)
   }
   let executable
   try {
     executable = realpathSync(configuredPath)
   } catch {
-    throw new Error('pnpm must resolve to an existing executable')
+    throw new Error(`${label} must resolve to an existing executable`)
   }
   const info = lstatSync(executable)
   if (!info.isFile() || (info.mode & 0o022) !== 0) {
-    throw new Error('pnpm must resolve to a non-writable regular file')
+    throw new Error(`${label} must resolve to a non-writable regular file`)
   }
   try {
     accessSync(executable, constants.X_OK)
   } catch {
-    throw new Error('pnpm must resolve to an executable file')
+    throw new Error(`${label} must resolve to an executable file`)
   }
-  if (!PNPM_EXECUTABLE_PATTERN.test(basename(executable))) {
-    throw new Error('pnpm must resolve to a pnpm executable')
+  if (!executablePattern.test(basename(executable))) {
+    throw new Error(`${label} must resolve to a ${label} executable`)
   }
 
   const currentUser = typeof process.getuid === 'function' ? process.getuid() : null
   if (currentUser !== null && info.uid !== 0 && info.uid !== currentUser) {
-    throw new Error('pnpm must be owned by root or the current user')
+    throw new Error(`${label} must be owned by root or the current user`)
   }
   const parent = lstatSync(dirname(executable))
   if (
@@ -84,10 +92,10 @@ function validateExecutable(configuredPath, workspaceRoot) {
     (parent.mode & 0o022) !== 0 ||
     (currentUser !== null && parent.uid !== 0 && parent.uid !== currentUser)
   ) {
-    throw new Error('pnpm parent directory must be owner-only and trusted')
+    throw new Error(`${label} parent directory must be owner-only and trusted`)
   }
   if (isInside(executable, checkout)) {
-    throw new Error('pnpm must not point inside the repository checkout')
+    throw new Error(`${label} must not point inside the repository checkout`)
   }
   return executable
 }

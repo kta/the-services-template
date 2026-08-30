@@ -17,7 +17,6 @@ const CLOUDFLARE_API_BASE = 'https://api.cloudflare.com/client/v4'
 const PRODUCTION_SECRET_POLICY = {
   admin: [
     'DOMAIN_TO_ADMIN_KEY',
-    'ADMIN_TO_EXAMPLE_SERVICE_KEY',
     'ADMIN_TO_NOTIFIER_KEY',
     'JWT_PRIVATE_KEY',
     'JWT_PUBLIC_KEY',
@@ -122,11 +121,31 @@ function expectedProductionSecretNames(service, options = {}) {
     // legacy names are rejected below.
     return [domainSecret, 'DOMAIN_TO_ADMIN_KEY', 'DOMAIN_TO_NOTIFIER_KEY', 'JWT_PUBLIC_KEY']
   }
-  const configuredDomainSecret = domainSecretName(options.domainService)
-  if (!configuredDomainSecret) return expected
-  return expected.map((name) =>
-    name === 'ADMIN_TO_EXAMPLE_SERVICE_KEY' ? configuredDomainSecret : name,
-  )
+  const configuredDomainSecrets = Array.isArray(options.domainSecrets)
+    ? options.domainSecrets
+    : [domainSecretName(options.domainService)].filter(Boolean)
+  return [...expected.slice(0, 1), ...configuredDomainSecrets, ...expected.slice(1)]
+}
+
+function configuredAdminDomainSecrets(config) {
+  const serialized = config?.vars?.ADMIN_DOMAIN_IDENTITIES
+  if (typeof serialized !== 'string') {
+    throw new Error('ADMIN_DOMAIN_IDENTITIES must be configured')
+  }
+  const identities = JSON.parse(serialized)
+  if (!Array.isArray(identities)) throw new Error('ADMIN_DOMAIN_IDENTITIES must be an array')
+  return identities.map((identity) => {
+    const expected = domainSecretName(identity?.directory)
+    if (
+      !expected ||
+      identity?.binding !== identity.directory.toUpperCase() ||
+      identity?.secret !== expected ||
+      Object.keys(identity).sort().join('|') !== 'binding|directory|secret'
+    ) {
+      throw new Error('ADMIN_DOMAIN_IDENTITIES contains an invalid identity')
+    }
+    return identity.secret
+  })
 }
 
 /** Validate names only; secret values are intentionally never read or printed. */
@@ -193,7 +212,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       const options =
         service === 'admin'
           ? {
-              domainService: effectiveValues(config).adminDomainService,
+              domainSecrets: configuredAdminDomainSecrets(config),
             }
           : {}
       const opsConfig = parseJsonc(

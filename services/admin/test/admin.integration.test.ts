@@ -732,6 +732,24 @@ describe('public auth cookie flow', () => {
 })
 
 describe('scheduled reconcile', () => {
+  it('catalog deployable domain が 0 件なら domain reconcile を呼ばない', async () => {
+    const domainFetch = vi.spyOn(env.EXAMPLE_SERVICE, 'fetch')
+    const zeroDomainEnv = new Proxy(env, {
+      get(target, property, receiver) {
+        if (property === 'ADMIN_DOMAIN_IDENTITIES') return '[]'
+        return Reflect.get(target, property, receiver)
+      },
+    })
+
+    await worker.scheduled?.(
+      {} as never,
+      zeroDomainEnv as unknown as Parameters<NonNullable<typeof worker.scheduled>>[1],
+      {} as never,
+    )
+
+    expect(domainFetch).not.toHaveBeenCalled()
+  })
+
   it('期限切れ login rate-limit 行を bounded cleanup し、live 行は残す', async () => {
     const db = drizzle(env.DB)
     await db.insert(loginRateLimits).values([
@@ -779,7 +797,9 @@ describe('scheduled reconcile', () => {
     )
     expect(driftCall).toBeDefined()
     // 冪等キーは日次スロット(再実行で連打しない)
-    expect(String((driftCall?.[1] as RequestInit)?.body ?? '')).toContain('ops.sync_drift:')
+    expect(String((driftCall?.[1] as RequestInit)?.body ?? '')).toContain(
+      'ops.sync_drift:example_service:',
+    )
   })
 
   it('does not throw when the domain Worker is unreachable (scaffold not deployed)', async () => {

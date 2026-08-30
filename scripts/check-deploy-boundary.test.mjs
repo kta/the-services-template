@@ -190,7 +190,6 @@ test('production write entry points are CI-only and cannot be reached through Ma
   const requiredSecretNames = {
     'services/admin/wrangler.jsonc': [
       'DOMAIN_TO_ADMIN_KEY',
-      'ADMIN_TO_EXAMPLE_SERVICE_KEY',
       'ADMIN_TO_NOTIFIER_KEY',
       'JWT_PRIVATE_KEY',
       'JWT_PUBLIC_KEY',
@@ -249,7 +248,9 @@ test('production write entry points are CI-only and cannot be reached through Ma
       /sendNotification\(env\.NOTIFIER,\s*env\.ADMIN_TO_NOTIFIER_KEY/,
     ],
     'services/admin/src/worker/sync.ts': [
-      /x-internal-key['"]:\s*env\.ADMIN_TO_EXAMPLE_SERVICE_KEY/,
+      /environment\s*\[\s*identity\.binding\s*\]/,
+      /environment\s*\[\s*identity\.secret\s*\]/,
+      /x-internal-key['"]:\s*env\.key/,
     ],
     'services/example_service/src/worker/index.ts': [
       /internalAuth[\s\S]*?ADMIN_TO_EXAMPLE_SERVICE_KEY/,

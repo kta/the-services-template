@@ -2,13 +2,36 @@
 
 import { execFileSync } from 'node:child_process'
 import { lstatSync, realpathSync } from 'node:fs'
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { resolveProductionPnpm } from './production-pnpm.mjs'
+import {
+  productionCloudflareEnvironment,
+  productionEnvironment,
+  productionGuardEnvironment,
+} from './production-environment.mjs'
+import { resolveProductionPnpm, resolveReviewedNode } from './production-pnpm.mjs'
+import { withoutCloudflareEnvironment } from './run-without-cloudflare-env.mjs'
 import { loadServiceRepositoryCatalog } from './service-catalog.mjs'
 
 const DEFAULT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const CREDENTIAL_ACTIONS = new Set(['migrate', 'deploy', 'bootstrap'])
+
+function guardScriptForAction(action, environment) {
+  if (action === 'bootstrap') return 'require-production-bootstrap.mjs'
+  if (action === 'migrate' && environment?.GITHUB_EVENT_NAME === 'workflow_dispatch') {
+    return 'require-production-bootstrap.mjs'
+  }
+  return 'require-production-deploy.mjs'
+}
+
+function requireCredentialedActionGuard(root, action, environment, nodePath, run = execFileSync) {
+  if (!CREDENTIAL_ACTIONS.has(action)) return
+  run(nodePath, [join(root, 'scripts', guardScriptForAction(action, environment))], {
+    cwd: root,
+    env: productionServiceGuardEnvironment(environment, nodePath),
+    stdio: 'inherit',
+  })
+}
 
 function catalogEntry(catalog, directory) {
   if (typeof directory !== 'string' || !/^[a-z][a-z0-9_]{0,62}$/.test(directory)) {
@@ -31,6 +54,49 @@ function trustedPnpm(options) {
     throw new Error('credentialed production action requires a trusted absolute pnpm path')
   }
   return options.pnpmPath
+}
+
+function trustedNode(options) {
+  const path = options.nodePath ?? process.execPath
+  if (typeof path !== 'string' || !isAbsolute(path) || !/^node(?:\.exe)?$/.test(basename(path))) {
+    throw new Error('production action requires a trusted absolute Node path')
+  }
+  return path
+}
+
+function reviewedToolPath(options) {
+  const directories = [dirname(trustedNode(options)), dirname(trustedPnpm(options))]
+  for (const directory of ['/usr/local/bin', '/usr/bin', '/bin']) {
+    if (!directories.includes(directory)) directories.push(directory)
+  }
+  return directories.join(delimiter)
+}
+
+export function productionServiceGuardEnvironment(environment, nodePath) {
+  const child = productionGuardEnvironment(environment)
+  trustedNode({ nodePath })
+  // The guard invokes Node by absolute path and needs only the system Git.
+  // Excluding package-manager and user-owned tool directories prevents a
+  // PATH shim from fabricating the reviewed checkout state.
+  child.PATH = ['/usr/bin', '/bin'].join(delimiter)
+  return child
+}
+
+export function productionServiceChildEnvironment(action, environment, options) {
+  let child
+  if (action === 'build') child = withoutCloudflareEnvironment(environment)
+  else if (action === 'config') {
+    child = productionEnvironment(environment)
+    delete child.CLOUDFLARE_API_TOKEN
+  } else if (action === 'remote-secrets' || action === 'remote-secrets-bootstrap') {
+    child = productionEnvironment(environment)
+  } else if (CREDENTIAL_ACTIONS.has(action)) {
+    child = productionCloudflareEnvironment(environment)
+  } else {
+    child = productionGuardEnvironment(environment)
+  }
+  child.PATH = reviewedToolPath(options)
+  return child
 }
 
 function wranglerInvocation(root, service, args, options) {
@@ -68,26 +134,26 @@ export function productionServiceInvocation(
         throw new Error(`${directory} is not a copied domain service`)
       }
       return {
-        command: process.execPath,
+        command: trustedNode(options),
         args: [join(root, 'scripts/require-production-domain-auth.mjs'), directory],
         cwd: root,
       }
     case 'build':
       return {
-        command: 'pnpm',
+        command: trustedPnpm(options),
         args: ['--filter', service.package, 'run', 'build'],
         cwd: root,
       }
     case 'config':
       return {
-        command: process.execPath,
+        command: trustedNode(options),
         args: [join(root, 'scripts/check-production-config.mjs'), directory],
         cwd: root,
       }
     case 'remote-secrets':
     case 'remote-secrets-bootstrap':
       return {
-        command: process.execPath,
+        command: trustedNode(options),
         args: [
           join(root, 'scripts/check-production-secrets.mjs'),
           directory,
@@ -139,17 +205,21 @@ async function main() {
   if (!directory || !action || extra.length > 0) {
     throw new Error('usage: production-service.mjs <catalog-service> <action>')
   }
+  // Establish the protected checkout boundary before catalog validation can
+  // spawn its YAML parser or any credential-bearing helper can be resolved.
+  const nodePath = resolveReviewedNode(process.execPath, DEFAULT_ROOT)
+  requireCredentialedActionGuard(DEFAULT_ROOT, action, process.env, nodePath)
   const catalog = await loadServiceRepositoryCatalog(DEFAULT_ROOT)
-  const options = {}
-  if (CREDENTIAL_ACTIONS.has(action)) {
-    options.pnpmPath = resolveProductionPnpm(process.env, DEFAULT_ROOT)
+  const options = {
+    nodePath,
+    pnpmPath: resolveProductionPnpm(process.env, DEFAULT_ROOT),
   }
   if (action === 'bootstrap') options.runnerTemp = process.env.RUNNER_TEMP
   const invocation = productionServiceInvocation(DEFAULT_ROOT, catalog, directory, action, options)
   if (action === 'bootstrap') verifyBootstrapSecretFile(invocation, options.runnerTemp)
   execFileSync(invocation.command, invocation.args, {
     cwd: invocation.cwd,
-    env: process.env,
+    env: productionServiceChildEnvironment(action, process.env, options),
     stdio: 'inherit',
     timeout: 20 * 60 * 1_000,
     killSignal: 'SIGTERM',

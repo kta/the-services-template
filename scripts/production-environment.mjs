@@ -53,6 +53,14 @@ export function productionEnvironment(environment) {
   return sanitized
 }
 
+/** Checkout guards need public GitHub context, but never Cloudflare credentials. */
+export function productionGuardEnvironment(environment) {
+  const sanitized = productionEnvironment(environment)
+  delete sanitized.CLOUDFLARE_API_TOKEN
+  delete sanitized.CLOUDFLARE_ACCOUNT_ID
+  return sanitized
+}
+
 export function productionCloudflareEnvironment(environment) {
   const sanitized = {}
   for (const [name, value] of Object.entries(environment ?? {})) {

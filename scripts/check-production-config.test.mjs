@@ -82,6 +82,109 @@ test('admin production bindings exactly match the catalog deployable domain set'
   )
 })
 
+test('admin binding, secret, and runtime identity tuples exactly match deployable domains', () => {
+  const base = {
+    name: 'admin',
+    d1_databases: [{ binding: 'DB', database_id: '12345678-1234-1234-1234-123456789abc' }],
+    services: [{ binding: 'NOTIFIER', service: 'notifier' }],
+    secrets: {
+      required: [
+        'DOMAIN_TO_ADMIN_KEY',
+        'ADMIN_TO_NOTIFIER_KEY',
+        'JWT_PRIVATE_KEY',
+        'JWT_PUBLIC_KEY',
+        'AUTH_PEPPER',
+      ],
+    },
+    vars: {
+      APP_ENV: 'production',
+      OPS_ALERT_EMAIL: 'ops@example.com',
+      INVITE_BASE_URL: 'https://admin.example.com',
+      ADMIN_DOMAIN_IDENTITIES: '[]',
+    },
+  }
+  assert.deepEqual(
+    validateProductionConfig(JSON.stringify(base), 'admin', {}, { expectedDomainIdentities: [] }),
+    [],
+  )
+
+  const staleSecret = structuredClone(base)
+  staleSecret.secrets.required.push('ADMIN_TO_EXAMPLE_SERVICE_KEY')
+  assert.match(
+    validateProductionConfig(
+      JSON.stringify(staleSecret),
+      'admin',
+      {},
+      {
+        expectedDomainIdentities: [],
+      },
+    ).join('\n'),
+    /admin production domain secrets.*extra ADMIN_TO_EXAMPLE_SERVICE_KEY/i,
+  )
+
+  const bookingIdentity = {
+    directory: 'booking',
+    service: 'booking',
+    binding: 'BOOKING',
+    secret: 'ADMIN_TO_BOOKING_KEY',
+  }
+  const booking = structuredClone(base)
+  booking.services.unshift({ binding: 'BOOKING', service: 'booking' })
+  booking.secrets.required.push('ADMIN_TO_BOOKING_KEY')
+  booking.vars.ADMIN_DOMAIN_IDENTITIES = JSON.stringify([
+    {
+      directory: 'booking',
+      binding: 'BOOKING',
+      secret: 'ADMIN_TO_BOOKING_KEY',
+    },
+  ])
+  assert.deepEqual(
+    validateProductionConfig(
+      JSON.stringify(booking),
+      'admin',
+      {},
+      {
+        expectedDomainIdentities: [bookingIdentity],
+      },
+    ),
+    [],
+  )
+
+  const wrongBinding = structuredClone(booking)
+  wrongBinding.services[0].binding = 'INVENTORY'
+  assert.match(
+    validateProductionConfig(
+      JSON.stringify(wrongBinding),
+      'admin',
+      {},
+      {
+        expectedDomainIdentities: [bookingIdentity],
+      },
+    ).join('\n'),
+    /admin production domain bindings.*BOOKING/i,
+  )
+
+  const wrongRuntimeSecret = structuredClone(booking)
+  wrongRuntimeSecret.vars.ADMIN_DOMAIN_IDENTITIES = JSON.stringify([
+    {
+      directory: 'booking',
+      binding: 'BOOKING',
+      secret: 'ADMIN_TO_INVENTORY_KEY',
+    },
+  ])
+  assert.match(
+    validateProductionConfig(
+      JSON.stringify(wrongRuntimeSecret),
+      'admin',
+      {},
+      {
+        expectedDomainIdentities: [bookingIdentity],
+      },
+    ).join('\n'),
+    /admin runtime domain identities.*ADMIN_TO_BOOKING_KEY/i,
+  )
+})
+
 test('notifier and ops reject operational placeholders', () => {
   assert.ok(
     validateProductionConfig(

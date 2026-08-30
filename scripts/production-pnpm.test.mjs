@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { resolveProductionPnpm } from './production-pnpm.mjs'
+import { resolveProductionPnpm, resolveReviewedNode } from './production-pnpm.mjs'
 
 test('resolves and validates the PATH pnpm when no override is supplied', () => {
   const directory = mkdtempSync(join(tmpdir(), 'production-pnpm-'))
@@ -60,4 +60,9 @@ test('rejects invalid, writable, foreign, or checkout-local overrides', () => {
   } finally {
     rmSync(directory, { recursive: true, force: true })
   }
+})
+
+test('validates the absolute Node executable that launched a reviewed wrapper', () => {
+  assert.equal(resolveReviewedNode(process.execPath, process.cwd()), realpathSync(process.execPath))
+  assert.throws(() => resolveReviewedNode('node', process.cwd()), /absolute Node path/i)
 })

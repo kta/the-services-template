@@ -28,7 +28,6 @@ function validBundle() {
   return {
     JWT_PRIVATE_KEY: pair.privateKey,
     JWT_PUBLIC_KEY: pair.publicKey,
-    ADMIN_TO_EXAMPLE_SERVICE_KEY: randomBytes(32).toString('hex'),
     ADMIN_TO_NOTIFIER_KEY: randomBytes(32).toString('hex'),
     DOMAIN_TO_NOTIFIER_KEY: randomBytes(32).toString('hex'),
     OPS_TO_NOTIFIER_KEY: randomBytes(32).toString('hex'),
@@ -73,7 +72,7 @@ test('rejects the committed JWT fixture and published development placeholders',
   const values = validBundle()
   values.JWT_PUBLIC_KEY =
     '-----BEGIN PUBLIC KEY-----MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAr/8fe+C79S0HSsonEKqgOI6qFJ4Usgsx7WItD7/zLlVxgheumFwMFWjkSNbDSXMSWZPNIHZ5XyLuspLpS5MJxPiTeY5m0DypT76Cy1b+RG5PPnlTF+2rekGWeK81ej04ll85XKT5TM9HcposcGGGnTa/aAeh6iRMAjUjAdBAmRQynSDNud+DiLydP3FKhXZprhVdDF/gYU7lIsqgZy8+vviAr+sPqBTMdW7F1gw60k3ZGMsJ3+Ex2hwLHmllPZm/+8yoaFGRuKeepNghz8dVmpB9d9tTakOHrbcPoqWeBeR6R+tRg/RoxuU54PUzNeiakOlYMM/UnUdjfI/0SgGjEwIDAQAB-----END PUBLIC KEY-----'
-  values.ADMIN_TO_EXAMPLE_SERVICE_KEY = 'dev-admin-to-example-service-key-000000000000'
+  values.ADMIN_TO_NOTIFIER_KEY = 'dev-admin-to-notifier-key-000000000000'
   const violations = validateProductionSecretMaterial(values)
   assert.ok(violations.some((violation) => violation.includes('JWT_PUBLIC_KEY')))
   assert.ok(violations.some((violation) => violation.includes('development/template')))
@@ -81,7 +80,7 @@ test('rejects the committed JWT fixture and published development placeholders',
 
 test('rejects duplicate direction keys and a mismatched JWT pair', () => {
   const values = validBundle()
-  values.ADMIN_TO_NOTIFIER_KEY = values.ADMIN_TO_EXAMPLE_SERVICE_KEY
+  values.DOMAIN_TO_NOTIFIER_KEY = values.ADMIN_TO_NOTIFIER_KEY
   const other = keyPair()
   values.JWT_PUBLIC_KEY = other.publicKey
   const violations = validateProductionSecretMaterial(values)
@@ -103,7 +102,7 @@ test('rejects a private PEM supplied where the public JWT key is required', () =
 
 test('rejects reuse between internal keys and every other production secret', () => {
   const values = validBundle()
-  values.AUTH_PEPPER = values.ADMIN_TO_EXAMPLE_SERVICE_KEY
+  values.AUTH_PEPPER = values.ADMIN_TO_NOTIFIER_KEY
   values.D1_EXPORT_API_TOKEN = values.ADMIN_TO_NOTIFIER_KEY
 
   const violations = validateProductionSecretMaterial(values)
@@ -247,4 +246,5 @@ test('normal rotation requires a topology-wide bundle instead of a partial Worke
   }
   assert.deepEqual(validateProductionSecretBundle(complete), [])
   assert.ok(requiredTopologyProductionSecretNames().includes('BACKUP_SIGNING_PRIVATE_KEY'))
+  assert.ok(!requiredTopologyProductionSecretNames().includes('ADMIN_TO_EXAMPLE_SERVICE_KEY'))
 })

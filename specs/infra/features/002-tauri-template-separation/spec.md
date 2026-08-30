@@ -23,7 +23,7 @@ Web 専用サービスまで native app として扱われる CI 負荷をなく
 | `CI-TPL-04` | 通常 PR verify で Web-only 雛形を Rust/Tauri 対象にしない。 | `scripts/check-deploy-boundary.test.mjs` |
 | `STATIC-TPL-05` | Tauri 雛形の必須 native 資産欠落・security boundary 違反を検出する。 | `scripts/check-tauri-boundary.test.mjs` |
 | `STATIC-TPL-06` | Web-only 雛形への Tauri 資産・依存・scripts 混入を検出する。 | `scripts/check-tauri-boundary.test.mjs` |
-| `STATIC-TPL-07` | `deployable: false` の雛形を production build/deploy/D1/ops/admin domain binding の全 surface から除外し、production の domain binding 集合を catalog の `deployable: true` domain 集合と完全一致させる。雛形 binding がローカル開発に必要な場合は production config ではなく dev-only config で追加する。 | `scripts/service-wiring.test.mjs`, `scripts/check-production-config.test.mjs` |
+| `STATIC-TPL-07` | `deployable: false` の雛形を production build/deploy/D1/ops/admin domain binding/secret/runtime identity の全 surface から除外し、strict convention で導出した production の domain binding・required secret・`ADMIN_DOMAIN_IDENTITIES`・generated `Env`・runtime adapter を catalog の `deployable: true` domain 集合と双方向一致させる。domain 0 件では各集合を空にして reconcile を skip する。雛形 binding/key がローカル開発・test に必要な場合は production config ではなく dev/test-only config で追加する。 | `scripts/service-wiring.test.mjs`, `scripts/check-production-config.test.mjs`, `services/admin/test/sync.test.ts`, `services/admin/test/admin.integration.test.ts` |
 
 ### スコープ外
 

@@ -3,7 +3,7 @@
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { effectiveValues, parseJsonc } from './check-production-config.mjs'
+import { parseJsonc } from './check-production-config.mjs'
 import { isProductionDomainAuthReady } from './require-production-domain-auth.mjs'
 import { loadServiceRepositoryCatalog } from './service-catalog.mjs'
 import { validateServiceWiring } from './service-wiring.mjs'
@@ -28,12 +28,6 @@ requireMatch(
   /channel\s*=\s*"1\.88\.0"[\s\S]*components\s*=\s*\["rustfmt",\s*"clippy"\]/,
   'Rust native builds must use the reviewed pinned toolchain with format and lint components',
 )
-
-function adminToDomainSecretName(service) {
-  if (typeof service !== 'string') return null
-  const suffix = service.replaceAll('-', '_').toUpperCase()
-  return /^[A-Z][A-Z0-9_]*$/.test(suffix) ? `ADMIN_TO_${suffix}_KEY` : null
-}
 
 const workflow = await readFile(join(root, '.github/workflows/ci.yml'), 'utf8')
 requireMatch(
@@ -483,19 +477,22 @@ for (const configPath of [
 }
 
 const adminConfigSource = await readFile(join(root, 'services/admin/wrangler.jsonc'), 'utf8')
-let configuredAdminDomainSecret = 'ADMIN_TO_EXAMPLE_SERVICE_KEY'
+let configuredAdminDomainSecrets = []
 try {
-  configuredAdminDomainSecret =
-    adminToDomainSecretName(effectiveValues(parseJsonc(adminConfigSource)).adminDomainService) ??
-    configuredAdminDomainSecret
+  const adminConfig = parseJsonc(adminConfigSource)
+  const identities = JSON.parse(adminConfig.vars?.ADMIN_DOMAIN_IDENTITIES)
+  if (!Array.isArray(identities)) throw new Error('not an array')
+  configuredAdminDomainSecrets = identities.map((identity) => identity.secret)
 } catch {
-  violations.push('admin wrangler.jsonc must be valid JSONC for secret-boundary inspection')
+  violations.push(
+    'admin wrangler.jsonc must expose valid ADMIN_DOMAIN_IDENTITIES for secret-boundary inspection',
+  )
 }
 
 const requiredSecretNames = {
   'services/admin/wrangler.jsonc': [
     'DOMAIN_TO_ADMIN_KEY',
-    configuredAdminDomainSecret,
+    ...configuredAdminDomainSecrets,
     'ADMIN_TO_NOTIFIER_KEY',
     'JWT_PRIVATE_KEY',
     'JWT_PUBLIC_KEY',
@@ -556,9 +553,14 @@ const bindingKeyWiring = {
   ],
   'services/admin/src/worker/sync.ts': [
     [
-      /x-internal-key['"]:\s*env\.ADMIN_TO_EXAMPLE_SERVICE_KEY/,
-      'admin sync must use ADMIN_TO_EXAMPLE_SERVICE_KEY',
+      /environment\s*\[\s*identity\.binding\s*\]/,
+      'admin sync must resolve the catalog-derived service binding',
     ],
+    [
+      /environment\s*\[\s*identity\.secret\s*\]/,
+      'admin sync must resolve the catalog-derived caller secret',
+    ],
+    [/x-internal-key['"]:\s*env\.key/, 'admin sync must send the resolved caller secret'],
   ],
   'services/example_service/src/worker/index.ts': [
     [

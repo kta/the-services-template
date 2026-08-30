@@ -3,6 +3,7 @@ import test from 'node:test'
 import {
   productionCloudflareEnvironment,
   productionEnvironment,
+  productionGuardEnvironment,
 } from './production-environment.mjs'
 
 test('keeps only the reviewed execution environment and removes process overrides', () => {
@@ -56,4 +57,29 @@ test('removes non-reviewed CI token variables before invoking Cloudflare tools',
     CLOUDFLARE_API_TOKEN: 'token',
     CLOUDFLARE_ACCOUNT_ID: 'account',
   })
+})
+
+test('gives checkout guards public GitHub context without Cloudflare credentials or Node injection', () => {
+  assert.deepEqual(
+    productionGuardEnvironment({
+      PATH: '/reviewed/bin',
+      GITHUB_ACTIONS: 'true',
+      GITHUB_EVENT_NAME: 'push',
+      GITHUB_REF: 'refs/heads/main',
+      GITHUB_REF_PROTECTED: 'true',
+      GITHUB_SHA: 'reviewed-sha',
+      CLOUDFLARE_API_TOKEN: 'must-not-reach-guard',
+      CLOUDFLARE_ACCOUNT_ID: 'must-not-reach-guard',
+      NODE_OPTIONS: '--require=./rogue.cjs',
+      NODE_PATH: './rogue-modules',
+    }),
+    {
+      PATH: '/reviewed/bin',
+      GITHUB_ACTIONS: 'true',
+      GITHUB_EVENT_NAME: 'push',
+      GITHUB_REF: 'refs/heads/main',
+      GITHUB_REF_PROTECTED: 'true',
+      GITHUB_SHA: 'reviewed-sha',
+    },
+  )
 })

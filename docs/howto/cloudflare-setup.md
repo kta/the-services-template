@@ -91,7 +91,7 @@ services/<name>/wrangler.jsonc の placeholder を実値に置き換える。
 | JWT_PRIVATE_KEY | admin のみ |
 | JWT_PUBLIC_KEY | admin と各 domain Worker |
 | DOMAIN_TO_ADMIN_KEY | admin / domain（domain → admin live-session introspection の専用鍵） |
-| ADMIN_TO_EXAMPLE_SERVICE_KEY | admin と example_service（fork 後は `ADMIN_TO_<DOMAIN>_KEY` に改名） |
+| ADMIN_TO_<DOMAIN>_KEY | admin と対応する deployable domain。domain 0 件の雛形 production では不要（`ADMIN_TO_EXAMPLE_SERVICE_KEY` は dev/test 専用） |
 | ADMIN_TO_NOTIFIER_KEY | admin と notifier |
 | DOMAIN_TO_NOTIFIER_KEY | 各 domain Worker と notifier |
 | OPS_TO_NOTIFIER_KEY | ops と notifier |

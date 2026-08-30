@@ -249,6 +249,7 @@ on:
 permissions:
   contents: read
 env:
+  NODE_VERSION: 22
   ANDROID_PLATFORM_API: 35
   ANDROID_NDK_VERSION: 27.2.12479018
   XCODEGEN_VERSION: 2.46.0
@@ -531,4 +532,54 @@ test('native workflow accepts only the exact wrapper argv, order, and root worki
     ),
     /exact native wrapper sequence/i,
   )
+})
+
+test('native workflow rejects inherited execution injection and custom default shells', () => {
+  const mutations = [
+    (source) =>
+      source.replace(
+        '  XCODEGEN_VERSION: 2.46.0',
+        '  XCODEGEN_VERSION: 2.46.0\n  NODE_OPTIONS: --require=./rogue.cjs',
+      ),
+    (source) =>
+      source.replace(
+        '    runs-on: macos-15',
+        '    env:\n      NODE_PATH: ./rogue-modules\n      PATH: ./rogue-bin\n      PNPM_HOME: ./rogue-pnpm\n    runs-on: macos-15',
+      ),
+    (source) => source.replace('jobs:', 'defaults:\n  run:\n    shell: ./rogue-shell {0}\njobs:'),
+    (source) =>
+      source.replace(
+        '    runs-on: macos-15',
+        '    defaults:\n      run:\n        shell: ./rogue-shell {0}\n    runs-on: macos-15',
+      ),
+  ]
+
+  for (const mutate of mutations) {
+    assert.match(
+      inspectNativeWorkflowPolicy(
+        '.github/workflows/booking.yml',
+        mutate(nativeWorkflow()),
+        nativeService,
+      ).join('\n'),
+      /execution env|exact workflow env|defaults.*shell|NODE_OPTIONS|NODE_PATH|PATH|PNPM_HOME/i,
+    )
+  }
+})
+
+test('registered native workflow rejects dynamic, quoted, and additional wrapper references', () => {
+  for (const invocation of [
+    'node scripts/native-workflow.mjs booking "$ACTION"',
+    'node "scripts/native-workflow.mjs" booking build-macos',
+    'node scripts/native-workflow.mjs booking build-macos',
+  ]) {
+    const source = nativeWorkflow(
+      `      - name: Alternate native build\n        run: ${invocation}\n`,
+    )
+    assert.match(
+      inspectNativeWorkflowPolicy('.github/workflows/booking.yml', source, nativeService).join(
+        '\n',
+      ),
+      /unreviewed native wrapper reference|exact native wrapper sequence/i,
+    )
+  }
 })

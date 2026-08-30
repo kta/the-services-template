@@ -16,6 +16,7 @@ const PROTECTED_MAIN_PUSH =
 const PROTECTED_MAIN_DISPATCH =
   "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true"
 const NATIVE_PLATFORM_PINS = {
+  NODE_VERSION: 22,
   ANDROID_PLATFORM_API: 35,
   ANDROID_NDK_VERSION: '27.2.12479018',
   XCODEGEN_VERSION: '2.46.0',
@@ -224,6 +225,19 @@ function nativeWrapperCommand(step) {
   return match ? { directory: match[1], action: match[2] } : undefined
 }
 
+function containsNativeWrapperReference(step) {
+  return typeof step?.run === 'string' && step.run.includes('scripts/native-workflow.mjs')
+}
+
+const EXECUTION_INJECTION_ENV =
+  /^(?:NODE_OPTIONS|NODE_PATH|PATH|PNPM_HOME|PNPM_[A-Z0-9_]*|npm_config_.+)$/i
+
+function executionInjectionNames(value) {
+  return Object.keys(isMapping(value) ? value : {}).filter((name) =>
+    EXECUTION_INJECTION_ENV.test(name),
+  )
+}
+
 function containsDirectNativeCommand(step) {
   return (
     typeof step?.run === 'string' &&
@@ -283,10 +297,13 @@ export function inspectNativeWorkflowPolicy(workflowPath, source, service) {
   if (containsSecretsContext(workflow.env)) {
     violations.push(`${workflowPath}: native workflow env must not use the secrets context`)
   }
-  if (isMapping(workflow.defaults) && workflow.defaults.run?.['working-directory'] !== undefined) {
+  if (!exactPermissionsValue(workflow.env, NATIVE_PLATFORM_PINS)) {
     violations.push(
-      `${workflowPath}: native workflow defaults must execute from the repository root`,
+      `${workflowPath}: native workflow must use the exact workflow env schema and platform pins`,
     )
+  }
+  if (workflow.defaults !== undefined) {
+    violations.push(`${workflowPath}: native workflow defaults and custom shells are forbidden`)
   }
   for (const [name, expected] of Object.entries(NATIVE_PLATFORM_PINS)) {
     if (!isMapping(workflow.env) || String(workflow.env[name]) !== String(expected)) {
@@ -332,8 +349,14 @@ export function inspectNativeWorkflowPolicy(workflowPath, source, service) {
     if (containsSecretsContext(job.env)) {
       violations.push(`${workflowPath}:${jobName} env must not use the secrets context`)
     }
-    if (isMapping(job.defaults) && job.defaults.run?.['working-directory'] !== undefined) {
-      violations.push(`${workflowPath}:${jobName} defaults must execute from the repository root`)
+    if (job.env !== undefined) {
+      const injection = executionInjectionNames(job.env)
+      violations.push(
+        `${workflowPath}:${jobName} job execution env is forbidden${injection.length ? ` (${injection.join(', ')})` : ''}`,
+      )
+    }
+    if (job.defaults !== undefined) {
+      violations.push(`${workflowPath}:${jobName} defaults and custom shells are forbidden`)
     }
     for (const pin of Object.keys(NATIVE_PLATFORM_PINS)) {
       if (isMapping(job.env) && Object.hasOwn(job.env, pin)) {
@@ -378,6 +401,17 @@ export function inspectNativeWorkflowPolicy(workflowPath, source, service) {
         }
       }
       const wrapper = nativeWrapperCommand(step)
+      if (containsNativeWrapperReference(step) && !wrapper) {
+        violations.push(
+          `${workflowPath}:${jobName}:steps[${index}] contains an unreviewed native wrapper reference`,
+        )
+      }
+      const injection = executionInjectionNames(step.env)
+      if (injection.length > 0) {
+        violations.push(
+          `${workflowPath}:${jobName}:steps[${index}] contains execution env injection ${injection.join(', ')}`,
+        )
+      }
       if (wrapper) {
         wrapperSteps.push({ ...wrapper, name: step.name, step, index })
         if (!nativeStepHasRootExecution(step)) {
@@ -434,8 +468,9 @@ export function workflowContainsNativeBuild(source) {
   for (const [, job] of objectEntries(workflow.jobs)) {
     if (!Array.isArray(job?.steps)) continue
     for (const step of job.steps) {
-      const wrapper = nativeWrapperCommand(step)
-      if (wrapper?.action.startsWith('build-')) return true
+      // An unregistered workflow may not reference the reviewed executor at
+      // all. Dynamic/quoted argv are still capable of selecting a heavy build.
+      if (containsNativeWrapperReference(step)) return true
     }
   }
   return false

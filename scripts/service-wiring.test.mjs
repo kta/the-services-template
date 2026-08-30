@@ -112,6 +112,8 @@ jobs:
         id: package-worker-artifact
         run: node scripts/production-artifacts.mjs bootstrap record-digest
   bootstrap:
+    env:
+      PRODUCTION_ENVIRONMENT: production
     runs-on: ubuntu-latest
     steps:
       - name: Require a catalog deployable domain before credentials
@@ -284,6 +286,7 @@ test('rejects non-deployable extras in D1, admin binding, and ops backup/health 
       { binding: 'BOOKING', service: 'booking' },
       { binding: 'NOTIFIER', service: 'notifier' },
     ],
+    vars: { ADMIN_DOMAIN_IDENTITIES: '[]' },
   })
   sources.opsConfig = JSON.stringify({
     vars: { ADMIN_DB_ID: 'id', BOOKING_DB_ID: 'id' },
@@ -314,6 +317,7 @@ test('rejects the non-deployable scaffold as an admin production binding when no
       { binding: 'EXAMPLE_SERVICE', service: 'example-service' },
       { binding: 'NOTIFIER', service: 'notifier' },
     ],
+    vars: { ADMIN_DOMAIN_IDENTITIES: '[]' },
   })
   sources.opsConfig = JSON.stringify({
     vars: { ADMIN_DB_ID: 'id' },
@@ -329,7 +333,7 @@ test('rejects the non-deployable scaffold as an admin production binding when no
   const diagnostic = validateServiceWiringSources({ services, workerOnlyServices }, sources).join(
     '\n',
   )
-  assert.match(diagnostic, /admin production domain binding.*extra example_service/i)
+  assert.match(diagnostic, /admin production domain binding.*extra example-service/i)
 })
 
 test('rejects shell control, no-op text, traversal argv, wrong cwd, and wrong deploy identity', () => {
@@ -418,5 +422,207 @@ test('rejects echoed bootstrap guards and out-of-order wrapper execution', () =>
   assert.match(
     validateServiceWiringSources({ services, workerOnlyServices }, reordered).join('\n'),
     /production wrapper steps must follow the reviewed order/i,
+  )
+})
+
+test('rejects every extra credentialed step including aliased wrappers and raw remote writes', () => {
+  const attacks = [
+    {
+      label: 'aliased production wrapper',
+      step: `      - name: Alternate release path
+        env:
+          CLOUDFLARE_API_TOKEN: \${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: \${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PRODUCTION_PNPM_PATH: \${{ steps.trusted-tools.outputs.pnpm }}
+        run: \${{ steps.trusted-tools.outputs.node }} scripts/production-service.mjs admin deploy
+`,
+    },
+    {
+      label: 'raw wrangler deploy',
+      step: `      - name: Raw deploy
+        run: \${{ steps.trusted-tools.outputs.pnpm }} --config.offline=true exec wrangler deploy dist/admin/index.js --no-bundle --config=wrangler.jsonc
+`,
+    },
+    {
+      label: 'raw wrangler migration',
+      step: `      - name: Raw migration
+        run: \${{ steps.trusted-tools.outputs.pnpm }} --config.offline=true exec wrangler d1 migrations apply DB --remote --config=wrangler.jsonc
+`,
+    },
+    {
+      label: 'Cloudflare API write',
+      step: `      - name: Raw Cloudflare write
+        run: curl --request DELETE https://api.cloudflare.com/client/v4/accounts/account/workers/scripts/admin
+`,
+    },
+    {
+      label: 'unreviewed command',
+      step: `      - name: Extra repository command
+        run: node scripts/rogue.mjs
+`,
+    },
+  ]
+
+  for (const { label, step } of attacks) {
+    const sources = validSources()
+    sources.ci = sources.ci.replace(
+      '  deploy:\n    runs-on: ubuntu-latest\n    steps:\n',
+      `  deploy:\n    runs-on: ubuntu-latest\n    steps:\n${step}`,
+    )
+    assert.match(
+      validateServiceWiringSources({ services, workerOnlyServices }, sources).join('\n'),
+      /credentialed job.*exact step allowlist|unreviewed credentialed step|remote write/i,
+      label,
+    )
+  }
+})
+
+test('rejects raw writes inserted on either side of the bootstrap guard', () => {
+  for (const position of ['before', 'after']) {
+    const sources = validSources()
+    const guard = `      - name: Require a catalog deployable domain before credentials
+        env:
+          DOMAIN_SERVICE: \${{ inputs.domain_service }}
+        run: node scripts/production-service.mjs "$DOMAIN_SERVICE" guard-domain
+`
+    const write = `      - name: ${position} guard raw write
+        run: pnpm exec wrangler deploy dist/admin/index.js --no-bundle
+`
+    sources.bootstrap = sources.bootstrap.replace(
+      guard,
+      position === 'before' ? `${write}${guard}` : `${guard}${write}`,
+    )
+    assert.match(
+      validateServiceWiringSources({ services, workerOnlyServices }, sources).join('\n'),
+      /credentialed job.*exact step allowlist|unreviewed credentialed step|remote write/i,
+    )
+  }
+})
+
+test('rejects inherited production execution overrides at workflow and job scope', () => {
+  const mutations = [
+    (source) =>
+      source.replace(
+        'on: {workflow_dispatch: {}}',
+        'on: {workflow_dispatch: {}}\nenv:\n  NODE_OPTIONS: --require=./rogue.cjs',
+      ),
+    (source) =>
+      source.replace(
+        '  deploy:\n    runs-on:',
+        '  deploy:\n    env:\n      NODE_PATH: ./rogue-modules\n    runs-on:',
+      ),
+    (source) =>
+      source.replace(
+        '  deploy:\n    runs-on:',
+        '  deploy:\n    env:\n      PATH: ./rogue-bin\n      PNPM_HOME: ./rogue-pnpm\n    runs-on:',
+      ),
+    (source) =>
+      source.replace(
+        '  deploy:\n    runs-on:',
+        '  deploy:\n    defaults:\n      run:\n        shell: ./rogue-shell {0}\n    runs-on:',
+      ),
+  ]
+
+  for (const mutate of mutations) {
+    const sources = validSources()
+    sources.ci = mutate(sources.ci)
+    assert.match(
+      validateServiceWiringSources({ services, workerOnlyServices }, sources).join('\n'),
+      /execution context|workflow env|job env|defaults.*shell|NODE_OPTIONS|NODE_PATH|PATH|PNPM_HOME/i,
+    )
+  }
+})
+
+test('validates admin domain binding and secret tuples through config, generated Env, and runtime source', () => {
+  const booking = { directory: 'booking', package: '@app/booking', deployable: true }
+  const catalog = { services: [...services, booking], workerOnlyServices }
+  const runtimeIdentity = JSON.stringify([
+    { directory: 'booking', binding: 'BOOKING', secret: 'ADMIN_TO_BOOKING_KEY' },
+  ])
+  const validAdminConfig = {
+    services: [
+      { binding: 'BOOKING', service: 'booking' },
+      { binding: 'NOTIFIER', service: 'notifier' },
+    ],
+    secrets: {
+      required: [
+        'DOMAIN_TO_ADMIN_KEY',
+        'ADMIN_TO_BOOKING_KEY',
+        'ADMIN_TO_NOTIFIER_KEY',
+        'JWT_PRIVATE_KEY',
+        'JWT_PUBLIC_KEY',
+        'AUTH_PEPPER',
+      ],
+    },
+    vars: { ADMIN_DOMAIN_IDENTITIES: runtimeIdentity },
+  }
+  const complete = () => {
+    const sources = validSources()
+    sources.adminConfig = JSON.stringify(validAdminConfig)
+    sources.opsConfig = JSON.stringify({
+      vars: { ADMIN_DB_ID: 'id', BOOKING_DB_ID: 'id' },
+      services: [
+        { binding: 'ADMIN', service: 'admin' },
+        { binding: 'NOTIFIER', service: 'notifier' },
+        { binding: 'BOOKING', service: 'booking' },
+      ],
+    })
+    sources.opsSource = `
+      { name: 'admin', databaseId: env.ADMIN_DB_ID, healthBinding: env.ADMIN },
+      { name: 'notifier', healthBinding: env.NOTIFIER },
+      { name: 'booking', databaseId: env.BOOKING_DB_ID, healthBinding: env.BOOKING },
+    `
+    sources.adminGeneratedEnv = `
+      interface __BaseEnv_Env {
+        ADMIN_DOMAIN_IDENTITIES: string;
+        BOOKING: Fetcher;
+        ADMIN_TO_BOOKING_KEY: string;
+      }
+    `
+    sources.adminSyncSource = `
+      const binding = environment[identity.binding]
+      const secret = environment[identity.secret]
+    `
+    return sources
+  }
+
+  const wrongBinding = complete()
+  wrongBinding.adminConfig = JSON.stringify({
+    ...validAdminConfig,
+    services: [
+      { binding: 'INVENTORY', service: 'booking' },
+      { binding: 'NOTIFIER', service: 'notifier' },
+    ],
+  })
+  assert.match(
+    validateServiceWiringSources(catalog, wrongBinding).join('\n'),
+    /admin production domain binding tuple.*BOOKING/i,
+  )
+
+  const staleSecret = complete()
+  const staleConfig = structuredClone(validAdminConfig)
+  staleConfig.secrets.required.push('ADMIN_TO_EXAMPLE_SERVICE_KEY')
+  staleSecret.adminConfig = JSON.stringify(staleConfig)
+  assert.match(
+    validateServiceWiringSources(catalog, staleSecret).join('\n'),
+    /admin production domain secret.*extra ADMIN_TO_EXAMPLE_SERVICE_KEY/i,
+  )
+
+  const missingGeneratedBinding = complete()
+  missingGeneratedBinding.adminGeneratedEnv =
+    'interface __BaseEnv_Env { ADMIN_DOMAIN_IDENTITIES: string; ADMIN_TO_BOOKING_KEY: string; }'
+  assert.match(
+    validateServiceWiringSources(catalog, missingGeneratedBinding).join('\n'),
+    /generated Env domain binding.*missing BOOKING/i,
+  )
+
+  const sourceMismatch = complete()
+  sourceMismatch.adminSyncSource = sourceMismatch.adminSyncSource.replace(
+    'environment[identity.secret]',
+    'environment.ADMIN_TO_EXAMPLE_SERVICE_KEY',
+  )
+  assert.match(
+    validateServiceWiringSources(catalog, sourceMismatch).join('\n'),
+    /runtime domain adapter.*identity\.secret/i,
   )
 })

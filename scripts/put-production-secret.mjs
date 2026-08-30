@@ -4,7 +4,7 @@ import { createHash, createPrivateKey, createPublicKey } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { effectiveValues, parseJsonc } from './check-production-config.mjs'
+import { parseJsonc } from './check-production-config.mjs'
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const MIN_KEY_BYTES = 32
@@ -28,7 +28,6 @@ const KNOWN_DEVELOPMENT_VALUES = new Set([
 const SERVICE_SECRET_POLICY = {
   admin: new Set([
     'DOMAIN_TO_ADMIN_KEY',
-    'ADMIN_TO_EXAMPLE_SERVICE_KEY',
     'ADMIN_TO_NOTIFIER_KEY',
     'JWT_PRIVATE_KEY',
     'JWT_PUBLIC_KEY',
@@ -78,10 +77,11 @@ function isAllowedProductionSecret(service, secret, options = {}) {
 
 export function requiredProductionSecretNames(service, options = {}) {
   if (service === 'admin') {
-    const configured = adminToDomainSecretName(options.domainService)
-    return [...SERVICE_SECRET_POLICY.admin].map((name) =>
-      name === 'ADMIN_TO_EXAMPLE_SERVICE_KEY' && configured ? configured : name,
-    )
+    const configured = configuredDomainServices(options)
+      .map(adminToDomainSecretName)
+      .filter(Boolean)
+    const base = [...SERVICE_SECRET_POLICY.admin]
+    return [base[0], ...configured, ...base.slice(1)]
   }
   if (service === 'example_service') {
     return [...SERVICE_SECRET_POLICY.example_service]
@@ -96,11 +96,14 @@ export function requiredProductionSecretNames(service, options = {}) {
   ]
 }
 
-function configuredDomainDirectory(options = {}) {
-  const configured = options.domainService ?? provisioningOptions('admin').domainService
-  if (typeof configured !== 'string') return null
-  const directory = configured.replaceAll('-', '_')
-  return isSafeServiceName(directory) ? directory : null
+function configuredDomainServices(options = {}) {
+  const configured =
+    options.domainServices ??
+    (options.domainService ? [options.domainService] : provisioningOptions('admin').domainServices)
+  if (!Array.isArray(configured)) return []
+  return configured.filter(
+    (service) => typeof service === 'string' && isSafeServiceName(service.replaceAll('-', '_')),
+  )
 }
 
 /**
@@ -111,15 +114,9 @@ function configuredDomainDirectory(options = {}) {
  * environment-secret set in shell before creating any Worker.
  */
 export function requiredTopologyProductionSecretNames(options = {}) {
-  const domainService = configuredDomainDirectory(options)
-  const domainNames = domainService
-    ? requiredProductionSecretNames(domainService, options)
-    : [
-        'ADMIN_TO_EXAMPLE_SERVICE_KEY',
-        'DOMAIN_TO_ADMIN_KEY',
-        'DOMAIN_TO_NOTIFIER_KEY',
-        'JWT_PUBLIC_KEY',
-      ]
+  const domainNames = configuredDomainServices(options).flatMap((domainService) =>
+    requiredProductionSecretNames(domainService.replaceAll('-', '_'), options),
+  )
   return [
     ...new Set([
       ...requiredProductionSecretNames('admin', options),
@@ -326,7 +323,11 @@ function provisioningOptions(service) {
   if (service !== 'admin') return {}
   try {
     const config = parseJsonc(readFileSync(resolve(root, 'services/admin/wrangler.jsonc'), 'utf8'))
-    return { domainService: effectiveValues(config).adminDomainService }
+    const identities = JSON.parse(config.vars?.ADMIN_DOMAIN_IDENTITIES)
+    if (!Array.isArray(identities)) return {}
+    return {
+      domainServices: identities.map((identity) => identity.directory.replaceAll('_', '-')),
+    }
   } catch {
     return {}
   }

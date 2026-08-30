@@ -29,7 +29,9 @@ secret bootstrap uses only the dedicated protected-main
 `example_service` and `example_tauri_service` are never production targets.
 Root [`service-catalog.json`](./service-catalog.json) is the machine-readable source of truth for SPA service directories/packages, Web vs Tauri template kind, deployability, and native artifact workflows. Worker-only `notifier` and `ops` are normalized `{ directory, package, deployable }` entries in `workerOnlyServices`, outside the SPA array. `service-catalog.mjs validate-repository` structurally parses workflows and enforces exact workspace/dev/test/E2E and production wiring sets.
 Service-binding authentication uses a distinct secret for each direction:
-`ADMIN_TO_<DOMAIN>_KEY` (the scaffold uses `ADMIN_TO_EXAMPLE_SERVICE_KEY`),
+`ADMIN_TO_<DOMAIN>_KEY` (local scaffold dev/test uses
+`ADMIN_TO_EXAMPLE_SERVICE_KEY`; production has no domain key until a copied
+domain becomes deployable),
 `ADMIN_TO_NOTIFIER_KEY`, `DOMAIN_TO_NOTIFIER_KEY`, and
 `OPS_TO_NOTIFIER_KEY`; `DOMAIN_TO_ADMIN_KEY` is the dedicated domain-to-admin
 live-session introspection credential, held only by that boundary's two ends.
@@ -59,7 +61,7 @@ and required tests; the sibling `CLAUDE.md` is a symlink to that same source.
 
 | Service | Runtime bindings |
 |---|---|
-| `admin` | D1, `NOTIFIER`, catalog の deployable domain bindings, Cron（login lockout は D1 の原子的カウンタ）。ローカル dev のみ `EXAMPLE_SERVICE` scaffold binding を Vite config が追加する。 |
+| `admin` | D1, `NOTIFIER`, catalog の deployable domain bindings/keys と `ADMIN_DOMAIN_IDENTITIES`, Cron（login lockout は D1 の原子的カウンタ）。deployable domain が 0 件なら production の domain binding/key はなく reconcile も skip する。ローカル dev/test のみ `EXAMPLE_SERVICE` scaffold binding/key を追加する。 |
 | `example_service` | D1, `NOTIFIER` |
 | `example_tauri_service` | D1, `NOTIFIER` |
 | `notifier` | `DEDUPE` KV |
@@ -82,8 +84,8 @@ not depend on services.
   the example service has no refresh endpoint. See
   [`docs/howto/tauri-example-service.md`](./docs/howto/tauri-example-service.md).
 - **Organizations and authorization:** `admin` manages organizations and
-  credentials. It synchronizes organization records to a domain Worker through
-  an internal service binding; each record carries a monotonic `version`, and the
+  credentials. It synchronizes organization records to every catalog-deployable
+  domain Worker through identity-matched internal service bindings; each record carries a monotonic `version`, and the
   receiving Worker conditionally accepts only the newest version before applying
   tenant scope to its own D1 queries.
 - **Notifications:** application Workers call `notifier` through the internal

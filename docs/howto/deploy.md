@@ -59,7 +59,7 @@ rotation workflow から登録する。
 | JWT_PRIVATE_KEY | 必須 | **設定しない** | 設定しない | access JWT の RS256 署名。admin だけが保持 |
 | JWT_PUBLIC_KEY | 必須 | 必須 | 設定しない | access JWT の RS256 検証 |
 | DOMAIN_TO_ADMIN_KEY | 必須 | 必須 | 設定しない | domain → admin の live-session introspection 用。admin の受信側と domain の送信側に同じ専用値を置くが、JWT 署名鍵や admin → domain 鍵とは分離する |
-| ADMIN_TO_<DOMAIN>_KEY（雛形では `ADMIN_TO_EXAMPLE_SERVICE_KEY`） | 必須 | 必須 | 設定しない | admin → domain の組織同期用。fork 後は domain ごとに名前と値を分ける |
+| ADMIN_TO_<DOMAIN>_KEY | 対応 domain が deployable のとき必須 | 必須 | 設定しない | admin → domain の組織同期用。domain ごとに名前と値を分ける。雛形の `ADMIN_TO_EXAMPLE_SERVICE_KEY` は dev/test 専用で production admin には置かない |
 | ADMIN_TO_NOTIFIER_KEY | 必須 | 設定しない | 必須 | admin → notifier の通知用 |
 | DOMAIN_TO_NOTIFIER_KEY | 設定しない | 必須 | 必須 | domain → notifier の通知用 |
 | OPS_TO_NOTIFIER_KEY | 設定しない | 設定しない | ops / notifier に必須 | ops → notifier の通知用 |
@@ -316,4 +316,4 @@ Tauri の詳細（TAURI_DEV_HOST、mobile の port forwarding、fixed API origin
   token を受け入れたり、logout/revoke 後も `sid` のない stateless token を長時間受け入れたりしない。
 - 初回 deploy 後に restore.md のリストア訓練を 1 回実施する。
 
-`example_service` と `example_tauri_service` はコピー元の雛形であり、本番対象ではない。そのため admin の production `wrangler.jsonc` にも scaffold binding は置かず、ローカル開発時だけ Vite config が `EXAMPLE_SERVICE` を追加する。フォーク後は自ドメインサービスを `deployable: true` として catalog、production deploy chain、remote migration、ops backup、admin の EXAMPLE_SERVICE binding へ同時に追加する。production の domain binding 集合は catalog の deployable domain 集合と完全一致させ、`service-catalog.mjs validate-repository` が green になってから protected `main` に merge する。
+`example_service` と `example_tauri_service` はコピー元の雛形であり、本番対象ではない。そのため admin の production `wrangler.jsonc` に scaffold binding/secret は置かず、`ADMIN_DOMAIN_IDENTITIES` は `[]` とする。ローカル開発・test だけ Vite/Miniflare config が `EXAMPLE_SERVICE` と `ADMIN_TO_EXAMPLE_SERVICE_KEY` を追加する。フォーク後は自ドメインサービスを `deployable: true` として catalog、production deploy chain、remote migration、ops backup と同時に admin へ strict convention の tuple（例: directory `booking_service`、service `booking-service`、binding `BOOKING_SERVICE`、secret `ADMIN_TO_BOOKING_SERVICE_KEY`、同じ `{directory,binding,secret}` runtime identity）を追加して `cf-typegen` を実行する。production の domain binding/secret/runtime/generated `Env` 集合は catalog の deployable domain 集合と完全一致させ、`service-catalog.mjs validate-repository` が green になってから protected `main` に merge する。
