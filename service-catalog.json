@@ -1,4 +1,5 @@
 {
+  "workerOnlyServices": ["notifier", "ops"],
   "services": [
     {
       "directory": "admin",

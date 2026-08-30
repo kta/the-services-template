@@ -150,6 +150,10 @@ function catalogJson(extra = []) {
   })
 }
 
+function nativeWorkflow(directory) {
+  return `on:\n  workflow_dispatch: {}\nenv:\n  ANDROID_PLATFORM_API: 35\n  ANDROID_NDK_VERSION: 27.2.12479018\n  XCODEGEN_VERSION: 2.46.0\njobs:\n  build:\n    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true\n    steps:\n      - run: node scripts/check-tauri-boundary.mjs\n      - run: pnpm --filter @app/${directory} build:tauri\n      - run: node scripts/check-tauri-artifact.mjs services/${directory}/src-tauri/target\n`
+}
+
 function overlaysFor(directory, macOSMinimum = '10.13') {
   return {
     [`services/${directory}/src-tauri/tauri.android.conf.json`]: JSON.stringify({
@@ -165,8 +169,24 @@ function overlaysFor(directory, macOSMinimum = '10.13') {
 }
 
 function separatedTemplateFiles(extra = {}) {
+  const normalizedExtra = { ...extra }
+  for (const [path, source] of Object.entries(normalizedExtra)) {
+    const packageMatch = path.match(/^services\/([a-z][a-z0-9_]*)\/package\.json$/)
+    if (!packageMatch || typeof source !== 'string') continue
+    try {
+      const packageJson = JSON.parse(source)
+      if (packageJson && typeof packageJson === 'object' && packageJson.name === undefined) {
+        normalizedExtra[path] = JSON.stringify({ name: `@app/${packageMatch[1]}`, ...packageJson })
+      }
+    } catch {
+      // Malformed-JSON fixtures must remain malformed so diagnostics can be tested.
+    }
+  }
   return {
     'service-catalog.json': catalogJson(),
+    '.github/workflows/admin-tauri-build.yml': nativeWorkflow('admin'),
+    '.github/workflows/example_tauri_service-tauri-build.yml':
+      nativeWorkflow('example_tauri_service'),
     'services/admin/package.json': JSON.stringify({
       name: '@app/admin',
       scripts: { tauri: 'tauri', 'build:tauri': 'vite build' },
@@ -200,7 +220,7 @@ function separatedTemplateFiles(extra = {}) {
     'services/example_tauri_service/src-tauri/src/origin.rs': fixedReleaseOrigin,
     'services/example_tauri_service/src/web/platform/transport.ts': nativeTransport,
     ...platformOverlays,
-    ...extra,
+    ...normalizedExtra,
   }
 }
 
@@ -504,6 +524,7 @@ test('automatically audits a copied Tauri service instead of silently skipping i
   await withFixture(
     baseFiles({
       'service-catalog.json': catalogJson([catalogService('booking', 'tauri', true)]),
+      '.github/workflows/booking-tauri-build.yml': nativeWorkflow('booking'),
       'services/booking/package.json': JSON.stringify({
         name: '@app/booking',
         scripts: { tauri: 'tauri', 'build:tauri': 'vite build' },
@@ -561,6 +582,7 @@ test('requires complete native assets in every catalog Tauri service', async () 
   await withFixture(
     baseFiles({
       'service-catalog.json': catalogJson([catalogService('booking', 'tauri', true)]),
+      '.github/workflows/booking-tauri-build.yml': nativeWorkflow('booking'),
       'services/booking/package.json': JSON.stringify({ name: '@app/booking' }),
       'services/booking/src/web/App.tsx': 'export function App() { return null }\n',
       'services/booking/src-tauri/tauri.conf.json': exampleTauriCleanConfig,
@@ -616,7 +638,8 @@ for (const [label, path] of [
   ['main config', 'services/example_tauri_service/src-tauri/tauri.conf.json'],
   ['platform overlay', 'services/example_tauri_service/src-tauri/tauri.android.conf.json'],
 ]) {
-  test(`reports malformed JSON in the ${label} and continues checking`, async () => {
+  const catalogIdentity = path.endsWith('/package.json')
+  test(`reports malformed JSON in the ${label} and ${catalogIdentity ? 'fails closed before target scanning' : 'continues checking'}`, async () => {
     await withFixture(
       separatedTemplateFiles({
         [path]: '{ malformed',
@@ -630,12 +653,16 @@ for (const [label, path] of [
           ),
           violations.join('\n'),
         )
-        assert.ok(
-          violations.some((violation) =>
-            violation.includes('services/example_tauri_service/src-tauri/Cargo.toml'),
-          ),
-          violations.join('\n'),
-        )
+        if (catalogIdentity) {
+          assert.ok(violations.every((violation) => violation.startsWith('service catalog:')))
+        } else {
+          assert.ok(
+            violations.some((violation) =>
+              violation.includes('services/example_tauri_service/src-tauri/Cargo.toml'),
+            ),
+            violations.join('\n'),
+          )
+        }
       },
     )
   })

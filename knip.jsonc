@@ -2,10 +2,11 @@
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "treatConfigHintsAsErrors": true,
   "ignoreDependencies": ["^cloudflare(:.*)?$"],
-  "ignoreBinaries": ["ruby", "terraform"],
+  "ignoreBinaries": ["make", "ruby", "terraform"],
   "ignoreFiles": [
     ".agents/skills/design-select/scripts/**",
     "scripts/check-new-service-skill.mjs",
+    "scripts/run-native-service.mjs",
     "scripts/tauri-dev-host.d.mts",
     "scripts/without-git-local-env.mjs",
     "scripts/web-csp.d.mts"

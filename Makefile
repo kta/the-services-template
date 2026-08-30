@@ -3,6 +3,9 @@ SHELL := /bin/bash
 WORKTREE_NAME := $(name)
 export WORKTREE_NAME
 
+# POSIX shell single-quote escaping for stems passed as one argv value.
+shell_quote = '$(subst ','"'"',$(1))'
+
 # SPA + API services started together by `make dev/all`.
 # Add each new domain service here; notifier and ops are Worker-only services.
 DEV_ALL_SERVICES := admin example_service example_tauri_service
@@ -29,13 +32,11 @@ dev/%: FORCE
 
 ## dev/<service>/tauri: run a catalog-registered Tauri service (Worker + native window)
 dev/%/tauri:
-	@node scripts/service-catalog.mjs require-native $*
-	pnpm --filter @app/$* tauri dev
+	@node scripts/run-native-service.mjs dev $(call shell_quote,$*)
 
 ## build/<service>/tauri: build a catalog-registered Tauri service static bundle
 build/%/tauri:
-	@node scripts/service-catalog.mjs require-native $*
-	pnpm --filter @app/$* build:tauri
+	@node scripts/run-native-service.mjs build $(call shell_quote,$*)
 
 ## dev/admin: run admin — SPA + API in one dev server (:5174)
 dev/admin:

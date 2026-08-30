@@ -93,7 +93,7 @@ example.example.com は検証用 placeholder であり、実運用 origin では
 
 GitHub Actions の Example Tauri Service native artifacts を `workflow_dispatch` で起動する。macOS universal app、iOS simulator、Android debug APK、Android debug AAB を作成し、artifact を 7 日間保存する。重い platform artifact build は通常 PR verify から外し、通常 verify は `admin` と `example_tauri_service` の Rust fmt/test/clippy と静的 boundary だけを実行する。Web-only の `example_service` は native gate の対象にしない。workflow は署名、store upload、Cloudflare deploy を行わない。
 
-native 対象と artifact workflow path は root `service-catalog.json` の `native: true` / `nativeWorkflow` が単一ソースである。Tauri 雛形から新サービスを作る場合は catalog 登録と workflow のコピー・rename を同じ変更に含め、`node scripts/service-catalog.mjs validate` と `node --test scripts/check-deploy-boundary.test.mjs` を通す。
+native 対象と artifact workflow path は root `service-catalog.json` の `native: true` / `nativeWorkflow` が単一ソースである。Tauri 雛形から新サービスを作る場合は catalog 登録と workflow のコピー・rename を同じ変更に含め、`node scripts/service-catalog.mjs validate-repository` と `node --test scripts/check-deploy-boundary.test.mjs` を通す。workflow path は `.github/workflows/*.yml` / `*.yaml` の安全な一意パスに限り、catalog validator が manual-only・protected main・credential 非保持・boundary/artifact scan・platform pin を全 native service に強制する。
 
 macOS job は Rust の固定 loopback debug origin で unsigned debug artifact を作るため、いずれも本番配布物ではない。手動 workflow は Cloudflare credential、JWT_PRIVATE_KEY、Worker secret を持たず、署名・notarization・store upload も行わない。署名済み release の Protected Data/Keystore 動作確認と配布は workflow 外で実施する。
 

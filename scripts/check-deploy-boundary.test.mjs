@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { spawnSync } from 'node:child_process'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { loadServiceCatalog, validateServiceCatalog } from './service-catalog.mjs'
 
 const root = process.cwd()
 
@@ -287,11 +290,8 @@ test('root agent instructions keep service registration inside the CI-only produ
 })
 
 test('manual artifact workflows do not receive Cloudflare credentials', async () => {
-  for (const workflowPath of [
-    '.github/workflows/example-tauri-build.yml',
-    '.github/workflows/tauri-build.yml',
-  ]) {
-    const workflow = await readFile(join(root, workflowPath), 'utf8')
+  for (const service of (await loadServiceCatalog(root)).filter((entry) => entry.native)) {
+    const workflow = await readFile(join(root, service.nativeWorkflow), 'utf8')
     assert.match(workflow, /workflow_dispatch:/)
     assert.doesNotMatch(workflow, /CLOUDFLARE_(?:API_TOKEN|ACCOUNT_ID)/)
     assert.doesNotMatch(workflow, /wrangler\s+deploy/)
@@ -326,19 +326,18 @@ test('regular verify runs Rust checks for exactly the native service manifests',
 })
 
 test('native artifact workflows exactly match catalog native services', async () => {
-  const catalog = JSON.parse(await readFile(join(root, 'service-catalog.json'), 'utf8'))
-  const nativeServices = catalog.services.filter((service) => service.native)
-  assert.deepEqual(nativeServices.map((service) => service.directory).sort(), [
-    'admin',
-    'example_tauri_service',
-  ])
-  assert.equal(new Set(nativeServices.map((service) => service.nativeWorkflow)).size, 2)
+  const catalog = await loadServiceCatalog(root)
+  const nativeServices = catalog.filter((service) => service.native)
+  assert.equal(
+    new Set(nativeServices.map((service) => service.nativeWorkflow)).size,
+    nativeServices.length,
+  )
   for (const service of nativeServices) {
     const workflow = await readFile(join(root, service.nativeWorkflow), 'utf8')
     assert.match(workflow, new RegExp(service.package.replace('/', '\\/')))
     assert.match(workflow, new RegExp(`services/${service.directory}/src-tauri`))
   }
-  const webServices = catalog.services.filter((service) => !service.native)
+  const webServices = catalog.filter((service) => !service.native)
   for (const service of webServices) {
     for (const nativeService of nativeServices) {
       const workflow = await readFile(join(root, nativeService.nativeWorkflow), 'utf8')
@@ -364,7 +363,44 @@ test('Makefile excludes Web-template native commands without rejecting its Web t
   assertNoWebTemplateNativeMakefileReference(makefile)
   assert.match(makefile, /^dev\/%\/tauri:/m)
   assert.match(makefile, /^build\/%\/tauri:/m)
-  assert.match(makefile, /service-catalog\.mjs require-native \$\*/)
+  assert.match(makefile, /run-native-service\.mjs (?:dev|build)/)
+})
+
+test('an additional catalog native service needs no Make or deploy-test hard-code', async () => {
+  const fixture = await mkdtemp(join(tmpdir(), 'additional-native-'))
+  const service = {
+    directory: 'booking',
+    package: '@app/booking',
+    templateKind: 'tauri',
+    deployable: false,
+    native: true,
+    nativeWorkflow: '.github/workflows/booking-native.yml',
+  }
+  try {
+    await mkdir(join(fixture, 'services/booking/src/web'), { recursive: true })
+    await mkdir(join(fixture, '.github/workflows'), { recursive: true })
+    await writeFile(
+      join(fixture, 'service-catalog.json'),
+      `${JSON.stringify({ services: [service] })}\n`,
+    )
+    await writeFile(join(fixture, 'services/booking/package.json'), '{"name":"@app/booking"}\n')
+    await writeFile(join(fixture, 'services/booking/src/web/App.tsx'), 'export {}\n')
+    await writeFile(join(fixture, 'Makefile'), await readFile(join(root, 'Makefile'), 'utf8'))
+    await writeFile(
+      join(fixture, service.nativeWorkflow),
+      `on:\n  workflow_dispatch: {}\nenv:\n  ANDROID_PLATFORM_API: 35\n  ANDROID_NDK_VERSION: 27.2.12479018\n  XCODEGEN_VERSION: 2.46.0\njobs:\n  build:\n    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true\n    steps:\n      - run: node scripts/check-tauri-boundary.mjs\n      - run: pnpm --filter @app/booking build:tauri\n      - run: node scripts/check-tauri-artifact.mjs services/booking/src-tauri/target\n`,
+    )
+    const result = await validateServiceCatalog(fixture)
+    assert.deepEqual(result.violations, [])
+    const make = spawnSync('make', ['-n', 'build/booking/tauri'], {
+      cwd: fixture,
+      encoding: 'utf8',
+    })
+    assert.equal(make.status, 0, make.stderr)
+    assert.match(make.stdout, /run-native-service\.mjs build ['"]?booking/)
+  } finally {
+    await rm(fixture, { recursive: true, force: true })
+  }
 })
 
 test('every GitHub Action reference is pinned to a full commit SHA', async () => {
@@ -382,7 +418,10 @@ test('every GitHub Action reference is pinned to a full commit SHA', async () =>
 
 test('only the two reviewed production workflows may carry production capabilities', async () => {
   const workflowRoot = join(root, '.github/workflows')
-  for (const workflowPath of ['agent-compat.yml', 'tauri-build.yml', 'example-tauri-build.yml']) {
+  const nativeWorkflowNames = (await loadServiceCatalog(root))
+    .filter((service) => service.native)
+    .map((service) => service.nativeWorkflow.replace('.github/workflows/', ''))
+  for (const workflowPath of ['agent-compat.yml', ...nativeWorkflowNames]) {
     const source = await readFile(join(workflowRoot, workflowPath), 'utf8')
     assert.doesNotMatch(source, /CLOUDFLARE_(?:API_TOKEN|ACCOUNT_ID)|secrets\.PRODUCTION_/)
     assert.doesNotMatch(source, /\bwrangler\s+(?:deploy|d1|r2)\b/)

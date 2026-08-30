@@ -20,7 +20,7 @@ Do not copy either template before the user answers. Do not infer Tauri from the
 
 1. Copy tracked source from `services/example_service` to `services/<service-name>`, excluding `dist`, `node_modules`, `.wrangler`, `worker-configuration.d.ts`, generated coverage/Playwright output, local `.dev.vars`, and `migrations/*`.
 2. Rename the package to `@app/<service-name>`, the D1 `database_name` to the underscored service name, the Wrangler Worker `name` to its hyphenated DNS-label form, storage keys, and dev/E2E ports. Keep same-origin browser transport and session storage. The generated service must not contain `src-tauri`, `@tauri-apps/*` dependencies, or `tauri` / `tauri:*` / `*:tauri` scripts.
-3. Register the service in root `service-catalog.json` with its directory/package, `templateKind: "web"`, and explicit deployable/native flags. Run `node scripts/service-catalog.mjs validate` so the workspace and catalog cannot drift.
+3. Register the service in root `service-catalog.json` with its directory/package, `templateKind: "web"`, and explicit deployable/native flags. Keep Worker-only `notifier`/`ops` in `workerOnlyServices`, outside the SPA `services` array. Run `node scripts/service-catalog.mjs validate` so the workspace and catalog cannot drift.
 4. Verify this branch with:
    - `pnpm --filter @app/<service-name> test:all`
    - `pnpm --filter @app/<service-name> typecheck`
@@ -31,7 +31,7 @@ Do not copy either template before the user answers. Do not infer Tauri from the
 
 1. Copy tracked source from `services/example_tauri_service` to `services/<service-name>`, excluding `dist`, `node_modules`, `.wrangler`, `worker-configuration.d.ts`, generated coverage/Playwright output, local `.dev.vars`, `migrations/*`, `src-tauri/gen`, and `src-tauri/target`.
 2. Rename every Web and native identity: package, D1, hyphenated Worker name, dev/E2E ports, Tauri `productName` and `identifier`, Rust crate/library, fixed `TAURI_<SERVICE>_API_ORIGIN` build variable and release allowlist, navigation guard, native/browser storage keys, capability description, and Android/iOS/macOS overlays. Do not broaden the release-origin allowlist. Keep Vite `strictPort: true`; `TAURI_DEV_HOST` may affect development HMR only.
-3. Register the service in root `service-catalog.json` with its directory/package, `templateKind: "tauri"`, `native: true`, the reviewed deployable flag, and a unique `nativeWorkflow`. Copy and rename the example Tauri manual artifact workflow to that exact path. Run `node scripts/service-catalog.mjs validate` and `node --test scripts/check-deploy-boundary.test.mjs` to prove CI Rust manifests, Make native targets, and artifact workflows match the catalog native set.
+3. Register the service in root `service-catalog.json` with its directory/package, `templateKind: "tauri"`, `native: true`, the reviewed deployable flag, and a unique `nativeWorkflow`. Copy and rename the example Tauri manual artifact workflow to that exact path. Run `node scripts/service-catalog.mjs validate` and `node --test scripts/check-deploy-boundary.test.mjs` to prove CI Rust manifests, generic Make native targets, and artifact workflows match the validated catalog native set.
 4. Verify this branch with:
    - `pnpm --filter @app/<service-name> test:all`
    - `pnpm --filter @app/<service-name> typecheck`
@@ -50,5 +50,5 @@ Do not copy either template before the user answers. Do not infer Tauri from the
 4. **Local wiring:** add the service to `DEV_ALL_SERVICES`; retain `dev` and `.dev.vars.example`; run `make dev-vars`, `make -n dev/<service-name>`, and `make -n dev/all`.
 5. **DB and UI:** generate/apply local migrations, add Terraform D1/output, and follow `docs/frontend/DESIGN_RULE.md` before writing JSX.
 6. **Platform services:** register ops monitoring/backups and update admin service binding when the new domain replaces the scaffold.
-7. **Protected production wiring:** add the package to the root test chain, CI E2E matrix, ordered protected-main production deploy chain, D1/service-binding/health/backup registries, bootstrap allowlist, and caller-specific secret names. Never add a local production deploy or remote-migration entry point. `example_service` and `example_tauri_service` are templates and are never production deploy targets.
-8. **Final verification:** run `pnpm install`, the selected branch verification above, and `pnpm check`.
+7. **Repository wiring:** every SPA service goes in the root combined `test:all` chain and CI manual E2E matrix. If `deployable: true`, also add it to every ordered protected-main production build/artifact/deploy surface, D1/service-binding/health/backup registries, bootstrap allowlist, and caller-specific secret names. If `deployable: false`, keep it out of all production surfaces. Never add a local production deploy or remote-migration entry point. Run `node scripts/service-catalog.mjs validate-repository`; its bidirectional set checks must pass without omissions or extras.
+8. **Final verification:** run `pnpm install`, the selected branch verification above, `node scripts/service-catalog.mjs validate-repository`, and `pnpm check`.

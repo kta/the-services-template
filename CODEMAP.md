@@ -27,7 +27,7 @@ operator operations tied to a clean published `main` checkout. First-Worker
 secret bootstrap uses only the dedicated protected-main
 `production-bootstrap.yml` workflow and its reviewer gate. The template
 `example_service` and `example_tauri_service` are never production targets.
-Root [`service-catalog.json`](./service-catalog.json) is the machine-readable source of truth for SPA service directories/packages, Web vs Tauri template kind, deployability, and native artifact workflows.
+Root [`service-catalog.json`](./service-catalog.json) is the machine-readable source of truth for SPA service directories/packages, Web vs Tauri template kind, deployability, and native artifact workflows. Worker-only `notifier` and `ops` are explicitly listed in `workerOnlyServices`, outside the SPA array. `service-catalog.mjs validate-repository` enforces exact dev/test/E2E and production wiring sets.
 Service-binding authentication uses a distinct secret for each direction:
 `ADMIN_TO_<DOMAIN>_KEY` (the scaffold uses `ADMIN_TO_EXAMPLE_SERVICE_KEY`),
 `ADMIN_TO_NOTIFIER_KEY`, `DOMAIN_TO_NOTIFIER_KEY`, and

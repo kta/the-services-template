@@ -5,11 +5,13 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { effectiveValues, parseJsonc } from './check-production-config.mjs'
 import { isProductionDomainAuthReady } from './require-production-domain-auth.mjs'
+import { loadServiceRepositoryCatalog } from './service-catalog.mjs'
 import { inspectWorkflowPolicy } from './workflow-policy.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const violations = []
 const credentialedProductionWorkflows = new Set(['ci.yml', 'production-bootstrap.yml'])
+const serviceCatalog = await loadServiceRepositoryCatalog(root)
 
 export function isFixedProductionDeployScript(script, service) {
   return script === `node ../../scripts/production-deploy.mjs ${service}`
@@ -711,22 +713,11 @@ for (const template of ['example_service', 'example_tauri_service']) {
 // Make omissions fail in the repository's own boundary check before a deploy
 // can be attempted: package entry points, Make, CI, admin's service binding,
 // and ops' backup/health target must all be wired for the same service name.
-const knownServiceDirectories = new Set([
-  'admin',
-  'example_service',
-  'example_tauri_service',
-  'notifier',
-  'ops',
-])
 const opsConfigSource = await readFile(join(root, 'services/ops/wrangler.jsonc'), 'utf8')
 const opsSource = await readFile(join(root, 'services/ops/src/index.ts'), 'utf8')
-for (const serviceEntry of await readdir(join(root, 'services'), { withFileTypes: true })) {
-  if (!serviceEntry.isDirectory() || knownServiceDirectories.has(serviceEntry.name)) continue
-  const service = serviceEntry.name
-  if (!/^[a-z][a-z0-9_]{0,62}$/.test(service)) {
-    violations.push(`copied domain service directory has an invalid name: ${service}`)
-    continue
-  }
+for (const { directory: service } of serviceCatalog.services.filter(
+  (candidate) => candidate.deployable && candidate.directory !== 'admin',
+)) {
   const packagePath = join(root, 'services', service, 'package.json')
   const configPath = join(root, 'services', service, 'wrangler.jsonc')
   let packageJson

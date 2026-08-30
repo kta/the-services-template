@@ -1343,16 +1343,15 @@ async function validateTarget(workspace, target) {
 async function validateTauriBoundary(root = process.cwd()) {
   const workspace = resolve(root)
   const catalog = await validateServiceCatalog(workspace)
+  if (catalog.violations.length > 0) {
+    return catalog.violations.map((violation) => `service catalog: ${violation}`).sort()
+  }
   const targets = await catalogTauriTargets(workspace, catalog.services)
   const [templateViolations, targetViolations] = await Promise.all([
     validateTemplateSeparation(workspace, catalog.services),
     Promise.all(targets.map((target) => validateTarget(workspace, target))),
   ])
-  return [
-    ...catalog.violations.map((violation) => `service catalog: ${violation}`),
-    ...templateViolations,
-    ...targetViolations.flat(),
-  ].sort()
+  return [...templateViolations, ...targetViolations.flat()].sort()
 }
 
 export { validateTauriBoundary }
