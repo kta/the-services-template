@@ -96,6 +96,95 @@ function baseFiles(extra = {}) {
   }
 }
 
+function separatedTemplateFiles(extra = {}) {
+  const tauriTemplate = Object.fromEntries(
+    Object.entries(baseFiles()).map(([path, content]) => [
+      path.replaceAll('example_service', 'example_tauri_service'),
+      content,
+    ]),
+  )
+  return {
+    ...tauriTemplate,
+    'services/example_service/src/web/App.tsx': 'export function App() { return null }\n',
+    'services/example_service/package.json': JSON.stringify({
+      scripts: { dev: 'vite dev' },
+      dependencies: { react: 'catalog:' },
+    }),
+    'services/example_tauri_service/package.json': JSON.stringify({
+      scripts: { tauri: 'tauri' },
+      dependencies: { '@tauri-apps/api': 'catalog:' },
+      devDependencies: { '@tauri-apps/cli': 'catalog:' },
+    }),
+    'services/example_tauri_service/src-tauri/Cargo.toml': '[package]\nname = "example"\n',
+    'services/example_tauri_service/src-tauri/src/origin.rs':
+      'pub const RELEASE_ORIGIN: &str = "https://api.example.test";\n',
+    'services/example_tauri_service/src/web/platform/transport.ts':
+      'export function platformFetch() { return undefined }\n',
+    ...extra,
+  }
+}
+
+for (const [asset, files] of [
+  [
+    'src-tauri directory',
+    {
+      'services/example_service/src-tauri/tauri.conf.json': exampleCleanConfig,
+    },
+  ],
+  [
+    '@tauri-apps dependency',
+    {
+      'services/example_service/package.json': JSON.stringify({
+        dependencies: { '@tauri-apps/api': 'catalog:' },
+      }),
+    },
+  ],
+  [
+    'tauri package script',
+    {
+      'services/example_service/package.json': JSON.stringify({
+        scripts: { tauri: 'tauri' },
+      }),
+    },
+  ],
+]) {
+  test(`rejects ${asset} in the Web-only example template`, async () => {
+    await withFixture(separatedTemplateFiles(files), async (root) => {
+      const violations = await validateTauriBoundary(root)
+      assert.ok(
+        violations.some(
+          (violation) =>
+            violation.includes('services/example_service') &&
+            violation.includes('Web-only template must not contain Tauri'),
+        ),
+      )
+    })
+  })
+}
+
+for (const [asset, missingPath] of [
+  ['Cargo manifest', 'services/example_tauri_service/src-tauri/Cargo.toml'],
+  ['Tauri config', 'services/example_tauri_service/src-tauri/tauri.conf.json'],
+  ['default capability', 'services/example_tauri_service/src-tauri/capabilities/default.json'],
+  ['native transport', 'services/example_tauri_service/src/web/platform/transport.ts'],
+  ['release origin', 'services/example_tauri_service/src-tauri/src/origin.rs'],
+]) {
+  test(`requires ${asset} in the Tauri example template`, async () => {
+    const files = separatedTemplateFiles()
+    delete files[missingPath]
+    await withFixture(files, async (root) => {
+      const violations = await validateTauriBoundary(root)
+      assert.ok(
+        violations.some(
+          (violation) =>
+            violation.includes('services/example_tauri_service') &&
+            violation.includes(`required Tauri template asset is missing: ${asset}`),
+        ),
+      )
+    })
+  })
+}
+
 test('accepts the current safe Tauri boundary', async () => {
   await withFixture(
     baseFiles({

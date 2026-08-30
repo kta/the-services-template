@@ -297,6 +297,24 @@ test('manual artifact workflows do not receive Cloudflare credentials', async ()
   }
 })
 
+test('regular verify does not run Rust checks for the Web-only example template', async () => {
+  const workflow = await readFile(join(root, '.github/workflows/ci.yml'), 'utf8')
+  const rustChecks = workflow.slice(
+    workflow.indexOf('- name: Rust format and Tauri unit tests'),
+    workflow.indexOf('- name: Check agent compatibility'),
+  )
+  assert.doesNotMatch(rustChecks, /services\/example_service\/src-tauri\//)
+})
+
+test('Tauri build registries include the dedicated Tauri example template', async () => {
+  const workflow = await readFile(join(root, '.github/workflows/example-tauri-build.yml'), 'utf8')
+  const makefile = await readFile(join(root, 'Makefile'), 'utf8')
+  assert.match(workflow, /@app\/example_tauri_service/)
+  assert.match(workflow, /services\/example_tauri_service\/src-tauri/)
+  assert.match(makefile, /^dev\/example_tauri_service\/tauri:/m)
+  assert.match(makefile, /^build\/example_tauri_service\/tauri:/m)
+})
+
 test('every GitHub Action reference is pinned to a full commit SHA', async () => {
   const workflowRoot = join(root, '.github/workflows')
   const entries = await (await import('node:fs/promises')).readdir(workflowRoot)
