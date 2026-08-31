@@ -68,6 +68,10 @@ test('production CI deploy is push-only on protected main', async () => {
   assert.doesNotMatch(workflow, /PRODUCTION_DEPLOY_ALLOWED/)
   assert.match(workflow, /secrets\.CLOUDFLARE_API_TOKEN/)
   assert.match(workflow, /secrets\.CLOUDFLARE_ACCOUNT_ID/)
+  assert.match(
+    workflow,
+    /hashicorp\/setup-terraform@[0-9a-f]{40}[\s\S]*terraform_version:\s*1\.10\.5[\s\S]*name: Terraform format and validate/,
+  )
   assert.match(workflow, /name: Terraform format and validate[\s\S]*run: pnpm run infra:check/)
   assert.match(workflow, /build-production:[\s\S]*needs: \[verify\]/)
   assert.match(workflow, /build-production:[\s\S]*actions\/upload-artifact@[0-9a-f]{40}/)
