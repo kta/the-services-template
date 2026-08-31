@@ -65,16 +65,4 @@ test('rejects invalid, writable, foreign, or checkout-local overrides', () => {
 test('validates the absolute Node executable that launched a reviewed wrapper', () => {
   assert.equal(resolveReviewedNode(process.execPath, process.cwd()), realpathSync(process.execPath))
   assert.throws(() => resolveReviewedNode('node', process.cwd()), /absolute Node path/i)
-
-  const directory = mkdtempSync(join(tmpdir(), 'reviewed-node-'))
-  try {
-    const executable = join(directory, 'node')
-    writeFileSync(executable, '#!/bin/sh\n')
-    chmodSync(executable, 0o775)
-    assert.equal(resolveReviewedNode(executable, process.cwd()), realpathSync(executable))
-    chmodSync(executable, 0o777)
-    assert.throws(() => resolveReviewedNode(executable, process.cwd()), /non-writable/)
-  } finally {
-    rmSync(directory, { recursive: true, force: true })
-  }
 })

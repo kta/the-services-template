@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { delimiter, join } from 'node:path'
+import { delimiter, dirname, join } from 'node:path'
 import test from 'node:test'
 import { promisify } from 'node:util'
 import { inspectNativePackageBuildPlan } from './native-package-build-policy.mjs'
@@ -230,12 +230,14 @@ test('requires the catalog manual protected-main executor context in GitHub Acti
 
 test('registered wrapper passes a bounded defense-in-depth capability to exact package entries', async () => {
   const fixture = await mkdtemp(join(tmpdir(), 'native-workflow-capability-'))
+  const runtimeRoot = join(fixture, 'runtime')
+  const secureNode = join(runtimeRoot, 'bin', 'node')
   const fakePnpm = join(fixture, 'pnpm')
   const marker = join(fixture, 'guard-ran')
   const { stdout: reviewedPnpm } = await execFileAsync('/usr/bin/which', ['pnpm'])
   await writeFile(
     fakePnpm,
-    `#!${process.execPath}
+    `#!${secureNode}
 import { execFileSync } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -268,6 +270,9 @@ if (args[0] === '--filter' && args[1] === '@app/admin' && args[2] === 'run' && a
 writeFileSync(${JSON.stringify(marker)}, 'guarded')
 `,
   )
+  await cp(dirname(dirname(process.execPath)), runtimeRoot, { recursive: true })
+  await chmod(join(runtimeRoot, 'bin'), 0o700)
+  await chmod(secureNode, 0o500)
   await chmod(fakePnpm, 0o700)
   const github = {
     ...validGithubContext,
@@ -279,7 +284,7 @@ writeFileSync(${JSON.stringify(marker)}, 'guarded')
   try {
     for (const action of ['build-macos', 'init-ios', 'init-android']) {
       await execFileAsync(
-        process.execPath,
+        secureNode,
         [join(process.cwd(), 'scripts/native-workflow.mjs'), 'admin', action],
         { cwd: process.cwd(), env: github },
       )
@@ -288,7 +293,7 @@ writeFileSync(${JSON.stringify(marker)}, 'guarded')
 
     await assert.rejects(
       execFileAsync(
-        process.execPath,
+        secureNode,
         [join(process.cwd(), 'scripts/native-workflow.mjs'), 'package', 'tauri', 'info'],
         { cwd: join(process.cwd(), 'services/admin'), env: github },
       ),
