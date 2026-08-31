@@ -70,7 +70,7 @@ test('production CI deploy is push-only on protected main', async () => {
   assert.match(workflow, /secrets\.CLOUDFLARE_ACCOUNT_ID/)
   assert.match(
     workflow,
-    /hashicorp\/setup-terraform@[0-9a-f]{40}[\s\S]*terraform_version:\s*1\.10\.5[\s\S]*name: Terraform format and validate/,
+    /name: Harden reviewed Node tool permissions[\s\S]*chmod go-w "\$node_path" "\$\(dirname "\$node_path"\)"[\s\S]*hashicorp\/setup-terraform@[0-9a-f]{40}[\s\S]*terraform_version:\s*1\.10\.5[\s\S]*name: Terraform format and validate/,
   )
   assert.match(workflow, /name: Terraform format and validate[\s\S]*run: pnpm run infra:check/)
   assert.match(

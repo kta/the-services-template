@@ -30,6 +30,17 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
+      - name: Harden reviewed Node tool permissions
+        shell: bash
+        run: |
+          set -euo pipefail
+          node_path="$(node -p 'require("node:fs").realpathSync(process.execPath)')"
+          case "$node_path" in
+            "$GITHUB_WORKSPACE"/*) echo "Node resolved inside the checkout" >&2; exit 1 ;;
+            /*) ;;
+            *) echo "Node did not resolve to an absolute path" >&2; exit 1 ;;
+          esac
+          chmod go-w "$node_path" "$(dirname "$node_path")"
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: 1.10.5
