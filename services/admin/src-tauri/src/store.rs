@@ -5,6 +5,7 @@ pub type StoreResult<T> = Result<T, String>;
 // This value is a deny marker, not a credential. It lets the native session
 // remain signed out across an app restart when keychain deletion fails but a
 // protected write still succeeds.
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
 const SIGNED_OUT_MARKER: &[u8] = b"__app_signed_out_v1__";
 
 /// Native refresh-cookie persistence boundary. Access JWTs and passwords are
