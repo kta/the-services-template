@@ -95,6 +95,8 @@ GitHub Actions の Example Tauri Service native artifacts を `workflow_dispatch
 
 native 対象と artifact workflow path は root `service-catalog.json` の `native: true` / `nativeWorkflow` が単一ソースである。Tauri 雛形から新サービスを作る場合は catalog 登録と workflow のコピー・rename を同じ変更に含め、`node scripts/service-catalog.mjs validate-repository` と `node --test scripts/check-deploy-boundary.test.mjs` を通す。workflow path は `.github/workflows/*.yml` / `*.yaml` の安全な一意パスに限る。catalog validator は YAML の実 trigger/job/step/env/permissions を構造解析し、manual-only・全 job の `runs-on` と protected main・credential 非保持・SHA pin・boundary/artifact scan・platform pin を全 native service に強制する。
 
+この静的検査の目的は、通常の編集で未登録 workflow に重い native build が紛れ込み、通常 PR/CI の時間と runner cost を増やす事故を防ぐことである。任意の悪意ある shell、repository 内 helper、composite action の全挙動を証明する parser/attestation ではない。`GITHUB_ACTIONS`、ref/workflow context と一時 nonce/capability の runtime check も caller が再現できる defense-in-depth であり、信頼できる実行環境の証明として扱わない。実効境界は catalog 登録 workflow の exact profile と protected-branch review、ならびに manual native job へ Cloudflare production credential・store signing credential・Worker secret を渡さないことにある。PR ではこの前提を崩す workflow/helper変更を人間が確認する。
+
 macOS job は Rust の固定 loopback debug origin で unsigned debug artifact を作るため、いずれも本番配布物ではない。手動 workflow は Cloudflare credential、JWT_PRIVATE_KEY、Worker secret を持たず、署名・notarization・store upload も行わない。署名済み release の Protected Data/Keystore 動作確認と配布は workflow 外で実施する。
 
 ## native boundary の注意

@@ -726,7 +726,10 @@ async function scheduled(_event: unknown, env: Bindings, _ctx?: unknown): Promis
         notifyDrift: async ({ drift, failed, truncated }) => {
           const alertEmail = configuredAlertEmail(env)
           if (!alertEmail) {
-            console.warn('sync drift detected but OPS_ALERT_EMAIL is unset', drift)
+            console.warn(
+              `sync drift detected for ${syncEnv.directory} but OPS_ALERT_EMAIL is unset`,
+              drift,
+            )
             return
           }
           // 冪等キーは日付スロット(再実行・リトライで連打しない)。

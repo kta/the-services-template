@@ -13,6 +13,11 @@ function mapping(value) {
 
 const ADMIN_ORCHESTRATION_MODULE = './domain-sync-orchestration.mjs'
 const ADMIN_ORCHESTRATION_EXPORT = 'orchestrateDomainSyncIdentities'
+const ADMIN_SCHEDULED_IMPORTS = Object.freeze([
+  ['./reconcile', 'reconcileOrgs'],
+  ['./sync', 'listDomainOrgs'],
+  ['./sync', 'syncOrgToDomain'],
+])
 
 function unwrapParentheses(expression) {
   let current = expression
@@ -52,17 +57,15 @@ function importBindingNames(statement) {
   return names
 }
 
-function hasExactOrchestrationImport(sourceFile) {
+function hasExactNamedValueImport(sourceFile, moduleName, exportName) {
   let exactImports = 0
   for (const statement of sourceFile.statements) {
     if (!ts.isImportDeclaration(statement)) continue
-    const localBindings = importBindingNames(statement).filter(
-      (name) => name === ADMIN_ORCHESTRATION_EXPORT,
-    )
+    const localBindings = importBindingNames(statement).filter((name) => name === exportName)
     if (localBindings.length === 0) continue
     if (
       !ts.isStringLiteral(statement.moduleSpecifier) ||
-      statement.moduleSpecifier.text !== ADMIN_ORCHESTRATION_MODULE ||
+      statement.moduleSpecifier.text !== moduleName ||
       statement.importClause?.isTypeOnly
     ) {
       return false
@@ -70,11 +73,10 @@ function hasExactOrchestrationImport(sourceFile) {
     const bindings = statement.importClause?.namedBindings
     if (!bindings || !ts.isNamedImports(bindings)) return false
     for (const element of bindings.elements) {
-      if (element.name.text === ADMIN_ORCHESTRATION_EXPORT) {
+      if (element.name.text === exportName) {
         if (
           element.isTypeOnly ||
-          (element.name.text === ADMIN_ORCHESTRATION_EXPORT &&
-            (element.propertyName?.text ?? element.name.text) !== ADMIN_ORCHESTRATION_EXPORT)
+          (element.propertyName?.text ?? element.name.text) !== exportName
         ) {
           return false
         }
@@ -83,6 +85,14 @@ function hasExactOrchestrationImport(sourceFile) {
     }
   }
   return exactImports === 1
+}
+
+function hasExactOrchestrationImport(sourceFile) {
+  return hasExactNamedValueImport(
+    sourceFile,
+    ADMIN_ORCHESTRATION_MODULE,
+    ADMIN_ORCHESTRATION_EXPORT,
+  )
 }
 
 function declaredFunction(sourceFile, name) {
@@ -223,6 +233,57 @@ function containsPropertyAccess(node, objectName, memberName) {
   return found
 }
 
+function isPropertyAccessNamed(node, objectName, memberName) {
+  const access = unwrapParentheses(node)
+  return (
+    ts.isPropertyAccessExpression(access) &&
+    isIdentifierNamed(access.expression, objectName) &&
+    access.name.text === memberName
+  )
+}
+
+function propertyAssignment(properties, name) {
+  const property = properties.get(name)
+  return ts.isPropertyAssignment(property) ? property.initializer : undefined
+}
+
+function isShorthandProperty(properties, name) {
+  const property = properties.get(name)
+  return ts.isShorthandPropertyAssignment(property) && property.name.text === name
+}
+
+function exactObjectBindingParameters(callback, expectedNames) {
+  if (callback.parameters.length !== 1) return undefined
+  const binding = callback.parameters[0].name
+  if (!ts.isObjectBindingPattern(binding) || binding.elements.length !== expectedNames.length) {
+    return undefined
+  }
+  const names = []
+  for (const element of binding.elements) {
+    if (
+      element.dotDotDotToken ||
+      element.propertyName ||
+      element.initializer ||
+      !ts.isIdentifier(element.name)
+    ) {
+      return undefined
+    }
+    names.push(element.name.text)
+  }
+  return expectedNames.every((name) => names.includes(name)) ? names : undefined
+}
+
+function templateStartsWithDirectory(expression, target, head, firstLiteral) {
+  const template = unwrapParentheses(expression)
+  return (
+    ts.isTemplateExpression(template) &&
+    template.head.text === head &&
+    template.templateSpans.length >= 1 &&
+    isPropertyAccessNamed(template.templateSpans[0].expression, target, 'directory') &&
+    template.templateSpans[0].literal.text === firstLiteral
+  )
+}
+
 function validatesRequestOperation(callback) {
   if (!ts.isArrowFunction(callback) || ts.isBlock(callback.body)) return false
   const [target] = exactIdentifierParameters(callback, 1) ?? []
@@ -241,6 +302,156 @@ function validatesTargetCallback(property, callee, target, argumentCount) {
   return call?.arguments.length === argumentCount && isIdentifierNamed(call.arguments[0], target)
 }
 
+function validatesResyncCallback(property, target) {
+  if (!ts.isPropertyAssignment(property) || !ts.isArrowFunction(property.initializer)) return false
+  const [organization] = exactIdentifierParameters(property.initializer, 1) ?? []
+  if (!organization || ts.isBlock(property.initializer.body)) return false
+  const call = directIdentifierCall(property.initializer.body, 'syncOrgToDomain')
+  if (call?.arguments.length !== 2 || !isIdentifierNamed(call.arguments[0], target)) {
+    return false
+  }
+  const converted = directIdentifierCall(call.arguments[1], 'toOrganization')
+  return (
+    converted?.arguments.length === 1 &&
+    isPropertyAccessNamed(converted.arguments[0], organization, 'row')
+  )
+}
+
+function validatesConsoleWarn(statement, firstArgument, secondArgument) {
+  if (!ts.isExpressionStatement(statement)) return false
+  const call = unwrapParentheses(statement.expression)
+  return (
+    ts.isCallExpression(call) &&
+    ts.isPropertyAccessExpression(call.expression) &&
+    isIdentifierNamed(call.expression.expression, 'console') &&
+    call.expression.name.text === 'warn' &&
+    call.arguments.length === 2 &&
+    firstArgument(call.arguments[0]) &&
+    secondArgument(call.arguments[1])
+  )
+}
+
+function validatesNotifyDriftCallback(property, target) {
+  if (
+    !ts.isPropertyAssignment(property) ||
+    !ts.isArrowFunction(property.initializer) ||
+    !ts.isBlock(property.initializer.body) ||
+    !property.initializer.modifiers?.some(
+      (modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword,
+    ) ||
+    !exactObjectBindingParameters(property.initializer, ['drift', 'failed', 'truncated'])
+  ) {
+    return false
+  }
+  const statements = property.initializer.body.statements
+  if (statements.length !== 3) return false
+
+  const alertDeclaration = ts.isVariableStatement(statements[0])
+    ? statements[0].declarationList.declarations
+    : []
+  const alertCall =
+    alertDeclaration.length === 1 && isIdentifierNamed(alertDeclaration[0].name, 'alertEmail')
+      ? directIdentifierCall(alertDeclaration[0].initializer, 'configuredAlertEmail')
+      : undefined
+  if (alertCall?.arguments.length !== 1 || !isIdentifierNamed(alertCall.arguments[0], 'env')) {
+    return false
+  }
+
+  const missingAlert = statements[1]
+  if (
+    !ts.isIfStatement(missingAlert) ||
+    !ts.isPrefixUnaryExpression(missingAlert.expression) ||
+    missingAlert.expression.operator !== ts.SyntaxKind.ExclamationToken ||
+    !isIdentifierNamed(missingAlert.expression.operand, 'alertEmail') ||
+    !ts.isBlock(missingAlert.thenStatement) ||
+    missingAlert.thenStatement.statements.length !== 2 ||
+    !validatesConsoleWarn(
+      missingAlert.thenStatement.statements[0],
+      (argument) =>
+        templateStartsWithDirectory(
+          argument,
+          target,
+          'sync drift detected for ',
+          ' but OPS_ALERT_EMAIL is unset',
+        ),
+      (argument) => isIdentifierNamed(argument, 'drift'),
+    ) ||
+    !ts.isReturnStatement(missingAlert.thenStatement.statements[1]) ||
+    missingAlert.elseStatement
+  ) {
+    return false
+  }
+
+  const notifyStatement = statements[2]
+  if (!ts.isExpressionStatement(notifyStatement)) return false
+  const notifyCall = awaitedCallExpression(notifyStatement.expression)
+  if (
+    !isIdentifierNamed(notifyCall?.expression, 'notify') ||
+    notifyCall.arguments.length !== 2 ||
+    !isIdentifierNamed(notifyCall.arguments[0], 'env')
+  ) {
+    return false
+  }
+  const job = exactObjectProperties(notifyCall.arguments[1], ['id', 'type', 'to', 'payload'])
+  if (!job) return false
+  const id = propertyAssignment(job, 'id')
+  const idTemplate = unwrapParentheses(id)
+  if (
+    !templateStartsWithDirectory(id, target, 'ops.sync_drift:', ':') ||
+    !ts.isTemplateExpression(idTemplate) ||
+    idTemplate.templateSpans.length !== 2 ||
+    idTemplate.templateSpans[1].literal.text !== ''
+  ) {
+    return false
+  }
+  const type = propertyAssignment(job, 'type')
+  const to = propertyAssignment(job, 'to')
+  const payload = exactObjectProperties(propertyAssignment(job, 'payload'), [
+    'domain',
+    'organizationIds',
+    'count',
+    'failed',
+    'truncated',
+  ])
+  return (
+    ts.isStringLiteral(type) &&
+    type.text === 'ops.sync_drift' &&
+    isIdentifierNamed(to, 'alertEmail') &&
+    payload !== undefined &&
+    isPropertyAccessNamed(propertyAssignment(payload, 'domain'), target, 'directory') &&
+    isIdentifierNamed(propertyAssignment(payload, 'organizationIds'), 'drift') &&
+    isPropertyAccessNamed(propertyAssignment(payload, 'count'), 'drift', 'length') &&
+    isShorthandProperty(payload, 'failed') &&
+    isShorthandProperty(payload, 'truncated')
+  )
+}
+
+function validatesScheduledResultLog(statement, target) {
+  if (!ts.isIfStatement(statement) || !ts.isBinaryExpression(statement.expression)) {
+    return false
+  }
+  const driftLength = unwrapParentheses(statement.expression.left)
+  if (
+    statement.expression.operatorToken.kind !== ts.SyntaxKind.GreaterThanToken ||
+    !ts.isPropertyAccessExpression(driftLength) ||
+    driftLength.name.text !== 'length' ||
+    !isPropertyAccessNamed(driftLength.expression, 'result', 'drift') ||
+    !ts.isNumericLiteral(statement.expression.right) ||
+    statement.expression.right.text !== '0' ||
+    !ts.isBlock(statement.thenStatement) ||
+    statement.thenStatement.statements.length !== 1 ||
+    statement.elseStatement
+  ) {
+    return false
+  }
+  return validatesConsoleWarn(
+    statement.thenStatement.statements[0],
+    (argument) =>
+      templateStartsWithDirectory(argument, target, 'org sync drift reconciled for ', ''),
+    (argument) => isIdentifierNamed(argument, 'result'),
+  )
+}
+
 function validatesScheduledOperation(callback) {
   if (
     !ts.isArrowFunction(callback) ||
@@ -251,6 +462,16 @@ function validatesScheduledOperation(callback) {
   }
   const [target] = exactIdentifierParameters(callback, 1) ?? []
   if (!target) return false
+  for (const name of [
+    'reconcileOrgs',
+    'listDomainOrgs',
+    'syncOrgToDomain',
+    'toOrganization',
+    'configuredAlertEmail',
+    'notify',
+  ]) {
+    if (containsBinding(callback, name)) return false
+  }
   const firstStatement = callback.body.statements[0]
   if (!ts.isVariableStatement(firstStatement)) return false
   const declarations = firstStatement.declarationList.declarations
@@ -275,8 +496,14 @@ function validatesScheduledOperation(callback) {
   if (!validatesTargetCallback(adapters.get('listDomainOrgs'), 'listDomainOrgs', target, 1)) {
     return false
   }
-  if (!validatesTargetCallback(adapters.get('resync'), 'syncOrgToDomain', target, 2)) return false
-  if (!containsPropertyAccess(adapters.get('notifyDrift'), target, 'directory')) return false
+  if (!validatesResyncCallback(adapters.get('resync'), target)) return false
+  if (!validatesNotifyDriftCallback(adapters.get('notifyDrift'), target)) return false
+  if (
+    callback.body.statements.length !== 2 ||
+    !validatesScheduledResultLog(callback.body.statements[1], target)
+  ) {
+    return false
+  }
   const listCalls = identifierCallsWithin(callback.body, 'listDomainOrgs')
   const syncCalls = identifierCallsWithin(callback.body, 'syncOrgToDomain')
   return (
@@ -358,6 +585,17 @@ function validatesAdminOrchestrationCallPath(sourceFile, functionName, profile) 
     !functionNode?.body ||
     containsDirectDomainIteration(functionNode) ||
     containsBinding(functionNode, ADMIN_ORCHESTRATION_EXPORT)
+  ) {
+    return false
+  }
+  if (
+    profile.mode === 'scheduled' &&
+    (!ADMIN_SCHEDULED_IMPORTS.every(([moduleName, exportName]) =>
+      hasExactNamedValueImport(sourceFile, moduleName, exportName),
+    ) ||
+      ADMIN_SCHEDULED_IMPORTS.some(([, exportName]) =>
+        sourceHasTopLevelBinding(sourceFile, exportName),
+      ))
   ) {
     return false
   }

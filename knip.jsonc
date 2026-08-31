@@ -1,7 +1,7 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "treatConfigHintsAsErrors": true,
-  "ignoreDependencies": ["^cloudflare(:.*)?$"],
+  "ignoreDependencies": ["^cloudflare(:.*)?$", "@tauri-apps/cli"],
   "ignoreBinaries": ["make", "terraform"],
   "ignoreFiles": [
     ".agents/skills/design-select/scripts/**",
@@ -27,9 +27,6 @@
       "project": ["src/**/*.{ts,tsx}"]
     },
     "services/admin": {
-      // The catalog-reviewed package entry reaches this workspace-local CLI
-      // through scripts/native-workflow.mjs, which Knip cannot follow.
-      "ignoreDependencies": ["@tauri-apps/cli"],
       "entry": [
         "test/**/*.test.ts",
         "vitest.config.ts",
@@ -50,9 +47,6 @@
       "vitest": false
     },
     "services/example_tauri_service": {
-      // The catalog-reviewed package entry reaches this workspace-local CLI
-      // through scripts/native-workflow.mjs, which Knip cannot follow.
-      "ignoreDependencies": ["@tauri-apps/cli"],
       "entry": [
         "test/**/*.test.ts",
         "vitest.config.ts",

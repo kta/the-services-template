@@ -20,6 +20,7 @@ async function withAdminSources(syncSource, workerSource, check) {
 
 const orchestrationImport =
   "import { orchestrateDomainSyncIdentities } from './domain-sync-orchestration.mjs'\n"
+const scheduledImports = `${orchestrationImport}import { reconcileOrgs } from './reconcile'\nimport { listDomainOrgs, syncOrgToDomain } from './sync'\n`
 
 const validRequestSource = `${orchestrationImport}
 export async function syncOrgToConfiguredDomains(environment, identities, org) {
@@ -37,7 +38,7 @@ export async function syncOrgToConfiguredDomains(environment, identities, org) {
 }
 `
 
-const validScheduledSource = `${orchestrationImport}
+const validScheduledSource = `${scheduledImports}
 async function scheduled(_event, env) {
   await cleanUp(_event, env)
   await orchestrateDomainSyncIdentities(
@@ -47,10 +48,33 @@ async function scheduled(_event, env) {
       const result = await reconcileOrgs({
         listAdminOrgs: loadAdminOrgs,
         listDomainOrgs: () => listDomainOrgs(target),
-        resync: (org) => syncOrgToDomain(target, org),
-        notifyDrift: () => notifyDrift(target.directory),
+        resync: (org) => syncOrgToDomain(target, toOrganization(org.row)),
+        notifyDrift: async ({ drift, failed, truncated }) => {
+          const alertEmail = configuredAlertEmail(env)
+          if (!alertEmail) {
+            console.warn(
+              \`sync drift detected for \${target.directory} but OPS_ALERT_EMAIL is unset\`,
+              drift,
+            )
+            return
+          }
+          await notify(env, {
+            id: \`ops.sync_drift:\${target.directory}:\${new Date().toISOString().slice(0, 10)}\`,
+            type: 'ops.sync_drift',
+            to: alertEmail,
+            payload: {
+              domain: target.directory,
+              organizationIds: drift,
+              count: drift.length,
+              failed,
+              truncated,
+            },
+          })
+        },
       })
-      return result
+      if (result.drift.length > 0) {
+        console.warn(\`org sync drift reconciled for \${target.directory}\`, result)
+      }
     },
     {
       concurrency: 'sequential',
@@ -116,7 +140,41 @@ for (const { name, syncSource = validRequestSource, workerSource = validSchedule
     name: 'a scheduled callback that discards the computed target',
     workerSource: validScheduledSource
       .replace('listDomainOrgs(target)', 'listDomainOrgs(env.BOOKING)')
-      .replace('syncOrgToDomain(target, org)', 'syncOrgToDomain(env.BOOKING, org)'),
+      .replace(
+        'syncOrgToDomain(target, toOrganization(org.row))',
+        'syncOrgToDomain(env.BOOKING, toOrganization(org.row))',
+      ),
+  },
+  {
+    name: 'a scheduled resync callback that substitutes a different organization',
+    workerSource: validScheduledSource.replace(
+      'resync: (org) => syncOrgToDomain(target, toOrganization(org.row))',
+      'resync: (_org) => syncOrgToDomain(target, toOrganization(hardCodedOrganization.row))',
+    ),
+  },
+  {
+    name: 'a locally shadowed scheduled sync callee',
+    workerSource: validScheduledSource.replace(
+      "import { listDomainOrgs, syncOrgToDomain } from './sync'",
+      "import { listDomainOrgs } from './sync'\nconst syncOrgToDomain = async (_target, org) => Boolean(org)",
+    ),
+  },
+  {
+    name: 'a dead computed directory beside hard-coded notification and log identities',
+    workerSource: validScheduledSource
+      .replace(
+        'const alertEmail = configuredAlertEmail(env)',
+        'void target.directory\n          const alertEmail = configuredAlertEmail(env)',
+      )
+      .replace(
+        `id: \`ops.sync_drift:\${target.directory}:\${new Date().toISOString().slice(0, 10)}\``,
+        `id: \`ops.sync_drift:example_service:\${new Date().toISOString().slice(0, 10)}\``,
+      )
+      .replace('domain: target.directory', "domain: 'example_service'")
+      .replace(
+        `\`org sync drift reconciled for \${target.directory}\``,
+        "'org sync drift reconciled for example_service'",
+      ),
   },
   {
     name: 'an unawaited scheduled orchestration call',

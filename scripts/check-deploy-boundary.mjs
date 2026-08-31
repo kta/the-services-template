@@ -4,6 +4,9 @@ import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseJsonc } from './check-production-config.mjs'
+import { inspectNativeCliKnipPolicy } from './native-dependency-policy.mjs'
+import { inspectNativePackageBuildPlan } from './native-package-build-policy.mjs'
+import { nativePackageBuildPlan } from './native-workflow.mjs'
 import { isProductionDomainAuthReady } from './require-production-domain-auth.mjs'
 import { loadServiceRepositoryCatalog } from './service-catalog.mjs'
 import { validateServiceWiring } from './service-wiring.mjs'
@@ -13,6 +16,14 @@ const root = fileURLToPath(new URL('..', import.meta.url))
 const violations = []
 const serviceCatalog = await loadServiceRepositoryCatalog(root)
 violations.push(...(await validateServiceWiring(root, serviceCatalog)))
+try {
+  const knipConfig = parseJsonc(await readFile(join(root, 'knip.jsonc'), 'utf8'))
+  violations.push(...inspectNativeCliKnipPolicy(knipConfig, serviceCatalog.services))
+} catch (error) {
+  violations.push(
+    `knip.jsonc native CLI policy cannot be inspected: ${error instanceof Error ? error.message : 'failure'}`,
+  )
+}
 
 export function isFixedProductionDeployScript(script, service) {
   return script === `node ../../scripts/production-deploy.mjs ${service}`
@@ -207,15 +218,19 @@ for (const packagePath of [
     violations.push(`${packagePath} web build must scan dist/client for secret markers`)
   }
 }
-// service-catalog validation above fixes every native package entry to the
-// reviewed wrapper. The shared wrapper therefore owns the single artifact
-// scan invariant instead of duplicating a bypassable shell chain per service.
-const nativeWorkflow = await readFile(join(root, 'scripts/native-workflow.mjs'), 'utf8')
-requireMatch(
-  nativeWorkflow,
-  /join\(DEFAULT_ROOT,\s*['"]scripts\/check-tauri-artifact\.mjs['"]\),\s*['"]dist\/tauri['"]/,
-  'native package build wrapper must scan dist/tauri for secret markers',
-)
+// The catalog fixes every native package entry to the shared wrapper. Validate
+// the wrapper's executable plan for each catalog native service, rather than
+// treating comments or source text as proof that cleanup and scanning execute.
+for (const service of serviceCatalog.services.filter((entry) => entry.native)) {
+  violations.push(
+    ...inspectNativePackageBuildPlan(
+      nativePackageBuildPlan(root, service, { nodePath: process.execPath }),
+      root,
+      service,
+      process.execPath,
+    ),
+  )
+}
 
 const productionDeploy = await readFile(join(root, 'scripts/production-deploy.mjs'), 'utf8')
 for (const required of [

@@ -890,6 +890,140 @@ describe('scheduled reconcile', () => {
     )
   })
 
+  it('uses each computed domain identity and each distinct org through the production scheduled entry', async () => {
+    const db = drizzle(env.DB)
+    const now = new Date().toISOString()
+    const expectedOrganizations = [
+      {
+        id: `scheduled-a-${crypto.randomUUID()}`,
+        name: 'Scheduled Alpha',
+        plan: 'free',
+        isDisabled: false,
+        version: 7,
+        createdAt: now,
+      },
+      {
+        id: `scheduled-b-${crypto.randomUUID()}`,
+        name: 'Scheduled Beta',
+        plan: 'contracted',
+        isDisabled: true,
+        version: 11,
+        createdAt: now,
+      },
+    ]
+    await db.insert(organizations).values(
+      expectedOrganizations.map((organization) => ({
+        ...organization,
+        isDisabled: organization.isDisabled ? '1' : '0',
+        isOperator: '0',
+      })),
+    )
+    const excluded = new Set(expectedOrganizations.map(({ id }) => id))
+    const existingMirrors = (await db.select().from(organizations))
+      .filter(({ id }) => !excluded.has(id))
+      .map((organization) => ({
+        id: organization.id,
+        name: organization.name,
+        plan: organization.plan,
+        isDisabled: organization.isDisabled === '1',
+        version: organization.version,
+        createdAt: organization.createdAt,
+      }))
+
+    type DomainCall = {
+      method: string
+      pathname: string
+      key: string | null
+      body?: Record<string, unknown>
+    }
+    function recordingDomain() {
+      const calls: DomainCall[] = []
+      return {
+        calls,
+        binding: {
+          fetch: vi.fn(async (input: string | Request | URL, init?: RequestInit) => {
+            const request = input instanceof Request ? input : new Request(input, init)
+            const call: DomainCall = {
+              method: request.method,
+              pathname: new URL(request.url).pathname,
+              key: request.headers.get('x-internal-key'),
+            }
+            if (request.method === 'POST') {
+              call.body = (await request.clone().json()) as Record<string, unknown>
+            }
+            calls.push(call)
+            return request.method === 'GET'
+              ? Response.json(existingMirrors)
+              : Response.json({}, { status: 200 })
+          }),
+        },
+      }
+    }
+
+    const booking = recordingDomain()
+    const inventory = recordingDomain()
+    const notificationFetch = vi
+      .spyOn(env.NOTIFIER, 'fetch')
+      .mockResolvedValue(Response.json({}) as never)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const runtimeEnv = runtimeEnvironment({
+      ADMIN_DOMAIN_IDENTITIES: JSON.stringify([
+        { directory: 'booking', binding: 'BOOKING', secret: 'ADMIN_TO_BOOKING_KEY' },
+        { directory: 'inventory', binding: 'INVENTORY', secret: 'ADMIN_TO_INVENTORY_KEY' },
+      ]),
+      BOOKING: booking.binding,
+      ADMIN_TO_BOOKING_KEY: 'booking-key-round3',
+      INVENTORY: inventory.binding,
+      ADMIN_TO_INVENTORY_KEY: 'inventory-key-round3',
+    })
+
+    await worker.scheduled?.(
+      {} as never,
+      runtimeEnv as unknown as Parameters<NonNullable<typeof worker.scheduled>>[1],
+      {} as never,
+    )
+
+    for (const [directory, recording, key] of [
+      ['booking', booking, 'booking-key-round3'],
+      ['inventory', inventory, 'inventory-key-round3'],
+    ] as const) {
+      expect(recording.calls.filter(({ method }) => method === 'GET')).toEqual([
+        {
+          method: 'GET',
+          pathname: '/api/internal/organizations',
+          key,
+        },
+      ])
+      const posts = recording.calls.filter(({ method }) => method === 'POST')
+      expect(posts).toHaveLength(2)
+      expect(posts.map(({ pathname }) => pathname)).toEqual([
+        '/api/internal/organizations',
+        '/api/internal/organizations',
+      ])
+      expect(posts.map(({ key: header }) => header)).toEqual([key, key])
+      expect(posts.map(({ body }) => body)).toEqual(expectedOrganizations)
+      expect(
+        warn.mock.calls.some((call) =>
+          call.some((value) => String(value).includes(`reconciled for ${directory}`)),
+        ),
+      ).toBe(true)
+    }
+
+    const jobs = notificationFetch.mock.calls.map(
+      (call) =>
+        JSON.parse(String((call[1] as RequestInit | undefined)?.body)) as {
+          id: string
+          payload: { domain: string; organizationIds: string[] }
+        },
+    )
+    expect(jobs).toHaveLength(2)
+    for (const directory of ['booking', 'inventory']) {
+      const job = jobs.find(({ payload }) => payload.domain === directory)
+      expect(job?.id).toContain(`ops.sync_drift:${directory}:`)
+      expect(job?.payload.organizationIds).toEqual(expectedOrganizations.map(({ id }) => id))
+    }
+  })
+
   it('does not throw when the domain Worker is unreachable (scaffold not deployed)', async () => {
     vi.spyOn(env.EXAMPLE_SERVICE, 'fetch').mockRejectedValue(new Error('no such worker') as never)
     vi.spyOn(console, 'error').mockImplementation(() => {})

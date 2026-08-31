@@ -82,6 +82,8 @@ Knip findingは次の順で処理する。
 
 findingを消すだけの広い `ignoreDependencies`、issue type全体の除外、source directory全体のignoreは禁止する。ignoreはgenerated fileやplatform virtual moduleなど解析不能な境界に限定する。
 
+例外として、`@tauri-apps/cli` だけは root `ignoreDependencies` に exact package name で1回置く。全 catalog native service の package entry は共通 `scripts/native-workflow.mjs` から workspace-local CLI を動的に呼ぶため Knip が利用を追跡できず、service ごとの ignore を追加すると新しい Tauri service の登録漏れを生むためである。`scripts/check-deploy-boundary.mjs` は root exact 例外と catalog native workspace に個別 allowlist がないことを検査する。root 例外が Web service の誤依存を隠さないよう、`scripts/check-tauri-boundary.mjs` は `dependencies` / `devDependencies` / `optionalDependencies` / `peerDependencies` の全てで Web service の `@tauri-apps/*` を拒否する。他の Tauri package や正規表現による広い ignore は追加しない。
+
 ### 5. Migrationと検証
 
 挙動差がある更新は既存contract/integration testを先に実行し、必要なら回帰testを追加してからsourceを直す。

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { resolveDomainSyncIdentity } from '../services/admin/src/worker/domain-sync-orchestration.mjs'
+import { inspectNativeCliKnipPolicy } from './native-dependency-policy.mjs'
 import {
   loadServiceCatalog,
   loadServiceRepositoryCatalog,
@@ -14,6 +15,42 @@ import { validateServiceWiring } from './service-wiring.mjs'
 import { inspectNativeWorkflowPolicy } from './workflow-policy.mjs'
 
 const root = process.cwd()
+
+test('one exact root Knip exception covers every catalog native CLI without service allowlists', () => {
+  const nativeServices = ['booking', 'billing', 'shipping'].map((directory) => ({
+    directory,
+    native: true,
+  }))
+  const workspaces = Object.fromEntries(
+    nativeServices.map(({ directory }) => [`services/${directory}`, { entry: ['src/**/*.ts'] }]),
+  )
+  const config = {
+    ignoreDependencies: ['^cloudflare(:.*)?$', '@tauri-apps/cli'],
+    workspaces,
+  }
+  assert.deepEqual(inspectNativeCliKnipPolicy(config, nativeServices), [])
+
+  assert.match(
+    inspectNativeCliKnipPolicy(
+      { ...config, ignoreDependencies: ['^cloudflare(:.*)?$'] },
+      nativeServices,
+    ).join('\n'),
+    /one exact root.*@tauri-apps\/cli/i,
+  )
+  assert.match(
+    inspectNativeCliKnipPolicy(
+      {
+        ...config,
+        workspaces: {
+          ...workspaces,
+          'services/shipping': { ignoreDependencies: ['@tauri-apps/cli'] },
+        },
+      },
+      nativeServices,
+    ).join('\n'),
+    /shipping.*must inherit.*root/i,
+  )
+})
 
 test('production CI deploy is push-only on protected main', async () => {
   const workflow = await readFile(join(root, '.github/workflows/ci.yml'), 'utf8')

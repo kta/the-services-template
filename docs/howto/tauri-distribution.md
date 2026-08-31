@@ -80,6 +80,8 @@ GitHub Actions の `Tauri native artifacts` を `workflow_dispatch` で起動す
 
 macOS job は Rust の debug 既定値（localhost）で unsigned debug artifact を作る。debug artifact は起動・IPC・secret scan の検証専用で、本番配布や実運用データへの接続に使わない。release origin は `src-tauri/src/origin.rs` の固定 allowlist に追加した値だけを受け付けるため、フォークでは所有ドメインをレビュー後に登録する。iOS/Android debug build も store submission 用ではない。配布には実 origin、署名、notarization / store signing、Protected Data/Keystore の実機 smoke test が全て必要である。
 
+catalog/workflow checker は、未登録 workflow から native package/CLI を起動する通常の設定ミスを fail closed にし、意図しない重い CI overhead を防ぐための静的 guard である。悪意ある任意 shell、repository helper、composite action の全意味を解析する security proof ではない。また、`GITHUB_ACTIONS` と GitHub context、nonce/capability の runtime check は caller-controlled な値を含む defense-in-depth であり、実行元の attestation ではない。運用上の trust boundary は catalog 登録 job の exact profile と protected-branch review に置き、この manual workflow には production Cloudflare credential、Worker secret、Apple/Android signing material、store API token を一切渡さない。
+
 ## 署名と store 提出（CI の外で人間が実施）
 
 ### macOS

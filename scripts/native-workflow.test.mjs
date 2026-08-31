@@ -5,8 +5,11 @@ import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import test from 'node:test'
 import { promisify } from 'node:util'
+import { inspectNativePackageBuildPlan } from './native-package-build-policy.mjs'
 import {
   assertNativeWorkflowExecutorContext,
+  executeNativePackageBuildPlan,
+  nativePackageBuildPlan,
   nativeWorkflowChildEnvironment,
   nativeWorkflowInvocation,
 } from './native-workflow.mjs'
@@ -31,6 +34,80 @@ const validGithubContext = {
   GITHUB_RUN_ID: '123456',
   GITHUB_WORKSPACE: root,
 }
+
+test('derives the native package build as the exact reviewed command plan', () => {
+  assert.deepEqual(nativePackageBuildPlan(root, service, { nodePath: '/reviewed/bin/node' }), [
+    {
+      command: '/reviewed/bin/node',
+      args: [
+        join(root, 'scripts/run-without-cloudflare-env.mjs'),
+        'pnpm',
+        'exec',
+        'vite',
+        '--config',
+        'vite.tauri.config.ts',
+        'build',
+      ],
+      cwd: join(root, 'services/booking'),
+    },
+    {
+      command: '/reviewed/bin/node',
+      args: [join(root, 'scripts/clean-build-secrets.mjs'), 'dist'],
+      cwd: join(root, 'services/booking'),
+    },
+    {
+      command: '/reviewed/bin/node',
+      args: [join(root, 'scripts/check-tauri-artifact.mjs'), 'dist/tauri'],
+      cwd: join(root, 'services/booking'),
+    },
+  ])
+})
+
+test('executes the native package plan in order with the artifact scan last exactly once', async () => {
+  const plan = nativePackageBuildPlan(root, service, { nodePath: '/reviewed/bin/node' })
+  const calls = []
+  await executeNativePackageBuildPlan(plan, async (command, args, cwd) => {
+    calls.push({ command, args, cwd })
+  })
+
+  assert.deepEqual(calls, plan)
+  assert.equal(
+    calls.filter(({ args }) => args[0] === join(root, 'scripts/check-tauri-artifact.mjs')).length,
+    1,
+  )
+  assert.equal(calls.at(-1).args[0], join(root, 'scripts/check-tauri-artifact.mjs'))
+})
+
+test('stops the native package plan at the first executor failure', async () => {
+  const plan = nativePackageBuildPlan(root, service, { nodePath: '/reviewed/bin/node' })
+  const calls = []
+  await assert.rejects(
+    executeNativePackageBuildPlan(plan, async (command, args, cwd) => {
+      calls.push({ command, args, cwd })
+      if (calls.length === 2) throw new Error('cleanup failed')
+    }),
+    /cleanup failed/,
+  )
+  assert.deepEqual(calls, plan.slice(0, 2))
+})
+
+test('rejects native package plans with a removed, reordered, or additional command', () => {
+  const nodePath = '/reviewed/bin/node'
+  const plan = nativePackageBuildPlan(root, service, { nodePath })
+  assert.deepEqual(inspectNativePackageBuildPlan(plan, root, service, nodePath), [])
+
+  const reordered = [plan[1], plan[0], plan[2]]
+  const additional = [
+    ...plan,
+    { command: nodePath, args: ['fallback-native-build'], cwd: join(root, 'services/booking') },
+  ]
+  for (const invalid of [plan.slice(0, 2), reordered, additional]) {
+    assert.match(
+      inspectNativePackageBuildPlan(invalid, root, service, nodePath).join('\n'),
+      /exactly execute Vite build, secret cleanup, and artifact scan in order/i,
+    )
+  }
+})
 
 test('derives native build and verifier argv only from normalized catalog identity', () => {
   const tools = { nodePath: '/reviewed/node/bin/node', pnpmPath: '/reviewed/pnpm/bin/pnpm' }

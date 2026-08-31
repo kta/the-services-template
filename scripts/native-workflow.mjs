@@ -218,15 +218,27 @@ function executePackageCommand(command, args, cwd) {
   })
 }
 
-async function runNativePackageAction(action, args) {
-  const service = await catalogNativePackageService()
-  consumeNativePackageBuildCapability(DEFAULT_ROOT, service, process.env)
-  const serviceRoot = join(DEFAULT_ROOT, 'services', service.directory)
-  if (action === 'build' && args.length === 0) {
-    executePackageCommand(
-      process.execPath,
-      [
-        join(DEFAULT_ROOT, 'scripts/run-without-cloudflare-env.mjs'),
+function assertNormalizedNativeService(service) {
+  if (
+    service?.native !== true ||
+    typeof service.directory !== 'string' ||
+    !/^[a-z][a-z0-9_]{0,62}$/.test(service.directory) ||
+    service.package !== `@app/${service.directory}`
+  ) {
+    throw new Error('native workflow requires a normalized catalog identity')
+  }
+}
+
+export function nativePackageBuildPlan(workspaceRoot, service, options = {}) {
+  const root = resolve(workspaceRoot)
+  assertNormalizedNativeService(service)
+  const nodePath = reviewedTool(options, 'nodePath')
+  const cwd = join(root, 'services', service.directory)
+  return [
+    {
+      command: nodePath,
+      args: [
+        join(root, 'scripts/run-without-cloudflare-env.mjs'),
         'pnpm',
         'exec',
         'vite',
@@ -234,17 +246,34 @@ async function runNativePackageAction(action, args) {
         'vite.tauri.config.ts',
         'build',
       ],
-      serviceRoot,
-    )
-    executePackageCommand(
-      process.execPath,
-      [join(DEFAULT_ROOT, 'scripts/clean-build-secrets.mjs'), 'dist'],
-      serviceRoot,
-    )
-    executePackageCommand(
-      process.execPath,
-      [join(DEFAULT_ROOT, 'scripts/check-tauri-artifact.mjs'), 'dist/tauri'],
-      serviceRoot,
+      cwd,
+    },
+    {
+      command: nodePath,
+      args: [join(root, 'scripts/clean-build-secrets.mjs'), 'dist'],
+      cwd,
+    },
+    {
+      command: nodePath,
+      args: [join(root, 'scripts/check-tauri-artifact.mjs'), 'dist/tauri'],
+      cwd,
+    },
+  ]
+}
+
+export async function executeNativePackageBuildPlan(plan, executor = executePackageCommand) {
+  for (const invocation of plan) {
+    await executor(invocation.command, invocation.args, invocation.cwd)
+  }
+}
+
+async function runNativePackageAction(action, args) {
+  const service = await catalogNativePackageService()
+  consumeNativePackageBuildCapability(DEFAULT_ROOT, service, process.env)
+  const serviceRoot = join(DEFAULT_ROOT, 'services', service.directory)
+  if (action === 'build' && args.length === 0) {
+    await executeNativePackageBuildPlan(
+      nativePackageBuildPlan(DEFAULT_ROOT, service, { nodePath: process.execPath }),
     )
     return
   }
@@ -284,14 +313,7 @@ function nodeScript(root, options, script, ...args) {
 
 export function nativeWorkflowInvocation(workspaceRoot, service, action, options = {}) {
   const root = resolve(workspaceRoot)
-  if (
-    service?.native !== true ||
-    typeof service.directory !== 'string' ||
-    !/^[a-z][a-z0-9_]{0,62}$/.test(service.directory) ||
-    service.package !== `@app/${service.directory}`
-  ) {
-    throw new Error('native workflow requires a normalized catalog identity')
-  }
+  assertNormalizedNativeService(service)
 
   const serviceRoot = join(root, 'services', service.directory)
   const artifact = (...parts) => join(serviceRoot, 'src-tauri', ...parts)
