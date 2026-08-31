@@ -140,32 +140,50 @@ test('requires the catalog manual protected-main executor context in GitHub Acti
           ...validGithubContext,
           [name]: value,
         }),
-      /registered manual protected-main native executor/i,
+      /defense-in-depth context check.*manual protected-main/i,
       name,
     )
   }
 })
 
-test('registered wrapper issues a bounded package-build capability in the same executor', async () => {
+test('registered wrapper passes a bounded defense-in-depth capability to exact package entries', async () => {
   const fixture = await mkdtemp(join(tmpdir(), 'native-workflow-capability-'))
   const fakePnpm = join(fixture, 'pnpm')
   const marker = join(fixture, 'guard-ran')
+  const { stdout: reviewedPnpm } = await execFileAsync('/usr/bin/which', ['pnpm'])
   await writeFile(
     fakePnpm,
-    `#!/bin/sh
-set -eu
-cd "$GITHUB_WORKSPACE/services/admin"
-node ../../scripts/native-workflow.mjs package-guard
-case " $* " in
-  *" build "*)
-    node ../../scripts/native-workflow.mjs package-guard
-    if node ../../scripts/native-workflow.mjs package-guard 2>/dev/null; then exit 91; fi
-    ;;
-  *)
-    if node ../../scripts/native-workflow.mjs package-guard 2>/dev/null; then exit 92; fi
-    ;;
-esac
-printf guarded > "$RUNNER_TEMP/guard-ran"
+    `#!${process.execPath}
+import { execFileSync } from 'node:child_process'
+import { writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+
+const workspace = ${JSON.stringify(process.cwd())}
+const reviewedPnpm = ${JSON.stringify(reviewedPnpm.trim())}
+const args = process.argv.slice(2)
+const wrapper = join(workspace, 'scripts/native-workflow.mjs')
+process.chdir(join(workspace, 'services/admin'))
+
+if (args[0] === '--filter' && args[1] === '@app/admin' && args[2] === 'run' && args[3] === 'tauri') {
+  execFileSync(process.execPath, [wrapper, 'package', 'tauri', ...args.slice(4)], { stdio: 'inherit' })
+  try {
+    execFileSync(process.execPath, [wrapper, 'package', 'tauri', 'info'], { stdio: 'ignore' })
+    process.exit(92)
+  } catch {}
+} else if (args[0] === 'exec' && args[1] === 'tauri' && args[2] === 'build') {
+  execFileSync(process.execPath, [wrapper, 'package', 'build'], { stdio: 'inherit' })
+  try {
+    execFileSync(process.execPath, [wrapper, 'package', 'build'], { stdio: 'ignore' })
+    process.exit(91)
+  } catch {}
+} else if (args[0] === 'exec' && args[1] === 'tauri') {
+  // The fake CLI intentionally performs no native work.
+} else if (args[0] === 'exec' && args[1] === 'vite') {
+  execFileSync(reviewedPnpm, args, { stdio: 'inherit' })
+} else {
+  process.exit(93)
+}
+writeFileSync(${JSON.stringify(marker)}, 'guarded')
 `,
   )
   await chmod(fakePnpm, 0o700)
@@ -189,7 +207,7 @@ printf guarded > "$RUNNER_TEMP/guard-ran"
     await assert.rejects(
       execFileAsync(
         process.execPath,
-        [join(process.cwd(), 'scripts/native-workflow.mjs'), 'package-guard'],
+        [join(process.cwd(), 'scripts/native-workflow.mjs'), 'package', 'tauri', 'info'],
         { cwd: join(process.cwd(), 'services/admin'), env: github },
       ),
       (error) => {

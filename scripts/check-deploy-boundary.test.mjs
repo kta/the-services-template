@@ -407,7 +407,16 @@ test('an additional catalog native service needs no Make or deploy-test hard-cod
       join(fixture, 'service-catalog.json'),
       `${JSON.stringify({ services: [service] })}\n`,
     )
-    await writeFile(join(fixture, 'services/booking/package.json'), '{"name":"@app/booking"}\n')
+    await writeFile(
+      join(fixture, 'services/booking/package.json'),
+      `${JSON.stringify({
+        name: '@app/booking',
+        scripts: {
+          'build:tauri': 'node ../../scripts/native-workflow.mjs package build',
+          tauri: 'node ../../scripts/native-workflow.mjs package tauri',
+        },
+      })}\n`,
+    )
     await writeFile(join(fixture, 'services/booking/src/web/App.tsx'), 'export {}\n')
     await writeFile(join(fixture, 'Makefile'), await readFile(join(root, 'Makefile'), 'utf8'))
     const referenceWorkflow = await readFile(

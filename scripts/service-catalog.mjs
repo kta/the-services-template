@@ -4,7 +4,11 @@ import { lstat, readdir, readFile, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseJsonc } from './check-production-config.mjs'
-import { inspectNativeWorkflowPolicy, workflowContainsNativeBuild } from './workflow-policy.mjs'
+import {
+  inspectNativePackagePolicy,
+  inspectNativeWorkflowPolicy,
+  workflowContainsNativeBuild,
+} from './workflow-policy.mjs'
 
 const DEFAULT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -273,12 +277,13 @@ export async function validateServiceCatalog(root = DEFAULT_ROOT) {
       violations,
       serviceReal,
     )
-    validatePackageIdentity(
+    const normalizedPackage = validatePackageIdentity(
       packageJson,
       packageName,
       `services/${directory}/package.json`,
       violations,
     )
+    if (native) violations.push(...inspectNativePackagePolicy(directory, normalizedPackage))
     await safeDirectory(
       join(serviceRoot, 'src', 'web'),
       `services/${directory}/src/web`,

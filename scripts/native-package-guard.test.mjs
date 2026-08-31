@@ -19,19 +19,16 @@ const githubEnvironment = {
   GITHUB_WORKSPACE: root,
 }
 
-test('native package scripts put the runtime guard before every package build entry', async () => {
+test('native package scripts are exact single-wrapper tokens', async () => {
   for (const directory of ['admin', 'example_tauri_service']) {
     const packageJson = JSON.parse(
       await readFile(join(root, 'services', directory, 'package.json'), 'utf8'),
     )
-    assert.match(
+    assert.equal(
       packageJson.scripts['build:tauri'],
-      /^node \.\.\/\.\.\/scripts\/native-workflow\.mjs package-guard && /,
+      'node ../../scripts/native-workflow.mjs package build',
     )
-    assert.match(
-      packageJson.scripts.tauri,
-      /^node \.\.\/\.\.\/scripts\/native-workflow\.mjs package-guard && /,
-    )
+    assert.equal(packageJson.scripts.tauri, 'node ../../scripts/native-workflow.mjs package tauri')
   }
 })
 
@@ -72,7 +69,7 @@ test('CI package dispatch variations cannot bypass the runtime package-build cap
       (error) => {
         assert.match(
           `${error.stdout}\n${error.stderr}`,
-          /native workflow package-build capability|registered manual protected-main native executor/i,
+          /native workflow package-build capability|defense-in-depth context check.*manual protected-main/i,
           fixture.name,
         )
         return true

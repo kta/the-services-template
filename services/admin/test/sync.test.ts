@@ -6,6 +6,7 @@ import {
   configuredDomainSyncEnvironments,
   listDomainOrgs,
   resolveDomainSyncIdentity,
+  syncOrgToConfiguredDomains,
   syncOrgToDomain,
   syncOrgToDomains,
 } from '../src/worker/sync'
@@ -28,6 +29,43 @@ function binding(response: Response | Error) {
 }
 
 describe('admin → domain service binding timeout boundary', () => {
+  it('executes the exported request entry across three computed binding and secret tuples', async () => {
+    const identities = [
+      { directory: 'booking', binding: 'BOOKING', secret: 'ADMIN_TO_BOOKING_KEY' },
+      { directory: 'inventory', binding: 'INVENTORY', secret: 'ADMIN_TO_INVENTORY_KEY' },
+      { directory: 'shipping', binding: 'SHIPPING', secret: 'ADMIN_TO_SHIPPING_KEY' },
+    ]
+    const fetches = new Map(
+      identities.map((identity) => [
+        identity.directory,
+        vi.fn(
+          async (_input: RequestInfo | URL, _init?: RequestInit) =>
+            new Response(null, { status: 204 }),
+        ),
+      ]),
+    )
+    const environment = Object.fromEntries([
+      ['ADMIN_DOMAIN_IDENTITIES', JSON.stringify(identities)],
+      ...identities.flatMap((identity) => [
+        [identity.binding, { fetch: fetches.get(identity.directory) }],
+        [identity.secret, `${identity.directory}-key`],
+      ]),
+    ])
+
+    await expect(syncOrgToConfiguredDomains(environment, org)).resolves.toBe(true)
+
+    for (const identity of identities) {
+      const fetch = fetches.get(identity.directory)
+      if (!fetch) throw new Error(`missing test binding for ${identity.directory}`)
+      expect(fetch).toHaveBeenCalledTimes(1)
+      const call = fetch.mock.calls[0]
+      if (!call) throw new Error(`missing request for ${identity.directory}`)
+      const [input, init] = call
+      const request = new Request(input, init)
+      expect(request.headers.get('x-internal-key')).toBe(`${identity.directory}-key`)
+    }
+  })
+
   it.each(['parallel', 'sequential'] as const)(
     'runs the same %s orchestration across three computed tuples and continues after the first failure',
     async (concurrency) => {

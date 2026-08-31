@@ -9,10 +9,10 @@
   "scripts": {
     "dev": "vite dev",
     "build": "node ../../scripts/run-without-cloudflare-env.mjs pnpm exec vite build && node ../../scripts/clean-build-secrets.mjs dist && node ../../scripts/check-tauri-artifact.mjs dist/client",
-    "build:tauri": "node ../../scripts/native-workflow.mjs package-guard && node ../../scripts/run-without-cloudflare-env.mjs pnpm exec vite --config vite.tauri.config.ts build && node ../../scripts/clean-build-secrets.mjs dist && node ../../scripts/check-tauri-artifact.mjs dist/tauri",
+    "build:tauri": "node ../../scripts/native-workflow.mjs package build",
     "prepare:tauri:android": "node ../../scripts/prepare-tauri-android.mjs",
     "preview": "vite preview",
-    "tauri": "node ../../scripts/native-workflow.mjs package-guard && tauri",
+    "tauri": "node ../../scripts/native-workflow.mjs package tauri",
     "typecheck": "wrangler types && tsc --noEmit && tsc --noEmit -p src/web",
     "cf-typegen": "wrangler types",
     "db:generate": "drizzle-kit generate",

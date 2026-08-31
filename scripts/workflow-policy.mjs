@@ -549,6 +549,112 @@ function dispatchesIndirectNativePackageScript(step, effectiveEnv, nativeService
   })
 }
 
+const REVIEWED_NATIVE_PACKAGE_SCRIPTS = Object.freeze({
+  'build:tauri': 'node ../../scripts/native-workflow.mjs package build',
+  tauri: 'node ../../scripts/native-workflow.mjs package tauri',
+})
+const REVIEWED_OPTIONAL_NATIVE_PACKAGE_SCRIPTS = Object.freeze({
+  'prepare:tauri:android': 'node ../../scripts/prepare-tauri-android.mjs',
+})
+
+function containsNativePackageCommand(value) {
+  return (
+    typeof value === 'string' &&
+    (/(?:^|[\s;&|])(?:\.\/)?(?:node_modules[\\/]\.bin[\\/])?tauri(?:[\s;&|]|$)/i.test(value) ||
+      /\bbuild\s*:\s*tauri\b/i.test(value) ||
+      /scripts[\\/]native-workflow\.mjs/i.test(value))
+  )
+}
+
+export function inspectNativePackagePolicy(directory, packageJson) {
+  const violations = []
+  const scripts = isMapping(packageJson?.scripts) ? packageJson.scripts : {}
+  for (const [name, expected] of Object.entries(REVIEWED_NATIVE_PACKAGE_SCRIPTS)) {
+    if (scripts[name] !== expected) {
+      violations.push(
+        `${directory}: native package script ${name} must use the exact reviewed wrapper`,
+      )
+    }
+  }
+  for (const [name, value] of Object.entries(scripts)) {
+    if (Object.hasOwn(REVIEWED_NATIVE_PACKAGE_SCRIPTS, name)) continue
+    if (Object.hasOwn(REVIEWED_OPTIONAL_NATIVE_PACKAGE_SCRIPTS, name)) {
+      if (value !== REVIEWED_OPTIONAL_NATIVE_PACKAGE_SCRIPTS[name]) {
+        violations.push(
+          `${directory}: native package script ${name} must use the exact reviewed wrapper`,
+        )
+      }
+      continue
+    }
+    if (name.toLowerCase().includes('tauri') || containsNativePackageCommand(value)) {
+      violations.push(`${directory}: native package script ${name} is not reviewed`)
+    }
+  }
+  return violations
+}
+
+function executableScalarStrings(value, strings = []) {
+  if (typeof value === 'string') {
+    strings.push(value)
+  } else if (Array.isArray(value)) {
+    for (const entry of value) executableScalarStrings(entry, strings)
+  } else if (isMapping(value)) {
+    for (const entry of Object.values(value)) executableScalarStrings(entry, strings)
+  }
+  return strings
+}
+
+function literalExecutionEnvironment(...values) {
+  const environment = Object.create(null)
+  for (const value of values) {
+    for (const [name, entry] of objectEntries(value)) {
+      if (typeof entry === 'string' || typeof entry === 'number' || typeof entry === 'boolean') {
+        environment[name] = String(entry)
+      }
+    }
+  }
+  return environment
+}
+
+function expandLiteralExecutionValue(value, environment) {
+  let expanded = value
+  for (let index = 0; index < 8; index += 1) {
+    const next = expanded
+      .replace(/\$\{\{\s*env\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g, (match, name) =>
+        Object.hasOwn(environment, name) ? environment[name] : match,
+      )
+      .replace(
+        /\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g,
+        (match, braced, plain) => {
+          const name = braced ?? plain
+          return Object.hasOwn(environment, name) ? environment[name] : match
+        },
+      )
+    if (next === expanded) break
+    expanded = next
+  }
+  return expanded
+}
+
+function executableSurfaceContainsNativeDispatch(values, environment) {
+  const expanded = values.map((value) => expandLiteralExecutionValue(value, environment))
+  const surface = expanded.join('\n')
+  const compact = surface.toLowerCase().replace(/[^a-z0-9]+/g, '')
+  if (compact.includes('scriptsnativeworkflowmjs')) return true
+  if (/node_modules[\\/]\.bin[\\/]tauri/i.test(surface)) return true
+
+  const tauriToken = /(?:^|[^A-Za-z0-9_])tauri(?:$|[^A-Za-z0-9_])/i.test(surface)
+  const packageScript = /\bbuild\s*:\s*tauri\b/i.test(surface)
+  const commandCarrier = /\b(?:pnpm|npm|npx|yarn|bunx?|exec|dlx|command|arguments?)\b/i.test(
+    surface,
+  )
+  const directTauriCommand =
+    /(?:^|[\s;&|])(?:\.\/?node_modules[\\/]\.bin[\\/])?tauri\s+(?:build|dev|info|ios|android|init)\b/im.test(
+      surface,
+    )
+  return (packageScript && commandCarrier) || (tauriToken && commandCarrier) || directTauriCommand
+}
+
 function nativeStepHasRootExecution(step) {
   return (
     step['working-directory'] === undefined &&
@@ -801,6 +907,14 @@ export function inspectNativeWorkflowPolicy(workflowPath, source, service) {
 export function workflowContainsNativeBuild(source, nativeServices = []) {
   const workflow = parseGithubWorkflow(source)
   for (const [, job] of objectEntries(workflow.jobs)) {
+    const jobEnvironment = literalExecutionEnvironment(workflow.env, job?.env)
+    const jobSurface = [
+      ...executableScalarStrings(job?.uses),
+      ...executableScalarStrings(job?.with),
+      ...executableScalarStrings(workflow.env),
+      ...executableScalarStrings(job?.env),
+    ]
+    if (executableSurfaceContainsNativeDispatch(jobSurface, jobEnvironment)) return true
     if (!Array.isArray(job?.steps)) continue
     for (const step of job.steps) {
       // An unregistered workflow may not reference the reviewed executor at
@@ -812,6 +926,17 @@ export function workflowContainsNativeBuild(source, nativeServices = []) {
         ...(isMapping(step?.env) ? step.env : {}),
       }
       if (dispatchesIndirectNativePackageScript(step, effectiveEnv, nativeServices)) return true
+      const literalEnvironment = literalExecutionEnvironment(effectiveEnv)
+      const executableSurface = [
+        ...executableScalarStrings(step?.run),
+        ...executableScalarStrings(step?.uses),
+        ...executableScalarStrings(workflow.env),
+        ...executableScalarStrings(job?.env),
+        ...executableScalarStrings(step?.env),
+        ...executableScalarStrings(step?.with),
+      ]
+      if (executableSurfaceContainsNativeDispatch(executableSurface, literalEnvironment))
+        return true
     }
   }
   return false

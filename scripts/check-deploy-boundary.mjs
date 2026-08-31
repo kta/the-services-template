@@ -47,7 +47,7 @@ if (/PRODUCTION_DEPLOY_ALLOWED/.test(workflow)) {
 requireMatch(
   workflow,
   /github\.event_name == 'push' && github\.ref == 'refs\/heads\/main' && github\.ref_protected == true/,
-  'ci deploy must expose the same protected-main context checked by the package guard',
+  'ci deploy must expose the protected-main context used by defense-in-depth runtime checks',
 )
 requireMatch(
   workflow,
@@ -207,15 +207,15 @@ for (const packagePath of [
     violations.push(`${packagePath} web build must scan dist/client for secret markers`)
   }
 }
-for (const packagePath of [
-  'services/admin/package.json',
-  'services/example_tauri_service/package.json',
-]) {
-  const packageJson = JSON.parse(await readFile(join(root, packagePath), 'utf8'))
-  if (!/check-tauri-artifact\.mjs\s+dist\/tauri/.test(packageJson.scripts?.['build:tauri'] ?? '')) {
-    violations.push(`${packagePath} Tauri build must scan dist/tauri for secret markers`)
-  }
-}
+// service-catalog validation above fixes every native package entry to the
+// reviewed wrapper. The shared wrapper therefore owns the single artifact
+// scan invariant instead of duplicating a bypassable shell chain per service.
+const nativeWorkflow = await readFile(join(root, 'scripts/native-workflow.mjs'), 'utf8')
+requireMatch(
+  nativeWorkflow,
+  /join\(DEFAULT_ROOT,\s*['"]scripts\/check-tauri-artifact\.mjs['"]\),\s*['"]dist\/tauri['"]/,
+  'native package build wrapper must scan dist/tauri for secret markers',
+)
 
 const productionDeploy = await readFile(join(root, 'scripts/production-deploy.mjs'), 'utf8')
 for (const required of [

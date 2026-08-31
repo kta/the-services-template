@@ -14,39 +14,75 @@ function mapping(value) {
 const ADMIN_ORCHESTRATION_MODULE = './domain-sync-orchestration.mjs'
 const ADMIN_ORCHESTRATION_EXPORT = 'orchestrateDomainSyncIdentities'
 
-function unwrapCallExpression(expression) {
+function unwrapParentheses(expression) {
   let current = expression
-  while (current && (ts.isAwaitExpression(current) || ts.isParenthesizedExpression(current))) {
+  while (current && ts.isParenthesizedExpression(current)) {
     current = current.expression
   }
-  return ts.isCallExpression(current) ? current : undefined
+  return current
 }
 
-function callsAdminOrchestration(expression) {
-  const call = unwrapCallExpression(expression)
-  return ts.isIdentifier(call?.expression) && call.expression.text === ADMIN_ORCHESTRATION_EXPORT
+function awaitedCallExpression(expression) {
+  const awaited = unwrapParentheses(expression)
+  if (!ts.isAwaitExpression(awaited)) return undefined
+  const call = unwrapParentheses(awaited.expression)
+  return ts.isCallExpression(call) ? call : undefined
 }
 
-function hasNamedOrchestrationImport(sourceFile) {
-  return sourceFile.statements.some((statement) => {
+function isIdentifierNamed(node, name) {
+  return Boolean(node) && ts.isIdentifier(node) && node.text === name
+}
+
+function bindingNameContains(bindingName, name) {
+  if (ts.isIdentifier(bindingName)) return bindingName.text === name
+  return bindingName.elements.some(
+    (element) => ts.isBindingElement(element) && bindingNameContains(element.name, name),
+  )
+}
+
+function importBindingNames(statement) {
+  if (!ts.isImportDeclaration(statement) || !statement.importClause) return []
+  const names = []
+  if (statement.importClause.name) names.push(statement.importClause.name.text)
+  const bindings = statement.importClause.namedBindings
+  if (bindings && ts.isNamespaceImport(bindings)) names.push(bindings.name.text)
+  if (bindings && ts.isNamedImports(bindings)) {
+    names.push(...bindings.elements.map((element) => element.name.text))
+  }
+  return names
+}
+
+function hasExactOrchestrationImport(sourceFile) {
+  let exactImports = 0
+  for (const statement of sourceFile.statements) {
+    if (!ts.isImportDeclaration(statement)) continue
+    const localBindings = importBindingNames(statement).filter(
+      (name) => name === ADMIN_ORCHESTRATION_EXPORT,
+    )
+    if (localBindings.length === 0) continue
     if (
-      !ts.isImportDeclaration(statement) ||
       !ts.isStringLiteral(statement.moduleSpecifier) ||
-      statement.moduleSpecifier.text !== ADMIN_ORCHESTRATION_MODULE
+      statement.moduleSpecifier.text !== ADMIN_ORCHESTRATION_MODULE ||
+      statement.importClause?.isTypeOnly
     ) {
       return false
     }
     const bindings = statement.importClause?.namedBindings
-    return (
-      bindings &&
-      ts.isNamedImports(bindings) &&
-      bindings.elements.some(
-        (element) =>
-          element.name.text === ADMIN_ORCHESTRATION_EXPORT &&
-          (element.propertyName?.text ?? element.name.text) === ADMIN_ORCHESTRATION_EXPORT,
-      )
-    )
-  })
+    if (!bindings || !ts.isNamedImports(bindings)) return false
+    for (const element of bindings.elements) {
+      if (element.name.text === ADMIN_ORCHESTRATION_EXPORT) {
+        if (
+          element.isTypeOnly ||
+          (element.name.text === ADMIN_ORCHESTRATION_EXPORT &&
+            (element.propertyName?.text ?? element.name.text) !== ADMIN_ORCHESTRATION_EXPORT)
+        ) {
+          return false
+        }
+        exactImports += 1
+      }
+    }
+  }
+  return exactImports === 1
 }
 
 function declaredFunction(sourceFile, name) {
@@ -77,18 +113,274 @@ function containsDirectDomainIteration(functionNode) {
   return forbidden
 }
 
-function validatesAdminOrchestrationCallPath(sourceFile, functionName, mode) {
-  if (!hasNamedOrchestrationImport(sourceFile)) return false
-  const functionNode = declaredFunction(sourceFile, functionName)
-  if (!functionNode?.body || containsDirectDomainIteration(functionNode)) return false
-  if (mode === 'return') {
-    const returns = functionNode.body.statements.filter(ts.isReturnStatement)
-    return callsAdminOrchestration(returns.at(-1)?.expression)
+function declarationBindsName(node, name) {
+  if (
+    (ts.isVariableDeclaration(node) ||
+      ts.isParameterDeclaration(node) ||
+      ts.isBindingElement(node)) &&
+    bindingNameContains(node.name, name)
+  ) {
+    return true
   }
-  return functionNode.body.statements.some(
-    (statement) =>
-      ts.isExpressionStatement(statement) && callsAdminOrchestration(statement.expression),
+  return (
+    (ts.isFunctionDeclaration(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isClassDeclaration(node) ||
+      ts.isClassExpression(node)) &&
+    node.name?.text === name
   )
+}
+
+function containsBinding(functionNode, name) {
+  let found = false
+  function visit(node) {
+    if (found) return
+    if (declarationBindsName(node, name)) {
+      found = true
+      return
+    }
+    node.forEachChild(visit)
+  }
+  functionNode.body?.forEachChild(visit)
+  return found
+}
+
+function sourceHasTopLevelBinding(sourceFile, name) {
+  return sourceFile.statements.some((statement) => {
+    if (ts.isImportDeclaration(statement)) return false
+    if (declarationBindsName(statement, name)) return true
+    if (!ts.isVariableStatement(statement)) return false
+    return statement.declarationList.declarations.some((declaration) =>
+      bindingNameContains(declaration.name, name),
+    )
+  })
+}
+
+function identifierCallsWithin(node, name) {
+  const calls = []
+  function visit(current) {
+    if (ts.isCallExpression(current) && isIdentifierNamed(current.expression, name)) {
+      calls.push(current)
+    }
+    current.forEachChild(visit)
+  }
+  node.forEachChild(visit)
+  return calls
+}
+
+function propertyName(property) {
+  if (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) {
+    return property.name.text
+  }
+  return undefined
+}
+
+function exactObjectProperties(expression, expectedNames) {
+  const object = unwrapParentheses(expression)
+  if (!ts.isObjectLiteralExpression(object)) return undefined
+  const properties = new Map()
+  for (const property of object.properties) {
+    const name = propertyName(property)
+    if (!name || properties.has(name)) return undefined
+    properties.set(name, property)
+  }
+  if (
+    properties.size !== expectedNames.length ||
+    expectedNames.some((name) => !properties.has(name))
+  ) {
+    return undefined
+  }
+  return properties
+}
+
+function exactIdentifierParameters(callback, count) {
+  if (callback.parameters.length !== count) return undefined
+  const parameters = callback.parameters.map((parameter) => parameter.name)
+  return parameters.every(ts.isIdentifier)
+    ? parameters.map((parameter) => parameter.text)
+    : undefined
+}
+
+function directIdentifierCall(expression, callee) {
+  const call = unwrapParentheses(expression)
+  return ts.isCallExpression(call) && isIdentifierNamed(call.expression, callee) ? call : undefined
+}
+
+function containsPropertyAccess(node, objectName, memberName) {
+  let found = false
+  function visit(current) {
+    if (
+      ts.isPropertyAccessExpression(current) &&
+      isIdentifierNamed(current.expression, objectName) &&
+      current.name.text === memberName
+    ) {
+      found = true
+      return
+    }
+    current.forEachChild(visit)
+  }
+  node.forEachChild(visit)
+  return found
+}
+
+function validatesRequestOperation(callback) {
+  if (!ts.isArrowFunction(callback) || ts.isBlock(callback.body)) return false
+  const [target] = exactIdentifierParameters(callback, 1) ?? []
+  if (!target) return false
+  const call = directIdentifierCall(callback.body, 'syncOrgToDomain')
+  return (
+    call?.arguments.length === 2 &&
+    isIdentifierNamed(call.arguments[0], target) &&
+    isIdentifierNamed(call.arguments[1], 'org')
+  )
+}
+
+function validatesTargetCallback(property, callee, target, argumentCount) {
+  if (!ts.isPropertyAssignment(property) || !ts.isArrowFunction(property.initializer)) return false
+  const call = directIdentifierCall(property.initializer.body, callee)
+  return call?.arguments.length === argumentCount && isIdentifierNamed(call.arguments[0], target)
+}
+
+function validatesScheduledOperation(callback) {
+  if (
+    !ts.isArrowFunction(callback) ||
+    !ts.isBlock(callback.body) ||
+    !callback.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword)
+  ) {
+    return false
+  }
+  const [target] = exactIdentifierParameters(callback, 1) ?? []
+  if (!target) return false
+  const firstStatement = callback.body.statements[0]
+  if (!ts.isVariableStatement(firstStatement)) return false
+  const declarations = firstStatement.declarationList.declarations
+  if (declarations.length !== 1) return false
+  const activeReconcile = awaitedCallExpression(declarations[0].initializer)
+  if (!isIdentifierNamed(activeReconcile?.expression, 'reconcileOrgs')) return false
+  const reconcileCalls = identifierCallsWithin(callback.body, 'reconcileOrgs')
+  if (
+    reconcileCalls.length !== 1 ||
+    reconcileCalls[0] !== activeReconcile ||
+    activeReconcile.arguments.length !== 1
+  ) {
+    return false
+  }
+  const adapters = exactObjectProperties(activeReconcile.arguments[0], [
+    'listAdminOrgs',
+    'listDomainOrgs',
+    'resync',
+    'notifyDrift',
+  ])
+  if (!adapters) return false
+  if (!validatesTargetCallback(adapters.get('listDomainOrgs'), 'listDomainOrgs', target, 1)) {
+    return false
+  }
+  if (!validatesTargetCallback(adapters.get('resync'), 'syncOrgToDomain', target, 2)) return false
+  if (!containsPropertyAccess(adapters.get('notifyDrift'), target, 'directory')) return false
+  const listCalls = identifierCallsWithin(callback.body, 'listDomainOrgs')
+  const syncCalls = identifierCallsWithin(callback.body, 'syncOrgToDomain')
+  return (
+    listCalls.length === 1 &&
+    syncCalls.length === 1 &&
+    isIdentifierNamed(listCalls[0].arguments[0], target) &&
+    isIdentifierNamed(syncCalls[0].arguments[0], target)
+  )
+}
+
+function validatesRequestFailure(property) {
+  if (!ts.isMethodDeclaration(property) || !property.body) return false
+  const [identity, error] = exactIdentifierParameters(property, 2) ?? []
+  if (!identity || !error || property.body.statements.length !== 1) return false
+  const statement = property.body.statements[0]
+  if (!ts.isExpressionStatement(statement)) return false
+  const call = unwrapParentheses(statement.expression)
+  return (
+    ts.isCallExpression(call) &&
+    ts.isPropertyAccessExpression(call.expression) &&
+    isIdentifierNamed(call.expression.expression, 'console') &&
+    call.expression.name.text === 'error' &&
+    call.arguments.length === 2 &&
+    containsPropertyAccess(call.arguments[0], identity, 'directory') &&
+    isIdentifierNamed(call.arguments[1], error)
+  )
+}
+
+function validatesScheduledFailure(property) {
+  if (!ts.isPropertyAssignment(property) || !ts.isArrowFunction(property.initializer)) return false
+  const [identity, error] = exactIdentifierParameters(property.initializer, 2) ?? []
+  if (!identity || !error || ts.isBlock(property.initializer.body)) return false
+  const call = directIdentifierCall(property.initializer.body, 'reportReconcileFailure')
+  return (
+    call?.arguments.length === 3 &&
+    isIdentifierNamed(call.arguments[0], 'env') &&
+    ts.isPropertyAccessExpression(call.arguments[1]) &&
+    isIdentifierNamed(call.arguments[1].expression, identity) &&
+    call.arguments[1].name.text === 'directory' &&
+    isIdentifierNamed(call.arguments[2], error)
+  )
+}
+
+function validatesOptions(expression, profile) {
+  const properties = exactObjectProperties(expression, ['concurrency', 'onFailure'])
+  if (!properties) return false
+  const concurrency = properties.get('concurrency')
+  if (
+    !ts.isPropertyAssignment(concurrency) ||
+    !ts.isStringLiteral(concurrency.initializer) ||
+    concurrency.initializer.text !== profile.concurrency
+  ) {
+    return false
+  }
+  const failure = properties.get('onFailure')
+  return profile.mode === 'request'
+    ? validatesRequestFailure(failure)
+    : validatesScheduledFailure(failure)
+}
+
+function selectedAwaitedOrchestrationCall(functionNode, mode) {
+  if (mode === 'request') {
+    const last = functionNode.body.statements.at(-1)
+    return ts.isReturnStatement(last) ? awaitedCallExpression(last.expression) : undefined
+  }
+  const last = functionNode.body.statements.at(-1)
+  return ts.isExpressionStatement(last) ? awaitedCallExpression(last.expression) : undefined
+}
+
+function validatesAdminOrchestrationCallPath(sourceFile, functionName, profile) {
+  if (
+    !hasExactOrchestrationImport(sourceFile) ||
+    sourceHasTopLevelBinding(sourceFile, ADMIN_ORCHESTRATION_EXPORT)
+  ) {
+    return false
+  }
+  const functionNode = declaredFunction(sourceFile, functionName)
+  if (
+    !functionNode?.body ||
+    containsDirectDomainIteration(functionNode) ||
+    containsBinding(functionNode, ADMIN_ORCHESTRATION_EXPORT)
+  ) {
+    return false
+  }
+  const allCalls = identifierCallsWithin(functionNode.body, ADMIN_ORCHESTRATION_EXPORT)
+  const call = selectedAwaitedOrchestrationCall(functionNode, profile.mode)
+  if (
+    allCalls.length !== 1 ||
+    allCalls[0] !== call ||
+    call.arguments.length !== 4 ||
+    !isIdentifierNamed(call.arguments[0], profile.environment) ||
+    !isIdentifierNamed(call.arguments[1], 'identities')
+  ) {
+    return false
+  }
+  const operation = call.arguments[2]
+  if (
+    !(profile.mode === 'request'
+      ? validatesRequestOperation(operation)
+      : validatesScheduledOperation(operation))
+  ) {
+    return false
+  }
+  return validatesOptions(call.arguments[3], profile)
 }
 
 export async function validateAdminDomainOrchestrationFiles(root) {
@@ -107,14 +399,25 @@ export async function validateAdminDomainOrchestrationFiles(root) {
     const sync = sourceFile(paths.sync)
     if (
       !sync ||
-      !validatesAdminOrchestrationCallPath(sync, 'syncOrgToConfiguredDomains', 'return')
+      !validatesAdminOrchestrationCallPath(sync, 'syncOrgToConfiguredDomains', {
+        mode: 'request',
+        environment: 'environment',
+        concurrency: 'parallel',
+      })
     ) {
       violations.push(
         'services/admin/src/worker/sync.ts production domain orchestration call path must return the shared executable orchestrator',
       )
     }
     const worker = sourceFile(paths.worker)
-    if (!worker || !validatesAdminOrchestrationCallPath(worker, 'scheduled', 'statement')) {
+    if (
+      !worker ||
+      !validatesAdminOrchestrationCallPath(worker, 'scheduled', {
+        mode: 'scheduled',
+        environment: 'env',
+        concurrency: 'sequential',
+      })
+    ) {
       violations.push(
         'services/admin/src/worker/index.ts scheduled domain orchestration call path must execute the shared executable orchestrator',
       )

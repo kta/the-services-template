@@ -21,28 +21,153 @@ async function withAdminSources(syncSource, workerSource, check) {
 const orchestrationImport =
   "import { orchestrateDomainSyncIdentities } from './domain-sync-orchestration.mjs'\n"
 
-test('accepts Worker request and scheduled paths that execute the shared orchestration boundary', async () => {
-  await withAdminSources(
-    `${orchestrationImport}
+const validRequestSource = `${orchestrationImport}
 export async function syncOrgToConfiguredDomains(environment, identities, org) {
-  return orchestrateDomainSyncIdentities(environment, identities, (target) =>
-    syncOrgToDomain(target, org),
-  )
-}
-`,
-    `${orchestrationImport}
-async function scheduled(event, env) {
-  await cleanUp(event, env)
-  await orchestrateDomainSyncIdentities(env, identities, reconcileDomain, {
-    concurrency: 'sequential',
-  })
-}
-`,
-    async (root) => {
-      assert.deepEqual(await validateAdminDomainOrchestrationFiles(root), [])
+  return await orchestrateDomainSyncIdentities(
+    environment,
+    identities,
+    (target) => syncOrgToDomain(target, org),
+    {
+      concurrency: 'parallel',
+      onFailure(identity, error) {
+        console.error(\`failed to resolve domain sync target \${identity.directory}\`, error)
+      },
     },
   )
+}
+`
+
+const validScheduledSource = `${orchestrationImport}
+async function scheduled(_event, env) {
+  await cleanUp(_event, env)
+  await orchestrateDomainSyncIdentities(
+    env,
+    identities,
+    async (target) => {
+      const result = await reconcileOrgs({
+        listAdminOrgs: loadAdminOrgs,
+        listDomainOrgs: () => listDomainOrgs(target),
+        resync: (org) => syncOrgToDomain(target, org),
+        notifyDrift: () => notifyDrift(target.directory),
+      })
+      return result
+    },
+    {
+      concurrency: 'sequential',
+      onFailure: (identity, error) =>
+        reportReconcileFailure(env, identity.directory, error),
+    },
+  )
+}
+`
+
+test('accepts Worker request and scheduled paths that execute the shared orchestration boundary', async () => {
+  await withAdminSources(validRequestSource, validScheduledSource, async (root) => {
+    assert.deepEqual(await validateAdminDomainOrchestrationFiles(root), [])
+  })
 })
+
+for (const { name, syncSource = validRequestSource, workerSource = validScheduledSource } of [
+  {
+    name: 'a locally shadowed orchestration import',
+    syncSource: validRequestSource.replace(
+      '  return await orchestrateDomainSyncIdentities(',
+      '  const orchestrateDomainSyncIdentities = async () => true\n  return await orchestrateDomainSyncIdentities(',
+    ),
+  },
+  {
+    name: 'a request callback that discards the computed target',
+    syncSource: validRequestSource.replace(
+      '(target) => syncOrgToDomain(target, org)',
+      `() => syncOrgToDomain({
+      directory: 'booking',
+      binding: environment.BOOKING,
+      key: environment.ADMIN_TO_BOOKING_KEY,
+    }, org)`,
+    ),
+  },
+  {
+    name: 'an unawaited request orchestration call',
+    syncSource: validRequestSource.replace('return await orchestrate', 'return orchestrate'),
+  },
+  {
+    name: 'request orchestration with swapped environment and identities arguments',
+    syncSource: validRequestSource.replace(
+      '    environment,\n    identities,',
+      '    identities,\n    environment,',
+    ),
+  },
+  {
+    name: 'request orchestration with sequential concurrency',
+    syncSource: validRequestSource.replace("concurrency: 'parallel'", "concurrency: 'sequential'"),
+  },
+  {
+    name: 'request orchestration with a malformed failure callback',
+    syncSource: validRequestSource.replace(
+      `onFailure(identity, error) {
+        console.error(\`failed to resolve domain sync target \${identity.directory}\`, error)
+      }`,
+      `onFailure() {
+        console.error('failed')
+      }`,
+    ),
+  },
+  {
+    name: 'a scheduled callback that discards the computed target',
+    workerSource: validScheduledSource
+      .replace('listDomainOrgs(target)', 'listDomainOrgs(env.BOOKING)')
+      .replace('syncOrgToDomain(target, org)', 'syncOrgToDomain(env.BOOKING, org)'),
+  },
+  {
+    name: 'an unawaited scheduled orchestration call',
+    workerSource: validScheduledSource.replace(
+      '  await orchestrateDomainSyncIdentities(',
+      '  orchestrateDomainSyncIdentities(',
+    ),
+  },
+  {
+    name: 'a scheduled callback with an unawaited reconcile operation',
+    workerSource: validScheduledSource.replace(
+      'const result = await reconcileOrgs(',
+      'const result = reconcileOrgs(',
+    ),
+  },
+  {
+    name: 'scheduled orchestration with the wrong arity',
+    workerSource: validScheduledSource.replace(
+      `    {
+      concurrency: 'sequential',
+      onFailure: (identity, error) =>
+        reportReconcileFailure(env, identity.directory, error),
+    },`,
+      '',
+    ),
+  },
+  {
+    name: 'parallel scheduled orchestration',
+    workerSource: validScheduledSource.replace(
+      "concurrency: 'sequential'",
+      "concurrency: 'parallel'",
+    ),
+  },
+  {
+    name: 'scheduled orchestration with a malformed failure callback',
+    workerSource: validScheduledSource.replace(
+      `(identity, error) =>
+        reportReconcileFailure(env, identity.directory, error)`,
+      `() => reportReconcileFailure(env, 'booking', new Error('failed'))`,
+    ),
+  },
+]) {
+  test(`rejects ${name}`, async () => {
+    await withAdminSources(syncSource, workerSource, async (root) => {
+      assert.match(
+        (await validateAdminDomainOrchestrationFiles(root)).join('\n'),
+        /production domain orchestration call path|scheduled domain orchestration call path/i,
+      )
+    })
+  })
+}
 
 test('rejects an unused correct resolver beside a hard-coded sync.ts production call path', async () => {
   await withAdminSources(

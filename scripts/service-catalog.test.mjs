@@ -18,6 +18,13 @@ async function writeFixture(root, path, content) {
   await writeFile(destination, content)
 }
 
+function reviewedNativePackageScripts() {
+  return {
+    'build:tauri': 'node ../../scripts/native-workflow.mjs package build',
+    tauri: 'node ../../scripts/native-workflow.mjs package tauri',
+  }
+}
+
 async function withCatalogFixture(catalog, services, check) {
   const root = await mkdtemp(join(tmpdir(), 'service-catalog-'))
   try {
@@ -28,7 +35,10 @@ async function withCatalogFixture(catalog, services, check) {
       await writeFixture(
         root,
         `services/${service.directory}/package.json`,
-        `${JSON.stringify({ name: service.package })}\n`,
+        `${JSON.stringify({
+          name: service.package,
+          ...(service.native ? { scripts: reviewedNativePackageScripts() } : {}),
+        })}\n`,
       )
       await writeFixture(root, `services/${service.directory}/src/web/App.tsx`, 'export {}\n')
       if (service.native && typeof service.nativeWorkflow === 'string') {
@@ -343,6 +353,84 @@ test('rejects workflow symlinks and orphan native workflows without reading outs
       '.github/workflows/orphan-indirect-native.yml',
       'on: {push: {}}\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - env: {SCRIPT: "build:tauri"}\n        run: pnpm --filter @app/booking run "$SCRIPT"\n',
     )
+    await writeFixture(
+      root,
+      '.github/workflows/orphan-unset-actions.yml',
+      `on: {pull_request: {}}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - env: {SCOPE: '@app', SERVICE: booking, SCRIPT: 'build:tauri'}
+        run: env -u GITHUB_ACTIONS pnpm --filter "$SCOPE/$SERVICE" run "$SCRIPT"
+`,
+    )
+    await writeFixture(
+      root,
+      '.github/workflows/orphan-false-actions.yml',
+      `on: {push: {}}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: GITHUB_ACTIONS=false pnpm --filter @app/booking run build:tauri
+`,
+    )
+    await writeFixture(
+      root,
+      '.github/workflows/orphan-raw-tauri.yml',
+      `on: {push: {}}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - env: {SCOPE: '@app', SERVICE: booking, CLI: tauri}
+        run: pnpm --filter "$SCOPE/$SERVICE" exec "$CLI" build
+`,
+    )
+    await writeFixture(
+      root,
+      '.github/workflows/orphan-bin-tauri.yml',
+      `on: {push: {}}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - env: {BIN_ROOT: node_modules/.bin/, CLI: tauri}
+        run: '"$BIN_ROOT$CLI" build'
+`,
+    )
+    await writeFixture(
+      root,
+      '.github/workflows/orphan-forged-wrapper.yml',
+      `on: {pull_request: {}}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          WRAPPER_ROOT: scripts/native-
+          WRAPPER_FILE: workflow.mjs
+          TARGET: booking
+          NATIVE_ACTION: build-macos
+        run: env GITHUB_ACTIONS=true GITHUB_EVENT_NAME=workflow_dispatch GITHUB_REF=refs/heads/main GITHUB_REF_PROTECTED=true node "$WRAPPER_ROOT$WRAPPER_FILE" "$TARGET" "$NATIVE_ACTION"
+`,
+    )
+    await writeFixture(
+      root,
+      '.github/workflows/orphan-with-native.yml',
+      `on: {push: {}}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: acme/run-command@1111111111111111111111111111111111111111
+        env: {SCOPE: '@app', SERVICE: booking}
+        with:
+          command: pnpm
+          arguments: --filter "$SCOPE/$SERVICE" exec tauri build
+`,
+    )
     try {
       const result = await validateServiceCatalog(root)
       const diagnostic = result.violations.join('\n')
@@ -351,10 +439,86 @@ test('rejects workflow symlinks and orphan native workflows without reading outs
       assert.match(diagnostic, /orphan-build-tauri\.yml.*not registered.*nativeWorkflow/i)
       assert.match(diagnostic, /orphan-dynamic-native\.yml.*not registered.*nativeWorkflow/i)
       assert.match(diagnostic, /orphan-indirect-native\.yml.*not registered.*nativeWorkflow/i)
+      for (const workflow of [
+        'orphan-unset-actions',
+        'orphan-false-actions',
+        'orphan-raw-tauri',
+        'orphan-bin-tauri',
+        'orphan-forged-wrapper',
+        'orphan-with-native',
+      ]) {
+        assert.match(
+          diagnostic,
+          new RegExp(`${workflow}\\.yml.*not registered.*nativeWorkflow`, 'i'),
+          workflow,
+        )
+      }
       assert.doesNotMatch(diagnostic, /printed-native-text\.yml.*not registered.*nativeWorkflow/i)
       assert.doesNotMatch(diagnostic, /OUTSIDE_WORKFLOW_SENTINEL/)
     } finally {
       await rm(outside, { force: true })
+    }
+  })
+})
+
+test('validates exact native package entry scripts for every catalog native service', async () => {
+  const services = ['booking', 'billing', 'shipping'].map((directory) => ({
+    directory,
+    package: `@app/${directory}`,
+    templateKind: 'tauri',
+    deployable: false,
+    native: true,
+    nativeWorkflow: `.github/workflows/${directory}.yml`,
+  }))
+  await withCatalogFixture(services, services, async (root) => {
+    const mutations = [
+      {
+        name: 'raw tauri binary',
+        scripts: { ...reviewedNativePackageScripts(), tauri: 'tauri' },
+      },
+      {
+        name: 'raw node_modules binary',
+        scripts: {
+          ...reviewedNativePackageScripts(),
+          tauri: 'node_modules/.bin/tauri',
+        },
+      },
+      {
+        name: 'semicolon fallback',
+        scripts: {
+          ...reviewedNativePackageScripts(),
+          tauri: 'node ../../scripts/native-workflow.mjs package tauri; tauri',
+        },
+      },
+      {
+        name: 'or fallback',
+        scripts: {
+          ...reviewedNativePackageScripts(),
+          tauri: 'node ../../scripts/native-workflow.mjs package tauri || tauri',
+        },
+      },
+      {
+        name: 'guard prefix fallback',
+        scripts: {
+          ...reviewedNativePackageScripts(),
+          'build:tauri':
+            'node ../../scripts/native-workflow.mjs package-guard && false || tauri build',
+        },
+      },
+    ]
+
+    for (const mutation of mutations) {
+      await writeFixture(
+        root,
+        'services/shipping/package.json',
+        `${JSON.stringify({ name: '@app/shipping', scripts: mutation.scripts })}\n`,
+      )
+      const diagnostic = (await validateServiceCatalog(root)).violations.join('\n')
+      assert.match(
+        diagnostic,
+        /shipping.*native package script.*exact reviewed wrapper/i,
+        mutation.name,
+      )
     }
   })
 })

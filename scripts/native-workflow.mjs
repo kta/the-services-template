@@ -24,7 +24,7 @@ import { resolveProductionPnpm, resolveReviewedNode } from './production-pnpm.mj
 import { loadServiceCatalog } from './service-catalog.mjs'
 
 const DEFAULT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const PACKAGE_GUARD_ACTION = 'package-guard'
+const PACKAGE_ACTION = 'package'
 const NATIVE_TAURI_ACTIONS = new Set([
   'build-macos',
   'init-ios',
@@ -47,10 +47,13 @@ function isInside(path, directory) {
 
 function executorContextFailure() {
   throw new Error(
-    'GitHub native builds require the registered manual protected-main native executor',
+    'native workflow defense-in-depth context check requires the reviewed manual protected-main shape',
   )
 }
 
+// Caller-controlled process environment is not attestation. This check and
+// the nonce below only add defense in depth after repository policy has
+// statically restricted native execution to catalog-owned exact workflows.
 export function assertNativeWorkflowExecutorContext(workspaceRoot, service, environment) {
   if (environment?.GITHUB_ACTIONS !== 'true') return
   const repository = environment.GITHUB_REPOSITORY
@@ -194,15 +197,66 @@ function consumeNativePackageBuildCapability(workspaceRoot, service, environment
   if (removeCapability) unlinkSync(path)
 }
 
-async function guardNativePackageBuild() {
+async function catalogNativePackageService() {
   const services = await loadServiceCatalog(DEFAULT_ROOT)
   const cwd = realpathSync(process.cwd())
   const service = services.find(
     (candidate) =>
       candidate.native && realpathSync(join(DEFAULT_ROOT, 'services', candidate.directory)) === cwd,
   )
-  if (!service) throw new Error('native package guard must run from a catalog native service')
+  if (!service) throw new Error('native package entry must run from a catalog native service')
+  return service
+}
+
+function executePackageCommand(command, args, cwd) {
+  execFileSync(command, args, {
+    cwd,
+    env: process.env,
+    stdio: 'inherit',
+    timeout: 90 * 60 * 1_000,
+    killSignal: 'SIGTERM',
+  })
+}
+
+async function runNativePackageAction(action, args) {
+  const service = await catalogNativePackageService()
   consumeNativePackageBuildCapability(DEFAULT_ROOT, service, process.env)
+  const serviceRoot = join(DEFAULT_ROOT, 'services', service.directory)
+  if (action === 'build' && args.length === 0) {
+    executePackageCommand(
+      process.execPath,
+      [
+        join(DEFAULT_ROOT, 'scripts/run-without-cloudflare-env.mjs'),
+        'pnpm',
+        'exec',
+        'vite',
+        '--config',
+        'vite.tauri.config.ts',
+        'build',
+      ],
+      serviceRoot,
+    )
+    executePackageCommand(
+      process.execPath,
+      [join(DEFAULT_ROOT, 'scripts/clean-build-secrets.mjs'), 'dist'],
+      serviceRoot,
+    )
+    executePackageCommand(
+      process.execPath,
+      [join(DEFAULT_ROOT, 'scripts/check-tauri-artifact.mjs'), 'dist/tauri'],
+      serviceRoot,
+    )
+    return
+  }
+  if (action === 'tauri') {
+    executePackageCommand(
+      resolveProductionPnpm(process.env, DEFAULT_ROOT),
+      ['exec', 'tauri', ...args],
+      serviceRoot,
+    )
+    return
+  }
+  throw new Error('usage: native-workflow.mjs package build|tauri [tauri-args...]')
 }
 
 function reviewedTool(options, name) {
@@ -415,8 +469,8 @@ export function nativeWorkflowChildEnvironment(environment, options) {
 
 async function main() {
   const [directory, action, ...extra] = process.argv.slice(2)
-  if (directory === PACKAGE_GUARD_ACTION && action === undefined && extra.length === 0) {
-    await guardNativePackageBuild()
+  if (directory === PACKAGE_ACTION && action !== undefined) {
+    await runNativePackageAction(action, extra)
     return
   }
   if (!directory || !action || extra.length > 0) {

@@ -144,6 +144,11 @@ const catalogService = (directory, templateKind, deployable = false) => ({
     : {}),
 })
 
+const reviewedNativePackageScripts = {
+  'build:tauri': 'node ../../scripts/native-workflow.mjs package build',
+  tauri: 'node ../../scripts/native-workflow.mjs package tauri',
+}
+
 function catalogJson(extra = []) {
   return JSON.stringify({
     services: [
@@ -197,7 +202,7 @@ function separatedTemplateFiles(extra = {}) {
       nativeWorkflow('example_tauri_service'),
     'services/admin/package.json': JSON.stringify({
       name: '@app/admin',
-      scripts: { tauri: 'tauri', 'build:tauri': 'vite build' },
+      scripts: reviewedNativePackageScripts,
       dependencies: { '@tauri-apps/api': 'catalog:' },
     }),
     'services/admin/src/web/App.tsx': 'export function App() { return null }\n',
@@ -216,7 +221,7 @@ function separatedTemplateFiles(extra = {}) {
     }),
     'services/example_tauri_service/package.json': JSON.stringify({
       name: '@app/example_tauri_service',
-      scripts: { tauri: 'tauri', 'build:tauri': 'vite build' },
+      scripts: reviewedNativePackageScripts,
       dependencies: { '@tauri-apps/api': 'catalog:' },
       devDependencies: { '@tauri-apps/cli': 'catalog:' },
     }),
@@ -535,7 +540,7 @@ test('automatically audits a copied Tauri service instead of silently skipping i
       '.github/workflows/booking-tauri-build.yml': nativeWorkflow('booking'),
       'services/booking/package.json': JSON.stringify({
         name: '@app/booking',
-        scripts: { tauri: 'tauri', 'build:tauri': 'vite build' },
+        scripts: reviewedNativePackageScripts,
         dependencies: { '@tauri-apps/api': 'catalog:' },
       }),
       'services/booking/src/web/App.tsx': 'export function App() { return null }\n',
@@ -591,7 +596,10 @@ test('requires complete native assets in every catalog Tauri service', async () 
     baseFiles({
       'service-catalog.json': catalogJson([catalogService('booking', 'tauri', true)]),
       '.github/workflows/booking-tauri-build.yml': nativeWorkflow('booking'),
-      'services/booking/package.json': JSON.stringify({ name: '@app/booking' }),
+      'services/booking/package.json': JSON.stringify({
+        name: '@app/booking',
+        scripts: reviewedNativePackageScripts,
+      }),
       'services/booking/src/web/App.tsx': 'export function App() { return null }\n',
       'services/booking/src-tauri/tauri.conf.json': exampleTauriCleanConfig,
       'services/booking/src-tauri/capabilities/default.json': cleanCapability,

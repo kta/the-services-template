@@ -113,7 +113,7 @@ export async function syncOrgToConfiguredDomains(
     console.error('failed to parse configured domain sync identities', error)
     return false
   }
-  return orchestrateDomainSyncIdentities(
+  return await orchestrateDomainSyncIdentities(
     environment,
     identities,
     (target) => syncOrgToDomain(target, org),
