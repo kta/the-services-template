@@ -36,7 +36,7 @@ export function resolveReviewedNode(executable = process.execPath, workspaceRoot
   if (typeof executable !== 'string' || !isAbsolute(executable)) {
     throw new Error('reviewed wrapper requires an absolute Node path')
   }
-  return validateExecutable(executable, workspaceRoot, NODE_EXECUTABLE_PATTERN, 'Node')
+  return validateExecutable(executable, workspaceRoot, NODE_EXECUTABLE_PATTERN, 'Node', true)
 }
 
 function findPathPnpm(pathValue) {
@@ -58,7 +58,13 @@ function findPathPnpm(pathValue) {
   throw new Error('PATH must contain a trusted pnpm executable')
 }
 
-function validateExecutable(configuredPath, workspaceRoot, executablePattern, label) {
+function validateExecutable(
+  configuredPath,
+  workspaceRoot,
+  executablePattern,
+  label,
+  allowPrimaryGroupWrite = false,
+) {
   const checkout = realpathSync(resolve(workspaceRoot))
   if (isInside(resolve(configuredPath), checkout)) {
     throw new Error(`${label} must not point inside the repository checkout`)
@@ -70,7 +76,11 @@ function validateExecutable(configuredPath, workspaceRoot, executablePattern, la
     throw new Error(`${label} must resolve to an existing executable`)
   }
   const info = lstatSync(executable)
-  if (!info.isFile() || (info.mode & 0o022) !== 0) {
+  const currentGroup = typeof process.getgid === 'function' ? process.getgid() : null
+  const hasUntrustedWrite =
+    (info.mode & 0o002) !== 0 ||
+    ((info.mode & 0o020) !== 0 && (!allowPrimaryGroupWrite || info.gid !== currentGroup))
+  if (!info.isFile() || hasUntrustedWrite) {
     throw new Error(`${label} must resolve to a non-writable regular file`)
   }
   try {
@@ -87,9 +97,12 @@ function validateExecutable(configuredPath, workspaceRoot, executablePattern, la
     throw new Error(`${label} must be owned by root or the current user`)
   }
   const parent = lstatSync(dirname(executable))
+  const parentHasUntrustedWrite =
+    (parent.mode & 0o002) !== 0 ||
+    ((parent.mode & 0o020) !== 0 && (!allowPrimaryGroupWrite || parent.gid !== currentGroup))
   if (
     !parent.isDirectory() ||
-    (parent.mode & 0o022) !== 0 ||
+    parentHasUntrustedWrite ||
     (currentUser !== null && parent.uid !== 0 && parent.uid !== currentUser)
   ) {
     throw new Error(`${label} parent directory must be owner-only and trusted`)
