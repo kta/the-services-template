@@ -44,6 +44,7 @@ async function replaceWithSymlink(root, relativePath, scope, kind) {
 }
 
 const cleanConfig = JSON.stringify({
+  build: { devUrl: 'http://localhost:5174' },
   app: {
     windows: [{ label: 'main', title: 'Test' }],
     security: {
@@ -120,6 +121,56 @@ const fixedReleaseOrigin = [
   '    }',
   '    Ok(raw.to_owned())',
   '}',
+].join('\n')
+const adminFixedReleaseOrigin = fixedReleaseOrigin.replace(
+  'https://example.example.com',
+  'https://admin.example.com',
+)
+
+function nativeBoundaryManifest(directory, overrides = {}) {
+  const admin = directory === 'admin'
+  return JSON.stringify({
+    releaseOrigin: admin ? 'https://admin.example.com' : `https://${directory}.example.com`,
+    browserStorage: [
+      {
+        path: 'src/web/auth/session.ts',
+        tokenKey: admin ? 'app.admin.dev.token' : `app.${directory}.auth.token`,
+        ...(admin
+          ? { logoutIntentKey: 'app.admin.logout.intent' }
+          : { organizationKey: `app.${directory}.auth.org` }),
+        reason: admin
+          ? 'Browser development grant and logout tombstone; native auth is never persisted here.'
+          : 'Browser-only development grant; the Tauri runtime keeps access tokens in memory.',
+      },
+    ],
+    ...overrides,
+  })
+}
+
+function domainDevSessionSource(directory) {
+  return [
+    "import { platformFetch } from '../platform/transport'",
+    `const DEV_TOKEN_KEY = 'app.${directory}.auth.token'`,
+    `const DEV_ORG_KEY = 'app.${directory}.auth.org'`,
+    'export async function devLogin(organizationId: string) {',
+    "  const response = await platformFetch('/api/auth/token')",
+    '  const { token } = await response.json()',
+    '  sessionStorage.setItem(DEV_TOKEN_KEY, token)',
+    '  sessionStorage.setItem(DEV_ORG_KEY, organizationId)',
+    '}',
+  ].join('\n')
+}
+
+const adminDevSessionSource = [
+  "import { platformFetch } from '../platform/transport'",
+  "const DEV_TOKEN_KEY = 'app.admin.dev.token'",
+  "const LOGOUT_INTENT_KEY = 'app.admin.logout.intent'",
+  'export async function devLogin() {',
+  "  const response = await platformFetch('/api/auth/token')",
+  '  const { token } = await response.json()',
+  '  sessionStorage.setItem(DEV_TOKEN_KEY, token)',
+  '}',
+  "export function logout() { localStorage.setItem(LOGOUT_INTENT_KEY, '1') }",
 ].join('\n')
 const platformOverlays = {
   'services/example_tauri_service/src-tauri/tauri.android.conf.json': JSON.stringify({
@@ -207,11 +258,13 @@ function separatedTemplateFiles(extra = {}) {
     }),
     'services/admin/src/web/App.tsx': 'export function App() { return null }\n',
     'services/admin/src/web/platform/transport.ts': nativeTransport,
+    'services/admin/src/web/auth/session.ts': adminDevSessionSource,
+    'services/admin/tauri-boundary.json': nativeBoundaryManifest('admin'),
     'services/admin/src-tauri/Cargo.toml': '[package]\nname = "admin"\n',
     'services/admin/src-tauri/tauri.conf.json': cleanConfig,
     'services/admin/src-tauri/capabilities/default.json': adminCleanCapability,
     'services/admin/src-tauri/src/lib.rs': adminNavigationGuard,
-    'services/admin/src-tauri/src/origin.rs': fixedReleaseOrigin,
+    'services/admin/src-tauri/src/origin.rs': adminFixedReleaseOrigin,
     ...overlaysFor('admin', '10.15'),
     'services/example_service/src/web/App.tsx': 'export function App() { return null }\n',
     'services/example_service/package.json': JSON.stringify({
@@ -226,6 +279,12 @@ function separatedTemplateFiles(extra = {}) {
       devDependencies: { '@tauri-apps/cli': 'catalog:' },
     }),
     'services/example_tauri_service/src/web/App.tsx': 'export function App() { return null }\n',
+    'services/example_tauri_service/src/web/auth/session.ts':
+      domainDevSessionSource('example_tauri_service'),
+    'services/example_tauri_service/tauri-boundary.json': nativeBoundaryManifest(
+      'example_tauri_service',
+      { releaseOrigin: 'https://example.example.com' },
+    ),
     'services/example_tauri_service/src-tauri/Cargo.toml': '[package]\nname = "example"\n',
     'services/example_tauri_service/src-tauri/tauri.conf.json': exampleTauriCleanConfig,
     'services/example_tauri_service/src-tauri/capabilities/default.json': cleanCapability,
@@ -520,7 +579,7 @@ test('accepts the current safe Tauri boundary', async () => {
   )
 })
 
-test('automatically audits a copied Tauri service instead of silently skipping it', async () => {
+test('allows a copied Tauri service only through its reviewed Web storage manifest', async () => {
   const bookingSecurity = JSON.parse(cleanConfig).app.security
   bookingSecurity.devCsp['connect-src'] = bookingSecurity.devCsp['connect-src']
     .replaceAll('5174', '5180')
@@ -545,10 +604,15 @@ test('automatically audits a copied Tauri service instead of silently skipping i
       }),
       'services/booking/src/web/App.tsx': 'export function App() { return null }\n',
       'services/booking/src/web/platform/transport.ts': nativeTransport,
+      'services/booking/src/web/auth/session.ts': domainDevSessionSource('booking'),
+      'services/booking/tauri-boundary.json': nativeBoundaryManifest('booking'),
       'services/booking/src-tauri/Cargo.toml': '[package]\nname = "booking"\n',
       'services/booking/src-tauri/tauri.conf.json': safeBookingConfig,
       'services/booking/src-tauri/capabilities/default.json': cleanCapability,
-      'services/booking/src-tauri/src/origin.rs': fixedReleaseOrigin,
+      'services/booking/src-tauri/src/origin.rs': fixedReleaseOrigin.replace(
+        'https://example.example.com',
+        'https://booking.example.com',
+      ),
       'services/booking/src-tauri/src/lib.rs': [
         'mod origin;',
         'tauri::Builder::default()',
@@ -564,6 +628,114 @@ test('automatically audits a copied Tauri service instead of silently skipping i
     }),
     async (root) => {
       assert.deepEqual(await validateTauriBoundary(root), [])
+    },
+  )
+})
+
+test('rejects a copied native service without an explicit boundary manifest', async () => {
+  const files = baseFiles({
+    'service-catalog.json': catalogJson([catalogService('booking', 'tauri', true)]),
+    '.github/workflows/booking-tauri-build.yml': nativeWorkflow('booking'),
+    'services/booking/package.json': JSON.stringify({
+      name: '@app/booking',
+      scripts: reviewedNativePackageScripts,
+      dependencies: { '@tauri-apps/api': 'catalog:' },
+    }),
+    'services/booking/src/web/App.tsx': 'export function App() { return null }\n',
+    'services/booking/src/web/platform/transport.ts': nativeTransport,
+    'services/booking/src-tauri/Cargo.toml': '[package]\nname = "booking"\n',
+    'services/booking/src-tauri/tauri.conf.json': exampleTauriCleanConfig,
+    'services/booking/src-tauri/capabilities/default.json': cleanCapability,
+    'services/booking/src-tauri/src/origin.rs': fixedReleaseOrigin,
+    'services/booking/src-tauri/src/lib.rs': exampleTauriNavigationGuard,
+    ...overlaysFor('booking'),
+  })
+  await withFixture(files, async (root) => {
+    const violations = await validateTauriBoundary(root)
+    assert.ok(
+      violations.some(
+        (violation) =>
+          violation.includes('services/booking/tauri-boundary.json') &&
+          violation.includes('required'),
+      ),
+      violations.join('\n'),
+    )
+  })
+})
+
+test('rejects malformed or unreviewed storage manifest entries', async () => {
+  for (const manifest of [
+    '{ malformed',
+    nativeBoundaryManifest('example_tauri_service', {
+      browserStorage: [
+        {
+          path: '../outside.ts',
+          tokenKey: 'app.example_tauri_service.auth.token',
+          reason: '',
+          escape: true,
+        },
+      ],
+    }),
+  ]) {
+    await withFixture(
+      baseFiles({ 'services/example_tauri_service/tauri-boundary.json': manifest }),
+      async (root) => {
+        const violations = await validateTauriBoundary(root)
+        assert.ok(
+          violations.some(
+            (violation) =>
+              violation.includes('tauri-boundary.json') &&
+              /malformed|path|reason|field/i.test(violation),
+          ),
+          violations.join('\n'),
+        )
+      },
+    )
+  }
+})
+
+test('rejects Tauri runtime token persistence even when the Web fallback key is reviewed', async () => {
+  await withFixture(
+    baseFiles({
+      'service-catalog.json': catalogJson([catalogService('booking', 'tauri', true)]),
+      '.github/workflows/booking-tauri-build.yml': nativeWorkflow('booking'),
+      'services/booking/package.json': JSON.stringify({
+        name: '@app/booking',
+        scripts: reviewedNativePackageScripts,
+        dependencies: { '@tauri-apps/api': 'catalog:' },
+      }),
+      'services/booking/src/web/App.tsx': 'export function App() { return null }\n',
+      'services/booking/src/web/platform/transport.ts': nativeTransport,
+      'services/booking/src/web/auth/session.ts': [
+        domainDevSessionSource('booking'),
+        'export function persistNativeSession(token: string) {',
+        '  sessionStorage.setItem(DEV_TOKEN_KEY, token)',
+        '}',
+      ].join('\n'),
+      'services/booking/tauri-boundary.json': nativeBoundaryManifest('booking'),
+      'services/booking/src-tauri/Cargo.toml': '[package]\nname = "booking"\n',
+      'services/booking/src-tauri/tauri.conf.json': exampleTauriCleanConfig,
+      'services/booking/src-tauri/capabilities/default.json': cleanCapability,
+      'services/booking/src-tauri/src/origin.rs': fixedReleaseOrigin.replace(
+        'https://example.example.com',
+        'https://booking.example.com',
+      ),
+      'services/booking/src-tauri/src/lib.rs': exampleTauriNavigationGuard.replaceAll(
+        'TAURI_EXAMPLE_TAURI_SERVICE_API_ORIGIN',
+        'TAURI_BOOKING_API_ORIGIN',
+      ),
+      ...overlaysFor('booking'),
+    }),
+    async (root) => {
+      const violations = await validateTauriBoundary(root)
+      assert.ok(
+        violations.some(
+          (violation) =>
+            violation.includes('services/booking/src/web/auth/session.ts') &&
+            violation.includes('browser storage write is forbidden'),
+        ),
+        violations.join('\n'),
+      )
     },
   )
 })

@@ -106,7 +106,7 @@ JWT key pair は deploy.md の一時ファイル手順で生成する。private 
 
 現行 catalog の deployable domain は 0 件であり、production domain token 発行経路も未実装である。issuer/key ownership を定義する gateway/IdP は人間承認が必要なアーキテクチャ変更とする。正規利用者が `aud=domain:<service>` と live `sid/sub/org` を持つ token を取得でき、成功、wrong audience、`sid` 欠落、logout/rotation、user/org 無効化、admin failure 503 を fixture で実行するまでは domain readiness を false とし、bootstrap/migration/deploy/secret provisioning を許可しない。
 
-ローカルでは make init が .dev.vars.example を .dev.vars にコピーする。AUTH_DEV_GRANT=true と AUTH_DEV_PRIVATE_KEY は admin/example のローカル credential-less grant 専用で、本番には登録しない。`AUTH_DEV_GRANT` だけを設定しても `/api/auth/token` は 404 のままになる。
+ローカルでは `make init` が validated catalog の全 SPA/Worker にある regular `.dev.vars.example` を 0600 の `.dev.vars` へコピーする。admin で生成した local RSA pair の `JWT_PUBLIC_KEY` / `AUTH_DEV_PRIVATE_KEY` は全 domain（両 example とコピー後に catalog 登録したサービス）へ配布する。symlink、catalog 外 path、部分 pair は fail close する。AUTH_DEV_GRANT=true と AUTH_DEV_PRIVATE_KEY はローカル credential-less grant 専用で、本番には登録しない。`AUTH_DEV_GRANT` だけを設定しても `/api/auth/token` は 404 のままになる。
 
 ## 6. マイグレーションと deploy
 

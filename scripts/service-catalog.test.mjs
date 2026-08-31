@@ -133,6 +133,8 @@ jobs:\n  macos-universal:\n    name: ${service.directory} macOS universal app bu
         run: ${trustedNode} scripts/native-workflow.mjs ${service.directory} boundary
       - name: Check pinned Rust toolchain
         run: test "$(rustc --version | awk '{print $2}')" = "1.88.0"
+      - name: Check unsigned desktop release boundary
+        run: ${trustedNode} scripts/native-workflow.mjs ${service.directory} check-release
       - name: Install universal Rust targets
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - name: Check Apple build tools

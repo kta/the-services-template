@@ -69,6 +69,10 @@ const validTemplateChoiceSkill = [
   '- Web only (recommended and default): after this answer, copy services/example_service.',
   '- Web + Tauri: after this answer, copy services/example_tauri_service.',
   'Do not copy either template before the user answers.',
+  '',
+  '## Web + Tauri branch',
+  '',
+  'Copy and rename `tauri-boundary.json`; explicitly review `releaseOrigin` and each browser storage `path`, `tokenKey`, optional organization/logout key, and service-specific `reason`.',
 ].join('\n')
 
 async function assertRejectedTemplateChoiceSkill(skill) {
@@ -84,6 +88,15 @@ test('accepts a new-service skill with both choices and their matching copy sour
     const result = await runAgentCompatibilityCheck(root)
     assert.equal(result.code, 0)
   })
+})
+
+test('rejects a new-service skill that omits the copied native boundary manifest contract', async () => {
+  await assertRejectedTemplateChoiceSkill(
+    validTemplateChoiceSkill.replace(
+      'Copy and rename `tauri-boundary.json`; explicitly review `releaseOrigin` and each browser storage `path`, `tokenKey`, optional organization/logout key, and service-specific `reason`.',
+      'Review native storage later.',
+    ),
+  )
 })
 
 for (const [caseName, skill] of [

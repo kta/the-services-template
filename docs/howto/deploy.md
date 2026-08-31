@@ -316,7 +316,10 @@ backup/health target、domain の production-auth を同じ PR で追加し、
 `make dev/admin/tauri` / `make dev/example_tauri_service/tauri`、静的 bundle の確認は
 `make build/admin/tauri` / `make build/example_tauri_service/tauri` を使う。Tauri artifact
 workflow は protected `main` からの `workflow_dispatch` 専用で、unsigned/debug artifact
-を保存するだけである。Tauri の build 成果物に Cloudflare API token、Worker secret、
+を保存するだけである。macOS job は artifact 作成前に service-local `tauri-boundary.json` の
+reviewed placeholder HTTPS origin を使い、credential/signing 無しの
+`cargo check --locked --release` で release-only `build.rs` の env 注入を検証する。この追加 compile
+cost は低頻度 manual workflow に限定し、通常 PR verify へは載せない。Tauri の build 成果物に Cloudflare API token、Worker secret、
 JWT_PRIVATE_KEY を入れない。`make build/<service>/tauri` は Cloudflare deploy を行わず
 `services/<service>/dist/tauri` だけを生成し、`make dev/<service>/tauri` は Worker/Vite
 dev server と native window をまとめて起動する。

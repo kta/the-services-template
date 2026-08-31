@@ -9,6 +9,7 @@
 | Web の SPA + Worker API | make dev/example_tauri_service |
 | Tauri desktop 開発 | make dev/example_tauri_service/tauri（desktop専用） |
 | Tauri 静的 frontend bundle | make build/example_tauri_service/tauri |
+| unsigned release build.rs 境界 | node scripts/check-native-release.mjs example_tauri_service |
 | Tauri CLI 情報 | pnpm --filter @app/example_tauri_service tauri info |
 | Android emulator / 実機 live development | pnpm --filter @app/example_tauri_service exec tauri android dev |
 | iOS simulator / 実機 live development | pnpm --filter @app/example_tauri_service exec tauri ios dev |
@@ -41,6 +42,12 @@ Web 開発の前提に加えて、desktop は Rust と各 OS の Tauri build too
 
     make init
     make dev/example_tauri_service/tauri
+
+`make init` / `make dev-vars` は validated `service-catalog.json` と各サービスの regular
+`.dev.vars.example` から対象を導出する。admin で生成した同じ local RSA pair の public half と
+local-only dev private half を、`example_service`、`example_tauri_service`、コピー後に catalog へ
+登録した全 domain へ配布し、notifier/ops の `.dev.vars` も 0600 で作る。部分鍵、symlink、catalog
+外 path は fail close するため、生成サービスを固定配列へ手作業で追加しない。
 
 Web だけを確認する場合:
 
@@ -75,7 +82,10 @@ Rust bridge の debug API origin は HTTP localhost/loopback のみを許可す�
 
 ## Release origin と desktop artifact
 
-release build では TAURI_EXAMPLE_TAURI_SERVICE_API_ORIGIN が必須で、HTTPS の origin だけを受け付ける。path、query、fragment、userinfo、末尾 slash は無効である。これは secret ではなく接続先の設定なので Rust build script が binary に埋め込む。
+release build では TAURI_EXAMPLE_TAURI_SERVICE_API_ORIGIN が必須で、HTTPS の origin だけを受け付ける。path、query、fragment、userinfo、末尾 slash は無効である。これは secret ではなく接続先の設定なので Rust build script が binary に埋め込む。reviewed placeholder は `tauri-boundary.json` の `releaseOrigin` を単一ソースとし、boundary checker が `src-tauri/src/origin.rs` の exact allowlist と照合する。
+
+    # signing/credential を使わず release-only build.rs を実行する
+    node scripts/check-native-release.mjs example_tauri_service
 
     # unsigned debug verification (uses the fixed loopback debug origin)
     pnpm --filter @app/example_tauri_service exec tauri build \
@@ -91,7 +101,7 @@ example.example.com は検証用 placeholder であり、実運用 origin では
 
 ## 手動 CI
 
-GitHub Actions の Example Tauri Service native artifacts を `workflow_dispatch` で起動する。macOS universal app、iOS simulator、Android debug APK、Android debug AAB を作成し、artifact を 7 日間保存する。重い platform artifact build は通常 PR verify から外し、通常 verify は `admin` と `example_tauri_service` の Rust fmt/test/clippy と静的 boundary だけを実行する。Web-only の `example_service` は native gate の対象にしない。workflow は署名、store upload、Cloudflare deploy を行わない。
+GitHub Actions の Example Tauri Service native artifacts を `workflow_dispatch` で起動する。macOS job は最初に `tauri-boundary.json` の reviewed placeholder HTTPS origin で credential/signing 無しの `cargo check --locked --release` を実行し、release-only `build.rs` の env 注入を実際に通す。その後、macOS universal debug app、iOS simulator、Android debug APK、Android debug AAB を作成し、artifact を 7 日間保存する。追加の release compile cost はこの低頻度 manual job に限定し、通常 PR verify は `admin` と `example_tauri_service` の Rust fmt/test/clippy と静的 boundary だけを実行する。Web-only の `example_service` は native gate の対象にしない。workflow は署名、store upload、Cloudflare deploy を行わない。
 
 native 対象と artifact workflow path は root `service-catalog.json` の `native: true` / `nativeWorkflow` が単一ソースである。Tauri 雛形から新サービスを作る場合は catalog 登録と workflow のコピー・rename を同じ変更に含め、`node scripts/service-catalog.mjs validate-repository` と `node --test scripts/check-deploy-boundary.test.mjs` を通す。workflow path は `.github/workflows/*.yml` / `*.yaml` の安全な一意パスに限る。catalog validator は YAML の実 trigger/job/step/env/permissions を構造解析し、manual-only・全 job の `runs-on` と protected main・credential 非保持・SHA pin・boundary/artifact scan・platform pin を全 native service に強制する。
 
@@ -107,6 +117,7 @@ macOS job は Rust の固定 loopback debug origin で unsigned debug artifact �
 - response の set-cookie を renderer に返さない。
 - capability は `windows: ["main"]` に限定し、example_tauri_service は `allow-api-request` だけを許可する。`remote` / `webviews`、filesystem、shell、opener、任意 HTTP plugin、任意 command を追加しない（admin は別途 `allow-clear-session` も持つ）。
 - platform overlay で security/CSP/capability を上書きしない。
+- browser storage の例外は service-local `tauri-boundary.json` に exact `path` / `tokenKey` / optional organization/logout key / `reason` を記録する。manifest がない native service、未知 field、symlink、src/web 外 path、暗黙の空 allowlist は拒否する。review 済み key でも `devLogin` 外の Tauri runtime 永続化は拒否する。
 
 ## 変更時の確認
 
@@ -115,6 +126,7 @@ macOS job は Rust の固定 loopback debug origin で unsigned debug artifact �
     cargo fmt --check --manifest-path services/example_tauri_service/src-tauri/Cargo.toml
     cargo test --locked --manifest-path services/example_tauri_service/src-tauri/Cargo.toml
     cargo clippy --all-targets --manifest-path services/example_tauri_service/src-tauri/Cargo.toml -- -D warnings
+    node scripts/check-native-release.mjs example_tauri_service
     pnpm run test:traceability
     pnpm check
 

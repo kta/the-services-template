@@ -207,6 +207,7 @@ function firstStructuralDifference(actual, expected, path = 'job') {
 const NATIVE_JOB_PROFILES = {
   'macos-universal': [
     ['Check native security boundary', 'boundary'],
+    ['Check unsigned desktop release boundary', 'check-release'],
     ['Build unsigned universal debug app', 'build-macos'],
     ['Scan macOS artifact for secrets', 'verify-macos'],
   ],
@@ -327,6 +328,10 @@ test "$ndk_version" = "$ANDROID_NDK_VERSION"
         ...commonNativeSteps(),
         boundary,
         rust,
+        {
+          name: 'Check unsigned desktop release boundary',
+          run: nativeWrapperRun(directory, 'check-release'),
+        },
         {
           name: 'Install universal Rust targets',
           run: 'rustup target add aarch64-apple-darwin x86_64-apple-darwin',

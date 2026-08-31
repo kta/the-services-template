@@ -51,6 +51,8 @@ jobs:
         run: ${{ steps.trusted-node.outputs.path }} scripts/native-workflow.mjs example_tauri_service boundary
       - name: Check pinned Rust toolchain
         run: test "$(rustc --version | awk '{print $2}')" = "1.88.0"
+      - name: Check unsigned desktop release boundary
+        run: ${{ steps.trusted-node.outputs.path }} scripts/native-workflow.mjs example_tauri_service check-release
       - name: Install universal Rust targets
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - name: Check Apple build tools

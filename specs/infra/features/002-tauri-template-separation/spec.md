@@ -19,9 +19,9 @@ Web 専用サービスまで native app として扱われる CI 負荷をなく
 |---|---|---|
 | `STATIC-TPL-01` | 新サービス名だけで開始しても Web only / Web + Tauri を質問し、回答前にはコピーしない。 | `scripts/check-agent-compat.test.mjs` |
 | `STATIC-TPL-02` | Web only は `example_service` から生成し、Tauri 資産・依存・scripts を含めない。 | `scripts/check-agent-compat.test.mjs`, `scripts/check-tauri-boundary.test.mjs` |
-| `STATIC-TPL-03` | Web + Tauri は `example_tauri_service` から生成し、native transport・固定 origin・capability・platform 設定を引き継ぐ。 | `scripts/check-agent-compat.test.mjs`, `scripts/check-tauri-boundary.test.mjs` |
-| `CI-TPL-04` | 通常 PR verify で Web-only 雛形を Rust/Tauri 対象にしない。 | `scripts/check-deploy-boundary.test.mjs` |
-| `STATIC-TPL-05` | Tauri 雛形の必須 native 資産欠落・security boundary 違反を検出する。 | `scripts/check-tauri-boundary.test.mjs` |
+| `STATIC-TPL-03` | Web + Tauri は `example_tauri_service` から生成し、native transport・固定 origin・capability・platform 設定と、Web fallback の exact path/key/reason を宣言する service-local `tauri-boundary.json` を引き継いで全 identity を明示的に rename する。未知 native service に暗黙の空 storage allowlist を与えない。 | `scripts/check-agent-compat.test.mjs`, `scripts/check-tauri-boundary.test.mjs` |
+| `CI-TPL-04` | 通常 PR verify で Web-only 雛形を Rust/Tauri 対象にせず、重い artifact/release build も実行しない。catalog 登録済み protected-main manual workflow の desktop job だけが、credential/signing 無しで reviewed placeholder HTTPS origin を使う `cargo check --locked --release` を実行し、release-only build script 境界を検証する。 | `scripts/check-deploy-boundary.test.mjs`, `scripts/workflow-policy.test.mjs`, `scripts/check-native-release.test.mjs` |
+| `STATIC-TPL-05` | Tauri 雛形の必須 native 資産、service-local boundary manifest、Web/native storage 分離、release origin、security boundary の欠落・違反を検出する。 | `scripts/check-tauri-boundary.test.mjs` |
 | `STATIC-TPL-06` | Web-only 雛形への Tauri 資産・依存・scripts 混入を検出する。 | `scripts/check-tauri-boundary.test.mjs` |
 | `STATIC-TPL-07` | `deployable: false` の雛形を production build/deploy/D1/ops/admin domain binding/secret/runtime identity の全 surface から除外し、strict convention で導出した production の domain binding・required secret・`ADMIN_DOMAIN_IDENTITIES`・generated `Env`・runtime adapter を catalog の `deployable: true` domain 集合と双方向一致させる。domain 0 件では各集合を空にして reconcile を skip する。雛形 binding/key がローカル開発・test に必要な場合は production config ではなく dev/test-only config で追加する。 | `scripts/service-wiring.test.mjs`, `scripts/check-production-config.test.mjs`, `services/admin/test/sync.test.ts`, `services/admin/test/admin.integration.test.ts` |
 
@@ -37,7 +37,8 @@ Web 専用サービスまで native app として扱われる CI 負荷をなく
 - `services/example_tauri_service`: Web + Tauri のコピー元。
 - `.agents/skills/new-service/SKILL.md`: 種別質問、コピー元、選択別の作業手順。
 - CI workflow、Makefile、package scripts、Tauri boundary scripts: 対象を種別に応じて限定し、登録整合性を検査する。
-- `service-catalog.json`: production surface と admin domain binding の単一ソース。`example_service` の開発用 binding は admin の Vite dev config だけで注入し、production `wrangler.jsonc` には残さない。
+- `service-catalog.json`: production surface、登録済み local dev service 集合、admin domain binding の単一ソース。`make dev-vars` は検証済み catalog と各 regular `.dev.vars.example` から対象を導出し、admin の local RSA pair を全 domain へ配布する。`example_service` の開発用 binding は admin の Vite dev config だけで注入し、production `wrangler.jsonc` には残さない。
+- `services/<native-service>/tauri-boundary.json`: reviewed placeholder release origin と、Web browser fallback に限って許す exact storage path/key/reason の単一ソース。Tauri runtime の token persistence は manifest があっても許可しない。
 - API 契約・DB スキーマ差分: なし。既存の Zod/Hono RPC/D1 境界を維持する。
 - 却下案: Web 雛形へ Tauri overlay を後付けする方式。生成ロジックと完成形検証が複雑になるため採用しない。
 

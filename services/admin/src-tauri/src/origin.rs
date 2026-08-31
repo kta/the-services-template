@@ -1,9 +1,11 @@
 use url::{Origin, Url};
 
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 const APPROVED_RELEASE_ORIGINS: [&str; 1] = ["https://admin.example.com"];
 
 /// Parse and canonicalize the API origin embedded into the native binary.
 /// Debug accepts only HTTP loopback; release accepts one exact HTTPS origin.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
 pub fn parse(raw: &str, release: bool) -> Result<String, String> {
     let url = Url::parse(raw).map_err(|error| format!("invalid API origin: {error}"))?;
     let has_userinfo_delimiter = raw
@@ -60,6 +62,8 @@ pub fn parse(raw: &str, release: bool) -> Result<String, String> {
 /// bridge, so the production API origin is intentionally not a navigable page.
 #[allow(dead_code)]
 pub fn navigation_allowed(url: &Url, debug_origin: &str) -> bool {
+    #[cfg(not(debug_assertions))]
+    let _ = debug_origin;
     let local_asset = (url.scheme() == "tauri" && url.host_str() == Some("localhost"))
         || (matches!(url.scheme(), "http" | "https")
             && url.host_str() == Some("tauri.localhost")

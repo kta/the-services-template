@@ -59,7 +59,7 @@ admin の通常 Vite server は port 5174、example_tauri_service は port 5175 
 
 CSP は main config の app.security に置き、production の default-src self、base-uri self、object-src none、script-src self、style-src self、img-src self data、font-src self、connect-src self ipc: http://ipc.localhost だけを許可する。開発 CSP だけが inline style と固定された localhost の Vite/HMR port を追加する。LAN 全体を許可する wildcard は使わず、実機 HMR は port forwarding を優先する。直接 LAN host を使う場合は、レビュー済み devCsp にその host を個別追加してから実行し、チェック済み設定のまま `TAURI_DEV_HOST` に任意の private IP を渡して CSP を迂回しない。Rust reqwest が固定 API origin へ接続するため、固定 Worker origin を renderer の connect-src に追加する設計ではない。remote HTML/script、wildcard network source、platform overlay からの security override は許可しない。
 
-API origin は build-time の TAURI_ADMIN_API_ORIGIN として Rust compile に渡す。release build は HTTPS かつ origin 形式を必須とし、ユーザー入力、VITE_*、設定画面から変更できない。development build も HTTP の localhost/loopback origin のみを許可する。Worker secret、JWT_PRIVATE_KEY、AUTH_PEPPER、caller-specific な内部鍵はこの値に含めない。macOS の unsigned debug build は開発用 legacy Keychain、署名済み release build は app-scoped Protected Data store を使う（Protected Data の対応 OS に合わせ、admin の minimumSystemVersion は 10.15）。release 配布では Apple signing/entitlement を必ず整える。
+API origin は build-time の TAURI_ADMIN_API_ORIGIN として Rust compile に渡す。release build は HTTPS かつ origin 形式を必須とし、ユーザー入力、VITE_*、設定画面から変更できない。development build も HTTP の localhost/loopback origin のみを許可する。各 native service の reviewed placeholder origin と Web browser storage 例外は service-local `tauri-boundary.json` に置き、checker が `src-tauri/src/origin.rs` の exact allowlist と storage の exact path/key/reason を照合する。manifest がない未知 native service に暗黙の空 allowlistは与えず、reviewed key でも Tauri runtime の token persistence は許可しない。Worker secret、JWT_PRIVATE_KEY、AUTH_PEPPER、caller-specific な内部鍵はこの値に含めない。macOS の unsigned debug build は開発用 legacy Keychain、署名済み release build は app-scoped Protected Data store を使う（Protected Data の対応 OS に合わせ、admin の minimumSystemVersion は 10.15）。release 配布では Apple signing/entitlement を必ず整える。
 
 Android の Keystore provider は ndk-context を必要とする。Android platform config の beforeBuildCommand は prepare:tauri:android を必ず呼び、生成された Activity の onCreate で native bridge を初期化する。想定外の形式なら build を続けない。
 
@@ -75,14 +75,14 @@ access JWT は RS256 固定である。admin Worker だけが JWT_PRIVATE_KEY �
 | iOS | simulator / archive | TestFlight → App Store | App Store |
 | Android | debug APK + release AAB | Play internal testing → production | Google Play |
 
-CI は workflow_dispatch で unsigned/debug artifact を build・保存するだけにする。署名、notarization、TestFlight upload、Play upload、Cloudflare deploy はこの workflow で行わない。Tauri build と Cloudflare deploy は別の承認境界である。
+CI は workflow_dispatch で unsigned/debug artifact を build・保存するだけにする。macOS job はその前に manifest の reviewed placeholder HTTPS origin を使う credential/signing 無しの `cargo check --locked --release` を実行し、release-only `build.rs` の env 注入を検証する。この追加 compile cost は通常 PR verify ではなく低頻度 manual job に限定する。署名、notarization、TestFlight upload、Play upload、Cloudflare deploy はこの workflow で行わない。Tauri build と Cloudflare deploy は別の承認境界である。
 
 ## テスト戦略
 
 - TypeScript: transport の request/response filtering、Web の auth 回帰、Tauri route 選択を Vitest で検証する。
 - Rust: URL/header allowlist、response redaction、session state machine と memory store を cargo test で網羅する。
 - E2E: Web の login/route 回帰を Playwright で確認する。infrastructure-only の検証は静的 checker/unit test で確認する。
-- Build: macOS で Tauri bundle、iOS simulator、Android debug/AAB を manual workflow で作成する。実ストア署名は release checklist で確認する。
+- Build: manual workflow の macOS job で unsigned release Cargo check を通してから Tauri debug bundleを作り、iOS simulator、Android debug/AAB も作成する。実ストア署名は release checklist で確認する。
 
 ## 参照
 

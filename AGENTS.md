@@ -12,7 +12,7 @@ Cloudflare-only の SDD/TDD モノレポ **テンプレート**。**1 サービ�
 
 ## セットアップ / コマンド
 - 必要: Node ≥ 22 / pnpm 11（`mise install` でピン）。
-- `make init` — install + `.dev.vars` 生成 + 型生成 + ローカル D1 マイグレーション + seed（admin ユーザー等）。
+- `make init` — install + `.dev.vars` 生成 + 型生成 + ローカル D1 マイグレーション + seed（admin ユーザー等）。`.dev.vars` 対象は validated catalog と各 regular `.dev.vars.example` から導出し、admin の local RSA pair を全 domain へ配布する。固定 service list、手動 private-key コピー、symlink/部分 pair は許可しない。
 - dev: `make dev/<service>`（サービス単体）/ `make dev/notifier` / `make dev/all`（`Makefile` の `DEV_ALL_SERVICES` に登録した SPA+API サービスを併走。service binding が dev サーバ間でも解決される）。**1 コマンドで SPA + Worker**（`@cloudflare/vite-plugin`、実 workerd、proxy 無し）。
 - DB: スキーマ編集 → `pnpm --filter <pkg> db:generate` → `db:migrate:local`。
 - バインディング / `wrangler.jsonc` 変更後は `pnpm -r cf-typegen`。
@@ -86,7 +86,7 @@ Lefthook は開発中の早期フィードバック、CI `verify` は迂回で�
 ## エージェント固有メモ
 - **Claude Code**: 次の場合は **plan mode** で計画してから着手 — ①新サービス追加 ②DB スキーマ変更 ③ライブラリ追加・置換 ④仕様外/横断的なリファクタ ⑤認証・通知・service binding に触れる変更。
 - **リポジトリ内スキル**（`.agents/skills/`）: `check`（`pnpm check` を緑まで）/ `new-service <name>`（サービス雛形）/ `design-select`（デザイン候補を HTML でブラウザ提示→クリックで選択）。Claude Code は `.claude/skills` の symlink から同じスキルを利用する。
-- **新サービス追加時**: `.agents/skills/new-service` でコピー前に `Web only`（推奨）/ `Web + Tauri` を必ず確認する。root `Makefile` の `DEV_ALL_SERVICES` を更新し、`make init` / `make dev/<service>` / `make dev/all` でローカル開発導線を確認する。root `package.json` の test chain、CI の e2e matrix、ordered protected-production deploy chain も更新する。Rust/Tauri gate と native Make/workflow は Web + Tauri の場合だけ登録する。本番 deploy / remote migration のローカル entry point は追加せず、protected `main` の production workflow にだけ登録する。
+- **新サービス追加時**: `.agents/skills/new-service` でコピー前に `Web only`（推奨）/ `Web + Tauri` を必ず確認する。root `Makefile` の `DEV_ALL_SERVICES` を更新し、`make init` / `make dev/<service>` / `make dev/all` でローカル開発導線を確認する。root `package.json` の test chain、CI の e2e matrix、ordered protected-production deploy chain も更新する。Rust/Tauri gate と native Make/workflow は Web + Tauri の場合だけ登録し、service-local `tauri-boundary.json` の release origin と browser storage path/key/reason を全て rename/review する。本番 deploy / remote migration のローカル entry point は追加せず、protected `main` の production workflow にだけ登録する。
 - **サービス catalog**: SPA サービスの directory/package、`templateKind`、deployable/native、native artifact workflow は root `service-catalog.json` が単一ソース。SPA を持たない notifier/ops は `{ directory, package, deployable }` の `workerOnlyServices` として同 catalog に明示する。コピー直後に登録して `node scripts/service-catalog.mjs validate-repository` を通し、全 `services/*` package、dev/all・combined test・E2E・production/native CI/Make/workflow の集合を個別に hardcode しない。
 - **新規画面・見た目の大幅変更**では、コードの前に `docs/frontend/DESIGN_RULE.md` のパス 1（トークン計画）をテキストで出し、`design-select` スキルで候補 2〜3 案を見せてから実装する。
 - **新 API は当て推量しない**: Cloudflare は Claude Code の `.mcp.json` または Codex の `.codex/config.toml` にある `cloudflare-docs` MCP、ライブラリ全般は `context7` MCP（**導入している場合**。未導入ならインストール済みパッケージの型定義・公式 docs で確認）。

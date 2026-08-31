@@ -1,0 +1,11 @@
+{
+  "releaseOrigin": "https://example.example.com",
+  "browserStorage": [
+    {
+      "path": "src/web/auth/session.ts",
+      "tokenKey": "app.example_tauri_service.auth.token",
+      "organizationKey": "app.example_tauri_service.auth.org",
+      "reason": "Example Tauri browser-only development grant; the native runtime keeps access tokens in memory."
+    }
+  ]
+}

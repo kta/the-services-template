@@ -136,6 +136,11 @@ test('derives native build and verifier argv only from normalized catalog identi
     ],
     cwd: root,
   })
+  assert.deepEqual(nativeWorkflowInvocation(root, service, 'check-release', tools), {
+    command: '/reviewed/node/bin/node',
+    args: [join(root, 'scripts/check-native-release.mjs'), 'booking'],
+    cwd: root,
+  })
 })
 
 test('rebuilds the native child environment without Node or package-manager injection', () => {

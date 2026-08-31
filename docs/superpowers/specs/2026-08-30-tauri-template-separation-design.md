@@ -18,7 +18,7 @@ PR #4 と、その全コミットを含む PR #5 を `main` 上で再統合し�
 
 ### Web + Tauri
 
-`services/example_tauri_service` は Web 側のドメイン機能に加え、Tauri desktop/iOS/Android shell、許可リスト式 native transport、native auth storage、固定 release origin、capability、CSP、platform overlay を持つ独立した完成形雛形とする。
+`services/example_tauri_service` は Web 側のドメイン機能に加え、Tauri desktop/iOS/Android shell、許可リスト式 native transport、native auth storage、固定 release origin、capability、CSP、platform overlay を持つ独立した完成形雛形とする。各 native service は `tauri-boundary.json` で reviewed placeholder release origin と、Web browser fallback だけに許す exact storage path/key/reason を宣言する。checker は catalog の未知 native service に暗黙の空 allowlist を与えない。
 
 両雛形は生成後に単独で理解・検証できることを優先する。差分 overlay 方式は生成処理と検証が複雑になるため採用しない。
 
@@ -29,7 +29,7 @@ PR #4 と、その全コミットを含む PR #5 を `main` 上で再統合し�
 1. Web のみ（推奨・デフォルト）
 2. Web + Tauri
 
-回答前にサービスをコピーしてはならない。Web のみなら `services/example_service`、Web + Tauri なら `services/example_tauri_service` をコピーし、選択に固有のリネーム・検証手順を適用する。
+回答前にサービスをコピーしてはならない。Web のみなら `services/example_service`、Web + Tauri なら `services/example_tauri_service` をコピーし、選択に固有のリネーム・検証手順を適用する。Web + Tauri では `tauri-boundary.json` の release origin、storage path/key/reason もコピー先 identity へ明示的に置換する。
 
 ## CI 境界
 
@@ -38,6 +38,7 @@ PR #4 と、その全コミットを含む PR #5 を `main` 上で再統合し�
 - Web 専用サービスに `src-tauri`、Tauri dependency、Tauri package script が混入した場合は境界テストを失敗させる。
 - Tauri 対応サービスに必須の Cargo/config/capability/origin/transport が欠けた場合も境界テストを失敗させる。
 - macOS/iOS/Android の重い artifact build は通常 PR の必須 verify に含めず、手動 workflow または明示された対象変更時の導線に限定する。
+- protected-main の手動 native workflow は、desktop job で reviewed placeholder HTTPS origin を manifest から読み、credential/signing 無しの `cargo check --locked --release` を実行して `build.rs` の release-only env 注入を検証する。通常 PR へこの追加コンパイル負荷を載せない。
 - CI、Makefile、検査スクリプト間の対象一覧は、現行構造を崩さない範囲で単一ソース化し、登録漏れをテストする。
 
 ## テスト戦略
@@ -49,6 +50,8 @@ TDD で、先に次の失敗を確認する。
 - 新サービススキルが種別質問とコピー元の対応を欠く場合に失敗する。
 - CI が Web 専用テンプレートへ Rust/Tauri 検査を適用する場合に失敗する。
 - Tauri 対象の workflow・Make target・package script の登録が不整合なら失敗する。
+- 第3 native service の reviewed Web `sessionStorage` fallback は通り、同じ key でも Tauri runtime 永続化経路は失敗する。
+- release check が reviewed origin、`--release`、credential-free manual workflow のいずれかを欠けば失敗する。
 
 対象 unit/integration、両 example の E2E、Rust fmt/test/clippy、Tauri static build、最後に `pnpm check` を実行する。実時刻、認証権限、テナント分離、best-effort fallback は既存の境界テストを維持する。
 

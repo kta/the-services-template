@@ -42,6 +42,7 @@
 - Tauriのnative requestはRust `api_request` commandだけを使う。`/api/`、GET/POST/PATCH/DELETE、`authorization`/`content-type`以外を許可しない。外部origin、redirect、`set-cookie`をrendererへ渡さない。
 - Tauri release originは`TAURI_EXAMPLE_TAURI_SERVICE_API_ORIGIN`からbuild-timeに固定し、HTTPS以外を拒否する。secret、runtime設定画面、任意の`VITE_*` originは使わない。
 - WebのsessionStorageは`app.example_tauri_service.auth.*`のdev login fallbackだけで使う。Tauriではaccess tokenとorganization IDをmemory-onlyにし、再起動時の自動復元を実装しない。
+- browser storage の例外と placeholder release origin は service-local `tauri-boundary.json` に exact path/key/reason として置く。コピー時は全 identity を明示的に rename し、暗黙の空 allowlist や Tauri runtime 永続化へ置換しない。
 - access JWT は RS256。admin が JWT_PRIVATE_KEY で署名し、この domain Worker は JWT_PUBLIC_KEY だけで検証する。AUTH_DEV_PRIVATE_KEY と AUTH_DEV_GRANT はローカル専用で、本番へ持ち込まない。
 - Tauri の開発は `make dev/example_tauri_service/tauri`、static bundle は `make build/example_tauri_service/tauri`。通常 Web の `make dev/example_tauri_service` と同じ 5175 port を共有するため同時に起動しない。実機 HMR は `TAURI_DEV_HOST` と必要な port forwarding を使う。
 - 色、font、radiusは `@app/ui` とtheme token経由だけを使う。
@@ -64,6 +65,7 @@ pnpm --filter @app/example_tauri_service cf-typegen
 pnpm --filter @app/example_tauri_service db:generate
 pnpm --filter @app/example_tauri_service db:migrate:local
 cargo test --manifest-path services/example_tauri_service/src-tauri/Cargo.toml
+node scripts/check-native-release.mjs example_tauri_service
 ```
 
 通常のローカル起動はルートで `make dev/example_tauri_service`。Tauri desktop は `make dev/example_tauri_service/tauri`、adminとのbinding連携も確認する場合は `make dev/all`。本番 deploy は行わず、fork 後の実サービスだけに protected main / production environment の deploy 設定を追加する。

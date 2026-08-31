@@ -322,6 +322,9 @@ export function nativeWorkflowInvocation(workspaceRoot, service, action, options
     case 'boundary':
       invocation = nodeScript(root, options, 'check-tauri-boundary.mjs')
       break
+    case 'check-release':
+      invocation = nodeScript(root, options, 'check-native-release.mjs', service.directory)
+      break
     case 'build-macos':
       invocation = tauriArgs(
         service,

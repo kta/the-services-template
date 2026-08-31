@@ -5,47 +5,10 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 
 import { fileURLToPath } from 'node:url'
 import * as ts from 'typescript/unstable/ast'
 import { API as TypeScriptAPI } from 'typescript/unstable/sync'
+import { validateNativeBoundaryManifest } from './native-boundary-manifest.mjs'
 import { forbiddenSecretMarkersInText } from './secret-boundary.mjs'
 import { validateServiceCatalog } from './service-catalog.mjs'
 
-const TAURI_TARGETS = [
-  {
-    name: 'admin',
-    webDirectory: 'services/admin/src/web',
-    tauriDirectory: 'services/admin/src-tauri',
-    tauriConfig: 'services/admin/src-tauri/tauri.conf.json',
-    capabilitiesDirectory: 'services/admin/src-tauri/capabilities',
-    devPort: 5174,
-    storageAllowlist: new Map([
-      [
-        'services/admin/src/web/auth/session.ts',
-        {
-          key: 'app.admin.dev.token',
-          logoutIntentKey: 'app.admin.logout.intent',
-          reason: 'development-only fallback token; native sessions never use browser storage',
-        },
-      ],
-    ]),
-  },
-  {
-    name: 'example_tauri_service',
-    webDirectory: 'services/example_tauri_service/src/web',
-    tauriDirectory: 'services/example_tauri_service/src-tauri',
-    tauriConfig: 'services/example_tauri_service/src-tauri/tauri.conf.json',
-    capabilitiesDirectory: 'services/example_tauri_service/src-tauri/capabilities',
-    devPort: 5175,
-    storageAllowlist: new Map([
-      [
-        'services/example_tauri_service/src/web/auth/session.ts',
-        {
-          key: 'app.example_tauri_service.auth.token',
-          organizationKey: 'app.example_tauri_service.auth.org',
-          reason: 'Web-only dev session; native sessions never use browser storage',
-        },
-      ],
-    ]),
-  },
-]
 const SOURCE_EXTENSIONS = new Set(['.cjs', '.cts', '.js', '.jsx', '.mjs', '.mts', '.ts', '.tsx'])
 const FORBIDDEN_WEB_PLUGIN_IMPORT =
   /(?:\bimport\s*(?:\(\s*)?|\bfrom\s+|\brequire\s*\(\s*)['"](@tauri-apps\/plugin-[^'"]+)['"]/g
@@ -1157,8 +1120,8 @@ async function validateTemplateSeparation(workspace, services) {
   return violations
 }
 
-async function dynamicTauriTarget(workspace, service) {
-  const configPath = resolve(workspace, `services/${service}/src-tauri/tauri.conf.json`)
+async function dynamicTauriTarget(workspace, service, manifest) {
+  const configPath = resolve(workspace, `services/${service.directory}/src-tauri/tauri.conf.json`)
   let devPort = 0
   try {
     const config = await readJson(configPath)
@@ -1174,28 +1137,26 @@ async function dynamicTauriTarget(workspace, service) {
     // keeps the CSP check fail closed until that config is repaired.
   }
   return {
-    name: service,
-    webDirectory: `services/${service}/src/web`,
-    tauriDirectory: `services/${service}/src-tauri`,
-    tauriConfig: `services/${service}/src-tauri/tauri.conf.json`,
-    capabilitiesDirectory: `services/${service}/src-tauri/capabilities`,
+    name: service.directory,
+    webDirectory: `services/${service.directory}/src/web`,
+    tauriDirectory: `services/${service.directory}/src-tauri`,
+    tauriConfig: `services/${service.directory}/src-tauri/tauri.conf.json`,
+    capabilitiesDirectory: `services/${service.directory}/src-tauri/capabilities`,
     devPort,
-    // A newly copied native shell must explicitly review every browser
-    // storage write; inheriting the example dev allowlist would be unsafe.
-    storageAllowlist: new Map(),
+    releaseOrigin: manifest?.releaseOrigin,
+    storageAllowlist: manifest?.storageAllowlist ?? new Map(),
   }
 }
 
 async function catalogTauriTargets(workspace, services) {
-  const known = new Map(TAURI_TARGETS.map((target) => [target.name, target]))
-  return Promise.all(
-    services
-      .filter((service) => service.native)
-      .map(
-        (service) =>
-          known.get(service.directory) ?? dynamicTauriTarget(workspace, service.directory),
-      ),
-  )
+  const targets = []
+  const violations = []
+  for (const service of services.filter((candidate) => candidate.native)) {
+    const result = await validateNativeBoundaryManifest(workspace, service)
+    violations.push(...result.violations)
+    targets.push(await dynamicTauriTarget(workspace, service, result.manifest))
+  }
+  return { targets, violations }
 }
 
 async function validateTarget(workspace, target) {
@@ -1258,6 +1219,19 @@ async function validateTarget(workspace, target) {
     checkTauriConfigPlugins(violations, target.tauriConfig, config)
   } else if (!(await pathExists(resolve(workspace, target.tauriConfig)))) {
     violations.push(`${target.tauriConfig}: required Tauri config file is missing`)
+  }
+
+  if (target.releaseOrigin) {
+    const originPath = `${target.tauriDirectory}/src/origin.rs`
+    if (await validatePathType(workspace, originPath, 'file', violations)) {
+      const source = await readFile(resolve(workspace, originPath), 'utf8')
+      const declaration = `const APPROVED_RELEASE_ORIGINS: [&str; 1] = ["${target.releaseOrigin}"];`
+      if (!source.includes(declaration)) {
+        violations.push(
+          `${originPath}: APPROVED_RELEASE_ORIGINS must exactly match the reviewed ${target.releaseOrigin}`,
+        )
+      }
+    }
   }
 
   const capabilitiesRoot = resolve(workspace, target.capabilitiesDirectory)
@@ -1346,12 +1320,15 @@ async function validateTauriBoundary(root = process.cwd()) {
   if (catalog.violations.length > 0) {
     return catalog.violations.map((violation) => `service catalog: ${violation}`).sort()
   }
-  const targets = await catalogTauriTargets(workspace, catalog.services)
+  const { targets, violations: manifestViolations } = await catalogTauriTargets(
+    workspace,
+    catalog.services,
+  )
   const [templateViolations, targetViolations] = await Promise.all([
     validateTemplateSeparation(workspace, catalog.services),
     Promise.all(targets.map((target) => validateTarget(workspace, target))),
   ])
-  return [...templateViolations, ...targetViolations.flat()].sort()
+  return [...manifestViolations, ...templateViolations, ...targetViolations.flat()].sort()
 }
 
 export { validateTauriBoundary }

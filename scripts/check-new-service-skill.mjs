@@ -66,6 +66,14 @@ function validateNewServiceSkill(source) {
   if (/Web \+ Tauri[^\n]*services\/example_service(?![_a-z])/i.test(source)) {
     violations.push('must not map Web + Tauri to services/example_service')
   }
+  if (!/copy[^\n]*rename[^\n]*tauri-boundary\.json/i.test(source)) {
+    violations.push('must copy and rename the service-local tauri-boundary.json manifest')
+  }
+  for (const field of ['releaseOrigin', 'path', 'tokenKey', 'reason']) {
+    if (!new RegExp(`tauri-boundary\\.json[^\\n]*${field}`, 'i').test(source)) {
+      violations.push(`must explicitly review tauri-boundary.json ${field}`)
+    }
+  }
 
   return violations
 }

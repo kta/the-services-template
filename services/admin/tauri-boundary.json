@@ -1,0 +1,11 @@
+{
+  "releaseOrigin": "https://admin.example.com",
+  "browserStorage": [
+    {
+      "path": "src/web/auth/session.ts",
+      "tokenKey": "app.admin.dev.token",
+      "logoutIntentKey": "app.admin.logout.intent",
+      "reason": "Admin browser development grant and logout tombstone; native authentication is never persisted here."
+    }
+  ]
+}

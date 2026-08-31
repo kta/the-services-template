@@ -69,7 +69,9 @@ admin の Tauri 開発は `pnpm --filter @app/admin tauri dev`、または
 `make dev/admin/tauri`（target を追加した fork で利用）を使う。通常 Vite は
 5174 を `strictPort` で固定し、実機 HMR は `TAURI_DEV_HOST` と必要な
 port forwarding を使う。Tauri shell に Worker secret や `JWT_PRIVATE_KEY` を
-持ち込まない。
+持ち込まない。browser storage 例外と placeholder release origin は service-local
+`tauri-boundary.json` の exact path/key/reason だけを正とし、manual native workflow の
+`node scripts/check-native-release.mjs admin` で credential/signing 無しの release build script を検証する。
 
 ## 必須テスト
 

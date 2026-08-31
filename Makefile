@@ -18,7 +18,7 @@ init:
 	$(MAKE) db/migrate/local
 	$(MAKE) db/seed/local
 
-## dev-vars: copy each service's .dev.vars.example to .dev.vars (no overwrite)
+## dev-vars: copy catalog service examples + initialize one local RSA pair (fail closed)
 dev-vars:
 	@node scripts/prepare-dev-vars.mjs
 

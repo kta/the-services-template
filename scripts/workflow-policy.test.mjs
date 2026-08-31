@@ -288,6 +288,8 @@ jobs:
         run: ${trustedNativeNode} scripts/native-workflow.mjs booking boundary
       - name: Check pinned Rust toolchain
         run: test "$(rustc --version | awk '{print $2}')" = "1.88.0"
+      - name: Check unsigned desktop release boundary
+        run: ${trustedNativeNode} scripts/native-workflow.mjs booking check-release
       - name: Install universal Rust targets
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - name: Check Apple build tools
@@ -338,6 +340,28 @@ test('native workflow policy validates actual trigger, job, step, and pin nodes'
       nativeService,
     ).join('\n'),
     /only workflow_dispatch/,
+  )
+})
+
+test('native workflow policy requires the unsigned release build.rs check in the macOS job', () => {
+  const source = nativeWorkflow()
+  const withoutMissingJobs = (violations) =>
+    violations.filter((violation) => !violation.includes('native workflow job set'))
+  assert.deepEqual(
+    withoutMissingJobs(
+      inspectNativeWorkflowPolicy('.github/workflows/booking.yml', source, nativeService),
+    ),
+    [],
+  )
+  const removed = source.replace(
+    `      - name: Check unsigned desktop release boundary\n        run: ${trustedNativeNode} scripts/native-workflow.mjs booking check-release\n`,
+    '',
+  )
+  assert.match(
+    withoutMissingJobs(
+      inspectNativeWorkflowPolicy('.github/workflows/booking.yml', removed, nativeService),
+    ).join('\n'),
+    /exact native wrapper sequence|reviewed exact job profile/i,
   )
 })
 
