@@ -23,6 +23,10 @@ import { fileURLToPath } from 'node:url'
 import { effectiveValues, parseJsonc } from './check-production-config.mjs'
 import { productionEnvironment, productionStaticEnvironment } from './production-environment.mjs'
 import { runProductionWrangler } from './production-wrangler.mjs'
+import {
+  loadServiceRepositoryCatalog,
+  requireCatalogDeployableService,
+} from './service-catalog.mjs'
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const CONFIRMATION = 'RESTORE_PRODUCTION'
@@ -351,7 +355,8 @@ function validatePreRestoreKey(value, service) {
   return true
 }
 
-export function validateRestoreTarget(value, configuredTargets) {
+export function validateRestoreTarget(value, configuredTargets, catalog) {
+  requireCatalogDeployableService(catalog, value, { spa: true })
   if (!TARGET_PATTERN.test(value) || !configuredTargets.includes(value)) {
     throw new Error('target is not a configured backup target')
   }
@@ -592,13 +597,20 @@ function restoreRuntime(dependencies = {}) {
     environment: dependencies.environment ?? process.env,
     nowMs: dependencies.nowMs ?? Date.now(),
     serviceConfig: dependencies.serviceConfig ?? serviceConfig,
+    loadServiceRepositoryCatalog:
+      dependencies.loadServiceRepositoryCatalog ?? loadServiceRepositoryCatalog,
     execFileSync: dependencies.execFileSync ?? execFileSync,
     runProductionWrangler: dependencies.runProductionWrangler ?? runProductionWrangler,
     logger: dependencies.logger ?? console,
   }
 }
 
-function runRestorePreflight(service, { checkRemoteSecrets = false } = {}, dependencies = {}) {
+async function runRestorePreflight(
+  operation,
+  options,
+  { checkRemoteSecrets = false } = {},
+  dependencies = {},
+) {
   const runtime = restoreRuntime(dependencies)
   // Establish checkout trust before any repository config or credential-bearing
   // environment value is inspected. Restore is a production state mutation and
@@ -612,13 +624,19 @@ function runRestorePreflight(service, { checkRemoteSecrets = false } = {}, depen
       stdio: 'inherit',
     },
   )
+  const catalog = await runtime.loadServiceRepositoryCatalog(root)
+  const selection = authorizeRestoreSelection(operation, options, catalog)
   const ops = runtime.serviceConfig('ops')
-  const admin = runtime.serviceConfig('admin')
-  const reviewedDatabaseIds = { admin: admin.databaseId }
   for (const target of ops.backupTargets) {
-    if (target === 'admin') continue
-    reviewedDatabaseIds[target] = runtime.serviceConfig(target).databaseId
+    validateRestoreTarget(target, ops.backupTargets, catalog)
   }
+  validateRestoreTarget(selection.target, ops.backupTargets, catalog)
+  const targetConfigs = new Map(
+    ops.backupTargets.map((target) => [target, runtime.serviceConfig(target)]),
+  )
+  const reviewedDatabaseIds = Object.fromEntries(
+    [...targetConfigs].map(([target, config]) => [target, config.databaseId]),
+  )
   validateRestoreDatabaseBindings(ops.databaseIds, reviewedDatabaseIds)
   validateRestoreCloudflareAccount(ops.accountId, runtime.environment)
   validateRestoreSigningPublicKey(
@@ -628,7 +646,7 @@ function runRestorePreflight(service, { checkRemoteSecrets = false } = {}, depen
   const childEnv = productionEnvironment(runtime.environment)
   runtime.execFileSync(
     process.execPath,
-    [join(root, 'scripts/check-production-config.mjs'), service],
+    [join(root, 'scripts/check-production-config.mjs'), selection.service],
     {
       cwd: root,
       env: childEnv,
@@ -643,7 +661,7 @@ function runRestorePreflight(service, { checkRemoteSecrets = false } = {}, depen
   if (checkRemoteSecrets) {
     runtime.execFileSync(
       process.execPath,
-      [join(root, 'scripts/check-production-secrets.mjs'), service],
+      [join(root, 'scripts/check-production-secrets.mjs'), selection.service],
       {
         cwd: root,
         env: childEnv,
@@ -651,7 +669,14 @@ function runRestorePreflight(service, { checkRemoteSecrets = false } = {}, depen
       },
     )
   }
-  return childEnv
+  return {
+    catalog,
+    childEnv,
+    ops,
+    service: selection.service,
+    target: selection.target,
+    targetConfig: targetConfigs.get(selection.target),
+  }
 }
 
 function runWrangler(service, args, childEnv, dependencies = {}) {
@@ -864,6 +889,24 @@ export function validateRestoreOperationOptions(operation, options) {
   return true
 }
 
+/** Resolve every restore service/target from the validated catalog. */
+export function authorizeRestoreSelection(operation, options, catalog) {
+  validateRestoreOperationOptions(operation, options)
+  if (operation === 'download-backup') {
+    requireCatalogDeployableService(catalog, 'ops')
+    const target = options['--target'] ?? 'admin'
+    requireCatalogDeployableService(catalog, target, { spa: true })
+    return { service: 'ops', target }
+  }
+
+  const service = options['--service'] ?? 'admin'
+  requireCatalogDeployableService(catalog, service, { spa: true })
+  const target = operation === 'import-backup' ? (options['--target'] ?? service) : service
+  requireCatalogDeployableService(catalog, target, { spa: true })
+  if (target !== service) throw new Error('restore target must match the selected service')
+  return { service, target }
+}
+
 function requireOption(options, name) {
   const value = options[name]
   if (typeof value !== 'string' || value.length === 0) throw new Error(`${name} is required`)
@@ -872,15 +915,14 @@ function requireOption(options, name) {
 
 export async function runRestoreCli(argv, dependencies = {}) {
   const runtime = restoreRuntime(dependencies)
-  const getServiceConfig = runtime.serviceConfig
   const wrangler = (service, args, childEnv) => runWrangler(service, args, childEnv, runtime)
   const wranglerJson = (service, args, childEnv) =>
     runWranglerJson(service, args, childEnv, runtime)
   const [operation, ...rawArgs] = argv
   const options = parseRestoreOptions(rawArgs)
   validateRestoreOperationOptions(operation, options)
-  const service = options['--service'] ?? 'admin'
-  if (!SERVICE_PATTERN.test(service)) throw new Error('invalid service name')
+  const requestedService = options['--service'] ?? 'admin'
+  if (!SERVICE_PATTERN.test(requestedService)) throw new Error('invalid service name')
 
   if (DESTRUCTIVE_OPERATIONS.has(operation)) {
     validateRestoreConfirmation(requireOption(options, '--confirm'))
@@ -889,14 +931,10 @@ export async function runRestoreCli(argv, dependencies = {}) {
   // This is the sole CLI preflight. It proves checkout trust before reading
   // repository config, validates the reviewed account/key bindings, and runs
   // the shared production config and private-R2 checks for every operation.
-  const childEnv = runRestorePreflight(
-    operation === 'download-backup' ? 'ops' : service,
-    {},
-    runtime,
-  )
+  const preflight = await runRestorePreflight(operation, options, {}, runtime)
+  const { catalog, childEnv, ops, service, target, targetConfig: config } = preflight
 
   if (operation === 'download-backup') {
-    const target = options['--target'] ?? 'admin'
     const key = requireOption(options, '--key')
     validateBackupKey(key, target)
     if (key === 'latest.json' && options['--sha256']) {
@@ -904,11 +942,9 @@ export async function runRestoreCli(argv, dependencies = {}) {
     }
     const expectedSha =
       key === 'latest.json' ? undefined : validateRestoreSha256(options['--sha256'])
-    const ops = getServiceConfig('ops')
     if (!ops.bucket) throw new Error('configured backup bucket is missing')
-    validateRestoreTarget(target, ops.backupTargets)
-    const targetConfig = getServiceConfig(target)
-    if (!targetConfig.databaseName || !targetConfig.databaseId) {
+    validateRestoreTarget(target, ops.backupTargets, catalog)
+    if (!config.databaseName || !config.databaseId) {
       throw new Error('configured backup target database is missing')
     }
     const signingPublicKey = asString(runtime.environment.BACKUP_SIGNING_PUBLIC_KEY)
@@ -921,7 +957,7 @@ export async function runRestoreCli(argv, dependencies = {}) {
       const manifestEntry =
         key === 'latest.json'
           ? undefined
-          : downloadLatestManifest(ops, childEnv, target, targetConfig, signingPublicKey, wrangler)
+          : downloadLatestManifest(ops, childEnv, target, config, signingPublicKey, wrangler)
       if (manifestEntry && expectedSha && manifestEntry.sha256 !== expectedSha) {
         throw new Error('requested backup SHA-256 does not match the reviewed manifest')
       }
@@ -943,7 +979,7 @@ export async function runRestoreCli(argv, dependencies = {}) {
           JSON.parse(readFileSync(staged.path, 'utf8')),
           target,
           ops.accountId,
-          targetConfig.databaseId,
+          config.databaseId,
           { signingPublicKey },
         )
       } else if (expectedSha && (await sha256File(staged.path)) !== expectedSha) {
@@ -957,7 +993,6 @@ export async function runRestoreCli(argv, dependencies = {}) {
     return
   }
 
-  const config = getServiceConfig(service)
   if (!config.databaseName) throw new Error('configured D1 database name is missing')
   if (operation === 'time-travel-info') {
     verifyRestoreDatabase(service, config.databaseName, config.databaseId, childEnv, wranglerJson)
@@ -983,7 +1018,6 @@ export async function runRestoreCli(argv, dependencies = {}) {
       wrangler,
       config.databaseId,
     )
-    const ops = getServiceConfig('ops')
     if (!ops.bucket) throw new Error('configured backup bucket is missing')
     const remotePreRestoreKey = await retainPreRestoreArtifact(
       preRestore,
@@ -1039,12 +1073,8 @@ export async function runRestoreCli(argv, dependencies = {}) {
     const databaseId = validateRestoreDatabaseId(requireOption(options, '--database-id'))
     const file = validateInputFile(requireOption(options, '--file'))
     const expectedSha = validateRestoreSha256(requireOption(options, '--sha256'))
-    const ops = getServiceConfig('ops')
-    const target = options['--target'] ?? service
-    validateRestoreTarget(target, ops.backupTargets)
-    if (target !== service) throw new Error('restore target must match the selected service')
-    const targetConfig = getServiceConfig(target)
-    if (!targetConfig.databaseId) throw new Error('configured restore target database is missing')
+    validateRestoreTarget(target, ops.backupTargets, catalog)
+    if (!config.databaseId) throw new Error('configured restore target database is missing')
     verifyRestoreDatabase(service, database, databaseId, childEnv, wranglerJson)
     const manifestFile = validateManifestInputFile(requireOption(options, '--manifest'))
     const manifest = JSON.parse(readFileSync(manifestFile, 'utf8'))
@@ -1057,7 +1087,7 @@ export async function runRestoreCli(argv, dependencies = {}) {
       ops,
       childEnv,
       target,
-      targetConfig,
+      config,
       signingPublicKey,
       wrangler,
     )
@@ -1065,7 +1095,7 @@ export async function runRestoreCli(argv, dependencies = {}) {
       manifest,
       target,
       ops.accountId,
-      targetConfig.databaseId,
+      config.databaseId,
       remoteProvenance,
       { key: requestedKey, sha256: expectedSha, signingPublicKey },
     )

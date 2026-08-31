@@ -14,6 +14,7 @@ import { basename, join } from 'node:path'
 import test from 'node:test'
 import * as restoreCli from './restore-d1.mjs'
 import {
+  authorizeRestoreSelection,
   canonicalJson,
   createPreRestoreArtifact,
   parseRestoreOptions,
@@ -36,6 +37,7 @@ import {
   validateRestoreTimestamp,
   verifyRestoreDatabase,
 } from './restore-d1.mjs'
+import { loadServiceRepositoryCatalog } from './service-catalog.mjs'
 
 const { privateKey: manifestPrivateKey, publicKey: manifestPublicKey } = generateKeyPairSync(
   'rsa',
@@ -44,6 +46,7 @@ const { privateKey: manifestPrivateKey, publicKey: manifestPublicKey } = generat
   },
 )
 const manifestPublicKeyPem = manifestPublicKey.export({ type: 'spki', format: 'pem' })
+const repositoryCatalog = await loadServiceRepositoryCatalog(process.cwd())
 
 function signedManifest(manifest) {
   const signer = createSign('RSA-SHA256')
@@ -238,8 +241,11 @@ test('rejects unsafe restore values before any command is built', () => {
     '01234567-89ab-4cde-8123-456789abcdef',
   )
   assert.throws(() => validateRestoreDatabaseId('admin-restore'), /reviewed UUID/)
-  assert.equal(validateRestoreTarget('admin', ['admin']), true)
-  assert.throws(() => validateRestoreTarget('domain', ['admin']), /configured backup target/)
+  assert.equal(validateRestoreTarget('admin', ['admin'], repositoryCatalog), true)
+  assert.throws(
+    () => validateRestoreTarget('domain', ['admin'], repositoryCatalog),
+    /configured backup target|catalog deployable/,
+  )
   assert.equal(
     validateRestoreSha256('BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD'),
     'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
@@ -256,6 +262,37 @@ test('rejects unsafe restore values before any command is built', () => {
     /exactly match/,
   )
   assert.throws(() => validateRestoreCloudflareAccount('account-a', {}), /exactly match/)
+})
+
+test('pure restore selection rejects non-deployable, unknown, and worker-only services for every operation', () => {
+  const operations = [
+    ['time-travel-info', (service) => ({ '--service': service })],
+    ['time-travel-restore', (service) => ({ '--service': service })],
+    ['export-before-restore', (service) => ({ '--service': service })],
+    ['download-backup', (service) => ({ '--target': service })],
+    ['create-restore-db', (service) => ({ '--service': service })],
+    ['import-backup', (service) => ({ '--service': service, '--target': service })],
+  ]
+  for (const service of [
+    'example_service',
+    'example_tauri_service',
+    'unknown_service',
+    'notifier',
+    'ops',
+  ]) {
+    assert.throws(
+      () => validateRestoreTarget(service, [service], repositoryCatalog),
+      /catalog deployable/i,
+      `${service} must not be a production D1 restore target`,
+    )
+    for (const [operation, options] of operations) {
+      assert.throws(
+        () => authorizeRestoreSelection(operation, options(service), repositoryCatalog),
+        /catalog deployable/i,
+        `${operation} must reject ${service}`,
+      )
+    }
+  }
 })
 
 test('restore preflight binds ops database ids and public key to reviewed values', () => {
@@ -696,6 +733,170 @@ test('every CLI operation reaches checkout, config, R2 preflight, and its fixed 
       }
     } finally {
       rmSync(directory, { recursive: true, force: true })
+    }
+  }
+})
+
+test('every CLI operation rejects non-deployable, unknown, and worker-only services immediately after the checkout guard', async (t) => {
+  const accountId = '0123456789abcdef0123456789abcdef'
+  const adminDatabaseId = '01234567-89ab-4cde-8123-456789abcdef'
+  const selectedDatabaseId = '11234567-89ab-4cde-8123-456789abcdef'
+  const sha256 = 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
+  const invalidServices = [
+    'example_service',
+    'example_tauri_service',
+    'unknown_service',
+    'notifier',
+    'ops',
+  ]
+  const operations = [
+    {
+      name: 'time-travel-info',
+      argv: (service) => ['time-travel-info', '--service', service],
+    },
+    {
+      name: 'time-travel-restore',
+      argv: (service) => [
+        'time-travel-restore',
+        '--service',
+        service,
+        '--timestamp',
+        '2026-08-22T00:00:00.000Z',
+        '--confirm',
+        'RESTORE_PRODUCTION',
+      ],
+    },
+    {
+      name: 'export-before-restore',
+      argv: (service, directory) => [
+        'export-before-restore',
+        '--service',
+        service,
+        '--output',
+        join(directory, `${service}.sql`),
+        '--confirm',
+        'RESTORE_PRODUCTION',
+      ],
+    },
+    {
+      name: 'download-backup',
+      argv: (service, directory) => [
+        'download-backup',
+        '--target',
+        service,
+        '--key',
+        `${service}/2026-08-22T00-00-00.sql`,
+        '--sha256',
+        sha256,
+        '--output',
+        join(directory, `${service}.sql`),
+        '--confirm',
+        'RESTORE_PRODUCTION',
+      ],
+    },
+    {
+      name: 'create-restore-db',
+      argv: (service) => [
+        'create-restore-db',
+        '--service',
+        service,
+        '--database',
+        `${service}-restore`,
+        '--confirm',
+        'RESTORE_PRODUCTION',
+      ],
+    },
+    {
+      name: 'import-backup',
+      argv: (service, directory) => [
+        'import-backup',
+        '--service',
+        service,
+        '--database',
+        `${service}-restore`,
+        '--database-id',
+        selectedDatabaseId,
+        '--target',
+        service,
+        '--key',
+        `${service}/2026-08-22T00-00-00.sql`,
+        '--sha256',
+        sha256,
+        '--file',
+        join(directory, 'restore.sql'),
+        '--manifest',
+        join(directory, 'latest.json'),
+        '--confirm',
+        'RESTORE_PRODUCTION',
+      ],
+    },
+  ]
+
+  for (const operation of operations) {
+    for (const service of invalidServices) {
+      await t.test(`${operation.name}: ${service}`, async () => {
+        const directory = realpathSync(
+          mkdtempSync(join(tmpdir(), `restore-catalog-${operation.name}-${service}-`)),
+        )
+        chmodSync(directory, 0o700)
+        writeFileSync(join(directory, 'restore.sql'), '-- unreachable input\n', { mode: 0o600 })
+        writeFileSync(join(directory, 'latest.json'), '{}\n', { mode: 0o600 })
+        const events = []
+        try {
+          await assert.rejects(
+            () =>
+              restoreCli.runRestoreCli(operation.argv(service, directory), {
+                environment: {
+                  PATH: process.env.PATH,
+                  CLOUDFLARE_API_TOKEN: 'restore-operator-token',
+                  CLOUDFLARE_ACCOUNT_ID: accountId,
+                  BACKUP_SIGNING_PUBLIC_KEY: manifestPublicKeyPem,
+                },
+                nowMs: Date.parse('2026-08-28T00:00:00.000Z'),
+                async loadServiceRepositoryCatalog() {
+                  events.push('catalog')
+                  return repositoryCatalog
+                },
+                serviceConfig(requestedService) {
+                  events.push(`config:${requestedService}`)
+                  if (requestedService === 'ops') {
+                    return {
+                      databaseName: 'ops',
+                      databaseId: selectedDatabaseId,
+                      accountId,
+                      bucket: 'private-backups',
+                      backupTargets: [service],
+                      databaseIds: { [service]: selectedDatabaseId },
+                      signingPublicKey: manifestPublicKeyPem,
+                    }
+                  }
+                  return {
+                    databaseName: requestedService,
+                    databaseId: requestedService === 'admin' ? adminDatabaseId : selectedDatabaseId,
+                    accountId,
+                    bucket: '',
+                    backupTargets: [],
+                    databaseIds: {},
+                    signingPublicKey: '',
+                  }
+                },
+                execFileSync(_command, args) {
+                  events.push(`preflight:${basename(args[0])}`)
+                },
+                runProductionWrangler() {
+                  events.push('wrangler')
+                  throw new Error('Wrangler must not run for an unauthorized restore target')
+                },
+                logger: { log() {}, error() {} },
+              }),
+            /catalog deployable/i,
+          )
+          assert.deepEqual(events, ['preflight:require-production-provisioning.mjs', 'catalog'])
+          assert.equal(existsSync(join(directory, `${service}.sql`)), false)
+        } finally {
+          rmSync(directory, { recursive: true, force: true })
+        }
+      })
     }
   }
 })

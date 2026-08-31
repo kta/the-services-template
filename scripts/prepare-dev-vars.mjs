@@ -203,9 +203,22 @@ function validateConfiguredPair(paths, domainTargets) {
         throw new Error(`RSA key pair mismatch: ${target.directory} dev key`)
       }
     }
+    return { privateKey: adminPrivate, publicKey: adminPublic }
   } catch (error) {
     throw new Error(`local RSA settings are malformed or mismatched: ${error.message}`)
   }
+}
+
+function keyState(source, names, directory) {
+  const values = Object.fromEntries(names.map((name) => [name, readValue(source, name)]))
+  const configuredCount = Object.values(values).filter(Boolean).length
+  if (configuredCount !== 0 && configuredCount !== names.length) {
+    if (names.length === 2) {
+      throw new Error(`${directory} local RSA settings must be both empty or both set`)
+    }
+    throw new Error(`all local RSA settings for ${directory} must be either empty or set`)
+  }
+  return { configured: configuredCount === names.length }
 }
 
 export async function prepareDevVars(projectRoot) {
@@ -251,34 +264,40 @@ export async function prepareDevVars(projectRoot) {
     for (const name of DOMAIN_KEY_NAMES) requireVariable(entry.source, name, target.relativePath)
   }
 
-  const keyFields = [
-    ...ADMIN_KEY_NAMES.map((name) => [ADMIN_DIRECTORY, name]),
-    ...domainTargets.flatMap((target) => DOMAIN_KEY_NAMES.map((name) => [target.directory, name])),
-  ]
-  const configured = keyFields.map(([directory, name]) =>
-    Boolean(readValue(paths.get(directory).source, name)),
+  const adminState = keyState(admin.source, ADMIN_KEY_NAMES, ADMIN_DIRECTORY)
+  const domainStates = new Map(
+    domainTargets.map((target) => {
+      const entry = paths.get(target.directory)
+      return [target.directory, keyState(entry.source, DOMAIN_KEY_NAMES, target.directory)]
+    }),
   )
-  if (configured.some(Boolean) && !configured.every(Boolean)) {
-    throw new Error(
-      'all local RSA settings must be either empty or set; clear the partial pair and retry',
-    )
-  }
-  if (configured.every(Boolean)) {
-    validateConfiguredPair(paths, domainTargets)
-    return
+  const configuredDomainTargets = domainTargets.filter(
+    (target) => domainStates.get(target.directory).configured,
+  )
+  if (!adminState.configured && configuredDomainTargets.length > 0) {
+    throw new Error('admin local RSA settings must be set before domain RSA settings')
   }
 
-  const { privateKey, publicKey } = generateLocalPair()
+  const { privateKey, publicKey } = adminState.configured
+    ? validateConfiguredPair(paths, configuredDomainTargets)
+    : generateLocalPair()
+  const unconfiguredDomainTargets = domainTargets.filter(
+    (target) => !domainStates.get(target.directory).configured,
+  )
   const generated = new Map([
-    [
-      ADMIN_DIRECTORY,
-      {
-        JWT_PRIVATE_KEY: privateKey,
-        JWT_PUBLIC_KEY: publicKey,
-        AUTH_DEV_PRIVATE_KEY: privateKey,
-      },
-    ],
-    ...domainTargets.map((target) => [
+    ...(!adminState.configured
+      ? [
+          [
+            ADMIN_DIRECTORY,
+            {
+              JWT_PRIVATE_KEY: privateKey,
+              JWT_PUBLIC_KEY: publicKey,
+              AUTH_DEV_PRIVATE_KEY: privateKey,
+            },
+          ],
+        ]
+      : []),
+    ...unconfiguredDomainTargets.map((target) => [
       target.directory,
       { JWT_PUBLIC_KEY: publicKey, AUTH_DEV_PRIVATE_KEY: privateKey },
     ]),

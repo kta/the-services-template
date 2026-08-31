@@ -131,6 +131,40 @@ function writeRepositoryFixture(root) {
   }
 }
 
+function addCopiedService(root, { directory, templateKind, devVars }) {
+  const catalogPath = join(root, 'service-catalog.json')
+  const catalog = JSON.parse(readFileSync(catalogPath, 'utf8'))
+  const native = templateKind === 'tauri'
+  const nativeWorkflow = `.github/workflows/${directory.replaceAll('_', '-')}-build.yml`
+  catalog.services.push({
+    directory,
+    package: `@app/${directory}`,
+    templateKind,
+    deployable: false,
+    native,
+    ...(native ? { nativeWorkflow } : {}),
+  })
+  writeFixture(root, 'service-catalog.json', `${JSON.stringify(catalog)}\n`)
+  if (native) {
+    const workflow = readFileSync(
+      join(repositoryRoot, '.github/workflows/example-tauri-build.yml'),
+      'utf8',
+    )
+      .replaceAll('example_tauri_service', directory)
+      .replaceAll('example-tauri-service', directory.replaceAll('_', '-'))
+    writeFixture(root, nativeWorkflow, workflow)
+  }
+  writeService(
+    root,
+    directory,
+    { name: `@app/${directory}`, ...(native ? { scripts: nativePackageScripts } : {}) },
+    `APP_ENV=development\nJWT_PUBLIC_KEY=\nAUTH_DEV_PRIVATE_KEY=\nSERVICE_SENTINEL=${directory}\n`,
+  )
+  if (devVars !== undefined) {
+    writeFixture(root, `services/${directory}/.dev.vars`, devVars)
+  }
+}
+
 function freshFixture(t, prefix = 'prepare-dev-vars-') {
   const root = mkdtempSync(join(tmpdir(), prefix))
   t.after(() => rmSync(root, { recursive: true, force: true }))
@@ -228,7 +262,51 @@ test('fresh make init/dev-vars copies every catalog service and distributes one 
   }
 })
 
-test('fails closed when only part of the catalog-wide local pair is configured', async (t) => {
+test('incremental Web and Tauri services reuse the verified local RSA pair without changing existing values', async (t) => {
+  for (const scenario of [
+    { directory: 'copied_web', templateKind: 'web', devVars: undefined },
+    {
+      directory: 'copied_tauri',
+      templateKind: 'tauri',
+      devVars:
+        'APP_ENV=development\nJWT_PUBLIC_KEY=\nAUTH_DEV_PRIVATE_KEY=\nSERVICE_SENTINEL=copied_tauri\n',
+    },
+  ]) {
+    await t.test(
+      `${scenario.templateKind} with ${scenario.devVars ? 'empty' : 'missing'} .dev.vars`,
+      async (t) => {
+        const root = freshFixture(t, `prepare-dev-vars-incremental-${scenario.templateKind}-`)
+        await prepareDevVars(root)
+        const existing = new Map(
+          allServices.map((directory) => [
+            directory,
+            readFileSync(join(root, `services/${directory}/.dev.vars`), 'utf8'),
+          ]),
+        )
+        const admin = envValues(join(root, 'services/admin/.dev.vars'))
+
+        addCopiedService(root, scenario)
+        await prepareDevVars(root)
+
+        for (const [directory, source] of existing) {
+          assert.equal(
+            readFileSync(join(root, `services/${directory}/.dev.vars`), 'utf8'),
+            source,
+            `${directory} must not be overwritten`,
+          )
+        }
+        const copiedPath = join(root, `services/${scenario.directory}/.dev.vars`)
+        const copied = envValues(copiedPath)
+        assert.equal(copied.JWT_PUBLIC_KEY, admin.JWT_PUBLIC_KEY)
+        assert.equal(copied.AUTH_DEV_PRIVATE_KEY, admin.JWT_PRIVATE_KEY)
+        assert.equal(copied.SERVICE_SENTINEL, scenario.directory)
+        assert.equal(statSync(copiedPath).mode & 0o777, 0o600)
+      },
+    )
+  }
+})
+
+test('fails closed when only part of the admin local pair is configured', async (t) => {
   const root = freshFixture(t, 'prepare-dev-vars-partial-')
   writeFixture(
     root,
@@ -240,6 +318,37 @@ test('fails closed when only part of the catalog-wide local pair is configured',
     async () => prepareDevVars(root),
     /all local RSA settings|both empty or both set/,
   )
+})
+
+test('fails closed when a configured domain has only one local RSA field', async (t) => {
+  const root = freshFixture(t, 'prepare-dev-vars-domain-partial-')
+  await prepareDevVars(root)
+  const booking = envValues(join(root, 'services/booking/.dev.vars'))
+  writeFixture(
+    root,
+    'services/booking/.dev.vars',
+    `JWT_PUBLIC_KEY=${booking.JWT_PUBLIC_KEY}\nAUTH_DEV_PRIVATE_KEY=\n`,
+  )
+
+  await assert.rejects(
+    async () => prepareDevVars(root),
+    /booking.*both empty or both set|local RSA settings/i,
+  )
+})
+
+test('fails closed when configured services contain more than one valid RSA pair', async (t) => {
+  const root = freshFixture(t, 'prepare-dev-vars-mixed-pairs-')
+  const otherRoot = freshFixture(t, 'prepare-dev-vars-other-pair-')
+  await prepareDevVars(root)
+  await prepareDevVars(otherRoot)
+  const otherAdmin = envValues(join(otherRoot, 'services/admin/.dev.vars'))
+  writeFixture(
+    root,
+    'services/booking/.dev.vars',
+    `JWT_PUBLIC_KEY=${otherAdmin.JWT_PUBLIC_KEY}\nAUTH_DEV_PRIVATE_KEY=${otherAdmin.JWT_PRIVATE_KEY}\n`,
+  )
+
+  await assert.rejects(async () => prepareDevVars(root), /booking.*mismatch|local RSA settings/i)
 })
 
 test('fails closed when every catalog RSA field is non-empty but malformed', async (t) => {
