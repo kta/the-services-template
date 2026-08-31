@@ -16,6 +16,17 @@ async function loadTransport() {
 }
 
 describe('platformFetch', () => {
+  const invalidWebRequests: Array<[string, RequestInit, string]> = [
+    ['/admin/organizations', {}, 'non-API path'],
+    ['/api/../admin', {}, 'parent path segment'],
+    ['/api/organizations', { method: 'PUT' }, 'unsupported method'],
+    ['/api/organizations', { headers: { cookie: 'refresh=secret' } }, 'forbidden header'],
+    ['/api/organizations', { redirect: 'follow' }, 'redirect mode'],
+    ['/api/organizations%2Fsecret', {}, 'encoded slash path'],
+    ['/api/organizations%3Fsecret', {}, 'encoded query delimiter'],
+    ['/api/organizations%23secret', {}, 'encoded fragment delimiter'],
+  ]
+
   beforeEach(() => {
     invoke.mockReset()
     delete tauriWindow().__TAURI_INTERNALS__
@@ -40,9 +51,23 @@ describe('platformFetch', () => {
     expect(browserFetch).toHaveBeenCalledWith('/api/organizations?active=true', {
       method: 'GET',
       headers: { authorization: 'Bearer browser-token' },
+      redirect: 'error',
     })
     expect(invoke).not.toHaveBeenCalled()
   })
+
+  it.each(invalidWebRequests)(
+    'applies native request restrictions to browser fallback: %s (%s)',
+    async (path, init) => {
+      const browserFetch = vi.fn()
+      vi.stubGlobal('fetch', browserFetch)
+      const { platformFetch } = await loadTransport()
+
+      await expect(platformFetch(path, init)).rejects.toThrow()
+      expect(browserFetch).not.toHaveBeenCalled()
+      expect(invoke).not.toHaveBeenCalled()
+    },
+  )
 
   it('invokes api_request with the native contract and redacts set-cookie', async () => {
     tauriWindow().__TAURI_INTERNALS__ = {}
@@ -51,6 +76,9 @@ describe('platformFetch', () => {
       headers: {
         'content-type': 'application/json',
         'set-cookie': 'refresh=secret; HttpOnly',
+        'set-cookie2': 'refresh2=secret',
+        location: 'https://evil.example',
+        server: 'origin-detail',
       },
       body: '{"ok":true}',
     })
@@ -78,6 +106,9 @@ describe('platformFetch', () => {
     expect(await response.text()).toBe('{"ok":true}')
     expect(response.headers.get('content-type')).toBe('application/json')
     expect(response.headers.has('set-cookie')).toBe(false)
+    expect(response.headers.has('set-cookie2')).toBe(false)
+    expect(response.headers.has('location')).toBe(false)
+    expect(response.headers.has('server')).toBe(false)
   })
 
   it('accepts a same-origin Request and applies init overrides before IPC', async () => {
@@ -126,7 +157,10 @@ describe('platformFetch', () => {
     ['//evil.example/api/organizations', 'protocol-relative URL'],
     ['/other/organizations', 'non-API path'],
     ['/api/../organizations', 'parent path segment'],
+    ['/api/organizations/../secret', 'inner parent path segment'],
     ['/api/%2e%2e/organizations', 'encoded parent path segment'],
+    ['/api/%252e%252e/organizations', 'double-encoded parent path segment'],
+    ['/api/%255cadmin', 'double-encoded backslash path'],
     ['/api/organizations\\admin', 'backslash path'],
   ])('rejects %s (%s) before invoking Tauri', async (path) => {
     tauriWindow().__TAURI_INTERNALS__ = {}
@@ -159,4 +193,103 @@ describe('platformFetch', () => {
       expect(invoke).not.toHaveBeenCalled()
     },
   )
+
+  it('rejects oversized native IPC fields before invoking Tauri', async () => {
+    tauriWindow().__TAURI_INTERNALS__ = {}
+    const { platformFetch } = await loadTransport()
+
+    await expect(platformFetch(`/api/${'a'.repeat(2044)}`, { method: 'GET' })).rejects.toThrow()
+    await expect(
+      platformFetch('/api/organizations', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: 'x'.repeat(1_048_577),
+      }),
+    ).rejects.toThrow()
+    await expect(
+      platformFetch('/api/organizations', {
+        headers: { authorization: `Bearer ${'x'.repeat(8_193)}` },
+      }),
+    ).rejects.toThrow()
+    expect(invoke).not.toHaveBeenCalled()
+  })
+
+  it('rejects oversized method and native response header envelopes', async () => {
+    tauriWindow().__TAURI_INTERNALS__ = {}
+    const { platformFetch } = await loadTransport()
+
+    await expect(platformFetch('/api/organizations', { method: 'X'.repeat(17) })).rejects.toThrow(
+      'method is too large',
+    )
+
+    invoke.mockResolvedValue({
+      status: 200,
+      headers: Object.fromEntries(Array.from({ length: 17 }, (_, index) => [`x-${index}`, 'v'])),
+      body: '',
+    })
+    await expect(platformFetch('/api/organizations')).rejects.toThrow('too many headers')
+  })
+
+  it('bounds a Request stream before sending it over IPC', async () => {
+    tauriWindow().__TAURI_INTERNALS__ = {}
+    const { platformFetch } = await loadTransport()
+    const request = new Request(new URL('/api/organizations', window.location.origin), {
+      method: 'POST',
+      body: 'x'.repeat(1_048_577),
+    })
+
+    await expect(platformFetch(request)).rejects.toThrow('body is too large')
+    expect(invoke).not.toHaveBeenCalled()
+  })
+
+  it('checks a browser Request body before sending the original Request', async () => {
+    const browserFetch = vi.fn()
+    vi.stubGlobal('fetch', browserFetch)
+    const request = new Request(new URL('/api/organizations', window.location.origin), {
+      method: 'POST',
+      body: 'x'.repeat(1_048_577),
+    })
+    const { platformFetch } = await loadTransport()
+
+    await expect(platformFetch(request)).rejects.toThrow('body is too large')
+    expect(browserFetch).not.toHaveBeenCalled()
+  })
+
+  it('rejects oversized browser responses before exposing them to the app', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response('', {
+          status: 200,
+          headers: { 'content-length': String(4 * 1024 * 1024 + 1) },
+        }),
+      ),
+    )
+    const { platformFetch } = await loadTransport()
+
+    await expect(platformFetch('/api/organizations')).rejects.toThrow('response body is too large')
+  })
+
+  it('rejects redirect-like native responses and filters response metadata', async () => {
+    tauriWindow().__TAURI_INTERNALS__ = {}
+    invoke.mockResolvedValue({
+      status: 302,
+      headers: { location: 'https://evil.example', 'set-cookie2': 'secret' },
+      body: '',
+    })
+    const { platformFetch } = await loadTransport()
+
+    await expect(platformFetch('/api/organizations')).rejects.toThrow('redirects')
+  })
+
+  it.each([204, 205])('does not expose a native response body for %s', async (status) => {
+    tauriWindow().__TAURI_INTERNALS__ = {}
+    invoke.mockResolvedValue({ status, headers: {}, body: 'invalid-body' })
+    const { platformFetch } = await loadTransport()
+
+    const response = await platformFetch('/api/organizations')
+    expect(response.status).toBe(status)
+    expect(response.body).toBeNull()
+    expect(await response.text()).toBe('')
+  })
 })

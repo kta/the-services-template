@@ -1,0 +1,13 @@
+# ローカル開発用の dev 値。`make init` が .dev.vars にコピーし、鍵を生成する
+# APP_ENV は credential-less なローカル認証を明示するための実行環境マーカー。
+APP_ENV=development
+# (`.dev.vars` は gitignore)。本番はこのファイルを使わない。
+ADMIN_TO_EXAMPLE_TAURI_SERVICE_KEY=dev-admin-to-example-tauri-service-key-000000000000
+DOMAIN_TO_ADMIN_KEY=dev-domain-to-admin-key-000000000000
+DOMAIN_TO_NOTIFIER_KEY=dev-domain-to-notifier-key-000000000000
+JWT_PUBLIC_KEY=
+# 本番 domain Worker に private key を置かない。これは local dev grant 専用。
+AUTH_DEV_PRIVATE_KEY=
+# credential 無しの dev トークングラント(/api/auth/token)を有効化。本番では設定しない。
+AUTH_DEV_GRANT=true
+DOMAIN_NOTIFICATION_TO=team@example.com

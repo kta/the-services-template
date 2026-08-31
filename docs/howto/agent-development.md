@@ -28,7 +28,7 @@ test は Worker/integration、React `test:web`、coverage、Approved UC/AC のE2
 2. **Spec**: 挙動が変わるなら `specs/<service>/features/<NNN>-<slug>/spec.md`（1 ファイル、`docs/spec-workflow/SPEC_WORKFLOW.md`）。
 3. **TDD**: Worker/API、React、共有UIを問わずテスト先行（期待した理由でRedを確認）→ 実装 → `pnpm check` 緑。React service は `test`、`test:web`、`test:all` を使い分ける。
 4. **E2E traceability**: Approved `spec.md` の UC/AC は実 Playwright scenario に `@e2e-covers` で一意に対応付け、`pnpm run test:traceability` を通す。infrastructure-only で UC/AC がない文書は分母外。詳細は [`E2E_TRACEABILITY.md`](../testing/E2E_TRACEABILITY.md)。
-5. **PR**: Conventional Commits、US-ID 明記、CI（verify = agent compatibility + lint + dependency audit + typecheck + combined test）必須。e2e は手動トリガ（`workflow_dispatch`）またはローカルでオンデマンド。
+5. **PR**: Conventional Commits、US-ID 明記、CI（verify = agent compatibility + lint + dependency audit + typecheck + combined test）必須。e2e は手動トリガ（`workflow_dispatch`）またはローカルでオンデマンド。production deploy は protected `main` push + GitHub `production` environment に限定する。
 6. **依存更新**: [`dependency-management.md`](./dependency-management.md) に従い、Knipで不要/暗黙依存を検査する。Renovateは安全なdev依存だけ自動化し、catalogとmajorは人間レビュー。
 
 ## 並行開発（git worktree）
@@ -39,4 +39,4 @@ make worktree/rm  name=agent-1
 `.wrangler/state`（ローカル D1/KV）は worktree ごとに隔離。dev ポートは `vite dev --port` で分ける。
 
 ## 本番前の注意
-`INTERNAL_KEY`・`JWT_SECRET`・`AUTH_PEPPER` の secrets 設定が必須（未設定は fail close）。`AUTH_DEV_GRANT` は本番に設定しない（dev トークングラント無効化）。`docs/howto/deploy.md` 参照。
+caller-specific な service-binding key・admin 専用 `JWT_PRIVATE_KEY`・admin/domain の `JWT_PUBLIC_KEY`・`AUTH_PEPPER` の secrets 設定が必須（未設定は fail close）。内部鍵は方向ごとに再利用しない。domain Worker に `JWT_PRIVATE_KEY` を設定しない。`AUTH_DEV_GRANT` と `AUTH_DEV_PRIVATE_KEY` は本番に設定しない（dev トークングラント無効化）。Tauri は `make dev/example_tauri_service/tauri` / `make build/example_tauri_service/tauri`、ブラウザ版は `make dev/example_service` を使う。`docs/howto/deploy.md` 参照。

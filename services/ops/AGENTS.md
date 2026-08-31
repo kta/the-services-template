@@ -26,8 +26,8 @@ opsは画面を持たないCron + Cloudflare Workflows Workerであり、D1 expo
 - CronはUTCで記述し、JST上の意図をコメントとtime testに残す。
 - 日跨ぎ、月/年跨ぎ、leap year、am/pm slot、freshness thresholdのちょうど・±1を固定 `now: Date` でテストする。`Date.now()` 依存を入れない。
 - Workflows retry可能errorと `NonRetryableError` を区別する。永続失敗を無限retryしない。
-- pruneは新しい正常backupを確認する前に回さない。容量警告のために復旧可能世代を過剰削除しない。
-- `D1_EXPORT_API_TOKEN` と `INTERNAL_KEY` はsecret。`CF_ACCOUNT_ID` とDB IDは公開設定だがplaceholderと本番値の区別を保つ。
+- pruneは新しい正常backupを確認する前に回さない。容量警告のために復旧可能世代を過剰削除しない。同一 deterministic slot に不正なオブジェクトがあれば自動削除・上書きせず `backup_generation_conflict` を通知し、operator が調査して明示的に隔離する。
+- `D1_EXPORT_API_TOKEN` と `OPS_TO_NOTIFIER_KEY` は secret。前者は対象 D1 の REST export / 容量確認だけに使い、R2 の読み書き権限を持たせない。`BACKUP_SIGNING_PRIVATE_KEY` は `latest.json` 署名専用で、JWT/internal key と再利用しない。R2 世代からの復元は別の operator token（R2 Object Read/List/Write/Delete と明示的な D1 操作用の最小 scope）で行い、deploy token とも共有しない。通知は `x-internal-caller=ops` と `OPS_TO_NOTIFIER_KEY` を使う。`OPS_ALERT_EMAIL` は production で必須の検証済み宛先であり、未設定時に placeholder 宛へ送信して成功扱いにしない。`CF_ACCOUNT_ID` と DB ID は公開設定だが placeholder と本番値の区別を保つ。
 - ADMIN/NOTIFIERはservice bindingで呼び、公開internet URLやcross-domain DB accessへ置換しない。
 - notification failureはbackup/monitoring結果と区別して記録し、alert送信失敗で本来のfailureを隠さない。
 - Workflows、R2、Cronの追加・置換はarchitecture変更として承認を得る。
@@ -51,10 +51,14 @@ opsはSPA、D1 migration、Playwright e2eを持たない。backup/restoreの本�
 - D1 export: token/header、polling、success、API error、timeout相当をmock fetchで検証する。
 - integration: Workflow step、R2 put/list/delete、ADMIN/NOTIFIER partial failure、idempotency key、scheduled handlerを検証する。
 - fallback: alert失敗を握りつぶす経路では元のstatus、log、戻り値、再検知可能性までassertする。
-- binding/Cron変更: `wrangler types` を再生成し、UTCの意図とdeploy/infra文書を更新する。
+- binding/Cron変更: `wrangler types` を再生成し、UTCの意図とdeploy/infra文書を更新する。R2
+  public-domain 設定は `scripts/check-r2-private.mjs` で確認し、`latest.json` の署名 pair
+  は production config と restore runbook に反映する。deploy/bootstrap は account・bucket・
+  D1 UUID/name の Cloudflare API identity check を通し、`latest.json` の account/bucket
+  metadata が runtime の reviewed identity と一致しない場合は freshness を fail close する。
 
 ## 文書と完了
 
 backup対象、retention、R2 key、freshness/capacity閾値、Cron、binding、restore手順が変われば `docs/howto/restore.md`、free-tier limits、infra/deploy、CODEMAPを同時更新する。package commandが変わればこのファイルも更新する。
 
-完了前にops test/typecheck/build、生成型、ルート `pnpm check` をgreenにする。本番backup、restore、deploy、Cloudflare APIへの実送信は必ず直前承認を得る。
+完了前にops test/typecheck/build、生成型、ルート `pnpm check` をgreenにする。本番backup、restore、deploy、Cloudflare APIへの実送信は必ず直前承認を得る。production secret は protected production workflow の allowlist 経由で登録し、`scripts/put-production-secret.mjs` は validation-only とする。

@@ -18,12 +18,33 @@ See
 [`docs/architecture/infra.md`](./docs/architecture/infra.md) for the runtime
 topology and ownership boundary.
 
+Access JWTs use RS256: admin alone owns `JWT_PRIVATE_KEY`, while admin and each
+domain Worker receive `JWT_PUBLIC_KEY` for verification. Tauri shells receive
+neither key. Production deploy is limited to a protected `main` push and the
+GitHub `production` environment; local deploy entry points fail closed outside
+that CI context. Existing secret provisioning, seed, and restore are separate
+operator operations tied to a clean published `main` checkout. First-Worker
+secret bootstrap uses only the dedicated protected-main
+`production-bootstrap.yml` workflow and its reviewer gate. The template
+`example_service` and `example_tauri_service` are never production targets.
+Root [`service-catalog.json`](./service-catalog.json) is the machine-readable source of truth for SPA service directories/packages, Web vs Tauri template kind, deployability, and native artifact workflows. Worker-only `notifier` and `ops` are normalized `{ directory, package, deployable }` entries in `workerOnlyServices`, outside the SPA array. `service-catalog.mjs validate-repository` structurally parses workflows and enforces exact workspace/dev/test/E2E and production wiring sets.
+Service-binding authentication uses a distinct secret for each direction:
+`ADMIN_TO_<DOMAIN>_KEY` (local scaffold dev/test uses
+`ADMIN_TO_EXAMPLE_SERVICE_KEY`; production has no domain key until a copied
+domain becomes deployable),
+`ADMIN_TO_NOTIFIER_KEY`, `DOMAIN_TO_NOTIFIER_KEY`, and
+`OPS_TO_NOTIFIER_KEY`; `DOMAIN_TO_ADMIN_KEY` is the dedicated domain-to-admin
+live-session introspection credential, held only by that boundary's two ends.
+A compromised domain Worker therefore cannot reuse another caller's internal
+credential or the admin JWT signing key.
+
 ## Ownership and entry points
 
 | Area | Owner and entry point | Responsibility |
 |---|---|---|
 | [`services/admin`](./services/admin) | [`src/worker/index.ts`](./services/admin/src/worker/index.ts) | Operator SPA/API, organization source of truth, authentication, invitations, and organization reconciliation. |
-| [`services/example_service`](./services/example_service) | [`src/worker/index.ts`](./services/example_service/src/worker/index.ts) | Template domain Worker: same-origin SPA/API, tenant-scoped items, and received organization records. |
+| [`services/example_service`](./services/example_service) | [`src/worker/index.ts`](./services/example_service/src/worker/index.ts) | Web-only template domain Worker: same-origin SPA/API, tenant-scoped items, and received organization records. |
+| [`services/example_tauri_service`](./services/example_tauri_service) | [`src/worker/index.ts`](./services/example_tauri_service/src/worker/index.ts), [`src-tauri/src/lib.rs`](./services/example_tauri_service/src-tauri/src/lib.rs) | Web + Tauri template with the same item contract plus fixed-origin native transport and platform shells. |
 | [`services/notifier`](./services/notifier) | [`src/index.ts`](./services/notifier/src/index.ts) | Internal notification endpoint, KV deduplication, and Resend delivery. |
 | [`services/ops`](./services/ops) | [`src/index.ts`](./services/ops/src/index.ts) | Cron and Workflow entry points for D1 backup, freshness/capacity checks, and service health checks. |
 | [`packages/contracts`](./packages/contracts) | [`src/index.ts`](./packages/contracts/src/index.ts) | Zod API contracts shared by Workers and web clients. |
@@ -40,13 +61,14 @@ and required tests; the sibling `CLAUDE.md` is a symlink to that same source.
 
 | Service | Runtime bindings |
 |---|---|
-| `admin` | D1, `AUTH_RL` KV, `EXAMPLE_SERVICE`, `NOTIFIER`, Cron |
+| `admin` | D1, `NOTIFIER`, catalog の deployable domain bindings/keys と `ADMIN_DOMAIN_IDENTITIES`, Cron（login lockout は D1 の原子的カウンタ）。deployable domain が 0 件なら production の domain binding/key はなく reconcile も skip する。ローカル dev/test のみ `EXAMPLE_SERVICE` scaffold binding/key を追加する。 |
 | `example_service` | D1, `NOTIFIER` |
+| `example_tauri_service` | D1, `NOTIFIER` |
 | `notifier` | `DEDUPE` KV |
 | `ops` | `BACKUPS` R2, `BACKUP_WF`, `ADMIN`, `NOTIFIER`, Cron |
 
 All services consume `packages/contracts` and `packages/shared`; SPA services
-(`admin` and `example_service`) also consume `packages/ui`. These packages do
+(`admin`, `example_service`, and `example_tauri_service`) also consume `packages/ui`. These packages do
 not depend on services.
 
 ## Core flows
@@ -55,22 +77,38 @@ not depend on services.
   and handles its `/api/*` routes on the same origin. The Hono route chain
   exports `AppType` for the typed client, with contracts defined in
   `packages/contracts`.
+- **Native to application:** example_tauri_service's Tauri React bundle sends API
+  requests through the Rust `api_request` command. The command uses a
+  build-time fixed API origin and an `/api/` method/header allowlist; it does
+  not expose response cookies. Native access tokens are memory-only because
+  the example service has no refresh endpoint. See
+  [`docs/howto/tauri-example-service.md`](./docs/howto/tauri-example-service.md).
 - **Organizations and authorization:** `admin` manages organizations and
-  credentials. It synchronizes organization records to a domain Worker through
-  an internal service binding; that Worker applies tenant scope to its own D1
-  queries.
+  credentials. It synchronizes organization records to every catalog-deployable
+  domain Worker through identity-matched internal service bindings; each record carries a monotonic `version`, and the
+  receiving Worker conditionally accepts only the newest version before applying
+  tenant scope to its own D1 queries.
 - **Notifications:** application Workers call `notifier` through the internal
-  `POST /api/internal/send` service-binding endpoint. The notifier uses a KV
-  key and the Resend idempotency key for 24-hour best-effort duplicate
-  suppression; this is not exactly-once delivery. If KV is unavailable, the
-  behavior falls back toward at-least-once delivery.
+  `POST /api/internal/send` service-binding endpoint with a caller-specific
+  key and caller header. The notifier allows only the notification types owned
+  by that caller, then uses a KV key and the Resend idempotency key for
+  24-hour best-effort duplicate suppression; this is not exactly-once delivery.
+  If KV is unavailable, the behavior falls back toward at-least-once delivery.
 - **Operations:** `ops` Cron handlers start backup workflows, inspect D1 backup
   freshness and capacity, and call service `/api/health` endpoints through
-  bindings. Alerts follow the same notifier flow.
+  bindings. Backup streams are size-bounded, the private R2 bucket is checked at
+  the deployment boundary, reviewed account/bucket/D1 identities are checked
+  before credentials are used, and `latest.json` is signed with an ops-only RSA
+  key pair plus non-secret resource metadata. Alerts follow the same notifier
+  flow; failed alerts are retained in R2 when the fallback is available.
 - **Provision and deploy:** Terraform provisions D1, KV, and R2; its outputs
   are reflected in service `wrangler.jsonc` files. Wrangler deploys
   Workers, their bindings, Cron triggers, and Workflows. Details and order are
   in [`docs/howto/deploy.md`](./docs/howto/deploy.md).
+- **Local commands:** `make dev/example_service` runs the Web-only Worker,
+  `make dev/example_tauri_service/tauri` runs the Tauri dev window, and
+  `make build/example_tauri_service/tauri` builds the isolated native frontend
+  bundle. `make help` lists all repository targets.
 
 ## Where to change what
 
@@ -82,7 +120,9 @@ not depend on services.
 | Change notification delivery | [`services/notifier`](./services/notifier) and [`packages/contracts/src/notification.ts`](./packages/contracts/src/notification.ts). |
 | Change backup, monitoring, or scheduled operations | [`services/ops/src/index.ts`](./services/ops/src/index.ts) and [`services/ops/wrangler.jsonc`](./services/ops/wrangler.jsonc). |
 | Change shared visual language or UI primitives | [`packages/ui/src/theme.css`](./packages/ui/src/theme.css) and [`packages/ui/src`](./packages/ui/src). |
+| Change the Tauri template's native shell or Web/native transport boundary | [`services/example_tauri_service/src/web/platform/transport.ts`](./services/example_tauri_service/src/web/platform/transport.ts), [`services/example_tauri_service/src-tauri/src/api.rs`](./services/example_tauri_service/src-tauri/src/api.rs), and [`scripts/check-tauri-boundary.mjs`](./scripts/check-tauri-boundary.mjs). |
 | Change Cloudflare resources, bindings, or deployment configuration | [`infra/terraform`](./infra/terraform), affected `wrangler.jsonc`, then [`docs/architecture/infra.md`](./docs/architecture/infra.md). |
+| Change production deploy protection or secret placement | [`scripts/check-deploy-boundary.mjs`](./scripts/check-deploy-boundary.mjs), [`.github/workflows/ci.yml`](./.github/workflows/ci.yml), [`.github/workflows/production-bootstrap.yml`](./.github/workflows/production-bootstrap.yml), and [`docs/howto/deploy.md`](./docs/howto/deploy.md). |
 
 ### Development and verification
 

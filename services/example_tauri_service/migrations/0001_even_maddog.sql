@@ -1,0 +1,1 @@
+CREATE INDEX `items_org_created_idx` ON `items` (`organization_id`,`created_at`);

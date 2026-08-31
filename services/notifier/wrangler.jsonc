@@ -4,20 +4,36 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-06-25",
   "observability": { "enabled": true },
-  // Idempotency store (dedupe key = job.id, TTL 24h). Callers may redeliver.
+  // Idempotency store (dedupe key = caller:job.id, TTL 24h). Callers may redeliver.
   "kv_namespaces": [{ "binding": "DEDUPE", "id": "00000000000000000000000000000000" }],
+  "secrets": {
+    "required": [
+      "ADMIN_TO_NOTIFIER_KEY",
+      "DOMAIN_TO_NOTIFIER_KEY",
+      "OPS_TO_NOTIFIER_KEY",
+      "RESEND_API_KEY"
+    ]
+  },
   // No queues by design: Queues work on the free plan, but this template keeps
   // delivery to one moving part. Other Workers post NotificationJob to
-  // POST /api/internal/send over a service binding (x-internal-key).
-  // No secrets in `vars`: INTERNAL_KEY / RESEND_API_KEY live in .dev.vars for
-  // local dev and are set via `wrangler secret put` in prod (deploy.md).
+  // POST /api/internal/send over a service binding (x-internal-key plus
+  // x-internal-caller); the caller-specific type allowlist is enforced in code.
+  // No secrets in `vars`: caller-specific internal keys / RESEND_API_KEY live in .dev.vars for
+  // local dev and are set by a protected production workflow in prod (deploy.md).
   // Fail closed: with no RESEND_API_KEY and no MAIL_DEV_LOG=true, sending 502s.
   // LogSender is dev-only (.dev.vars MAIL_DEV_LOG=true) — never set it in prod.
   "vars": {
+    "APP_ENV": "production",
     // Resend `from` address (not a secret). Resend requires a verified sender
     // domain — set a verified operational address in prod. Empty → senders
     // fall back to the default placeholder (notifications@example.com), which
     // Resend will reject.
-    "MAIL_FROM": ""
+    "MAIL_FROM": "",
+    "DOMAIN_NOTIFICATION_TO": "",
+    "OPS_ALERT_EMAIL": "",
+    // Must equal admin's canonical HTTPS origin in production. The notifier
+    // rejects invite URLs for every other host, even when the caller key is
+    // valid.
+    "INVITE_BASE_URL": ""
   }
 }

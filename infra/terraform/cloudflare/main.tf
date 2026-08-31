@@ -3,18 +3,25 @@
 # below and exports their IDs (see outputs.tf) to wire into wrangler.jsonc.
 # One owner per resource avoids drift.
 
-# --- D1: one database per domain (no cross-D1 joins; reconcile in app code) ---
-# Production users: add `lifecycle { prevent_destroy = true }` to each D1 below
-# so a rename/destroy can't silently drop the database. Omitted in the template
-# because you WILL rename `example_service` when copying it.
-resource "cloudflare_d1_database" "example_service" {
-  account_id = var.cloudflare_account_id
-  name       = "example_service"
+# --- D1: admin owns auth/org data; each copied domain adds its own D1 ---
+# The example_service D1 was present in the original template but the service is
+# a non-production scaffold. Stop managing it without destroying an existing
+# database; a real copied domain must add its D1 in a reviewed change.
+removed {
+  from = cloudflare_d1_database.example_service
+
+  lifecycle {
+    destroy = false
+  }
 }
 
 resource "cloudflare_d1_database" "admin" {
   account_id = var.cloudflare_account_id
   name       = "admin"
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # --- No Queues (free-tier policy) ---
@@ -28,12 +35,21 @@ resource "cloudflare_d1_database" "admin" {
 resource "cloudflare_workers_kv_namespace" "dedupe" {
   account_id = var.cloudflare_account_id
   title      = "notifier-dedupe"
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
-# admin: login rate-limit / lockout counters (email+IP window).
-resource "cloudflare_workers_kv_namespace" "auth_rl" {
-  account_id = var.cloudflare_account_id
-  title      = "admin-auth-rl"
+# Legacy admin rate-limit KV. Current code uses the atomic D1 table instead.
+# Stop managing an existing namespace without destroying it; this avoids both
+# a fresh unused KV allocation and an accidental deletion during migration.
+removed {
+  from = cloudflare_workers_kv_namespace.auth_rl
+
+  lifecycle {
+    destroy = false
+  }
 }
 
 # ops: backup generations (D1 REST export → validate → put). Private bucket,
@@ -45,14 +61,20 @@ resource "cloudflare_r2_bucket" "backups" {
   # Keep data close to your users (location hint, best-effort — NOT a legal
   # data-residency guarantee). Pick the hint that matches your market.
   location = "apac"
-  # Production: add `lifecycle { prevent_destroy = true }` — this bucket is the
-  # only off-D1 copy (restore.md). A rename/destroy would drop all DR
-  # generations. Omitted in the template so the name can be changed on adoption.
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "cloudflare_r2_bucket_lifecycle" "backups" {
   account_id  = var.cloudflare_account_id
   bucket_name = cloudflare_r2_bucket.backups.name
+
+  lifecycle {
+    prevent_destroy = true
+  }
+
   rules = [{
     id      = "expire-16d"
     enabled = true

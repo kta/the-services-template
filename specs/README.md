@@ -20,7 +20,7 @@ specs/
 1. `cp -r specs/_service-template specs/<service>` してサービス仕様を書く（**Specify 先行**）。
 2. `00_service-spec.md` でサービス境界・エンティティ・API 面・所有データ（1 サービス = 1 D1）を定義。
 3. 機能ごとに `features/<NNN>-<slug>/spec.md` を [`.specify/templates/feature-template.md`](../.specify/templates/feature-template.md) から起こす。
-4. 実装は `services/<service>`（`services/example_service` をコピー）+ `packages/contracts/src/<service>.ts` + Terraform に D1 追加。手順の詳細は `.agents/skills/new-service`。
+4. `.agents/skills/new-service` の質問へ、コピー前に Web only（推奨）または Web + Tauri を回答する。前者は `services/example_service`、後者は `services/example_tauri_service` をコピーし、`packages/contracts/src/<service>.ts` + Terraform に D1 を追加する。
 
 ## 規約
 - feature ディレクトリ名 = git ブランチ名（`<NNN>-<slug>` / `feature-*` / `fix-*`）。
@@ -28,4 +28,4 @@ specs/
 - 曖昧箇所は `[要確認: ...]`。解消まで実装に進まない（`docs/constitution/SDD_CONSTITUTION.md`）。
 - いつ spec が要るか・書き方 → `docs/spec-workflow/SPEC_WORKFLOW.md`。
 
-現行サービス: [`example_service`](./example_service/) / [`admin`](./admin/) / 横断 [`shared`](./shared/) / [`infra`](./infra/)
+現行サービス: [`example_service`](./example_service/) / [`example_tauri_service`](./example_tauri_service/) / [`admin`](./admin/) / 横断 [`shared`](./shared/) / [`infra`](./infra/)

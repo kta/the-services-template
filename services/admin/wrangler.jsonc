@@ -18,27 +18,47 @@
       "migrations_dir": "migrations"
     }
   ],
-  // Rate-limit / lockout counters for login (email+IP window). Free tier.
-  "kv_namespaces": [{ "binding": "AUTH_RL", "id": "00000000000000000000000000000000" }],
-  // Service bindings (no internet hop). EXAMPLE_SERVICE: org sync + daily
-  // reconcile. NOTIFIER: invite / ops mails via POST /api/internal/send.
-  // フォーク時: example_service は本番にデプロイされない(CI deploy matrix 対象外)
-  // ため、この binding は本番では宙に浮く。雛形を自ドメインサービスへ差し替える
-  // 際に service 名を必ず張り替えること(docs/howto/deploy.md §4)。
-  "services": [
-    { "binding": "EXAMPLE_SERVICE", "service": "example-service" },
-    { "binding": "NOTIFIER", "service": "notifier" }
-  ],
-  // Daily org reconcile (admin ↔ domain sync-drift check). JST 03:00 = UTC 18:00.
-  "triggers": { "crons": ["0 18 * * *"] },
-  // No secrets in `vars` (official guidance): INTERNAL_KEY / JWT_SECRET /
-  // AUTH_PEPPER / AUTH_DEV_GRANT live in .dev.vars for local dev (copied from
-  // .dev.vars.example by `make init`) and are set via `wrangler secret put` in
-  // prod. Until secrets are set, everything fails closed. See docs/howto/deploy.md.
+  // Production service bindings (no internet hop). The non-deployable
+  // example_service scaffold is injected only by vite.config.ts in dev mode.
+  // A copied deployable domain must be added here together with its catalog
+  // registration, required caller secret, and ADMIN_DOMAIN_IDENTITIES tuple;
+  // repository validation requires every field to match exactly.
+  // NOTIFIER handles invite / ops mails via POST /api/internal/send.
+  "services": [{ "binding": "NOTIFIER", "service": "notifier" }],
+  // Hourly org reconcile (admin ↔ domain sync-drift check). UTC only; the
+  // domain's 2h lease tolerates one missed run before failing closed.
+  "triggers": { "crons": ["0 * * * *"] },
+  "secrets": {
+    "required": [
+      "DOMAIN_TO_ADMIN_KEY",
+      "ADMIN_TO_NOTIFIER_KEY",
+      "JWT_PRIVATE_KEY",
+      "JWT_PUBLIC_KEY",
+      "AUTH_PEPPER"
+    ]
+  },
+  // No secrets in `vars` (official guidance): caller-specific internal keys /
+  // JWT_PRIVATE_KEY / JWT_PUBLIC_KEY / AUTH_PEPPER / AUTH_DEV_GRANT /
+  // AUTH_DEV_PRIVATE_KEY live in
+  // .dev.vars for local dev (copied from .dev.vars.example by `make init`) and
+  // production values are set by a protected production workflow. The private key is
+  // configured only on this admin Worker; domain Workers receive JWT_PUBLIC_KEY
+  // only. AUTH_DEV_PRIVATE_KEY is optional and local-only; it is loaded from
+  // .dev.vars only when a dev/E2E config explicitly requests it. Until required
+  // secrets are set, auth fails closed. See docs/howto/deploy.md.
   "vars": {
-    // 日次照合ドリフト通知の宛先(非機密)。空 = 通知スキップ(warn ログのみ)。
+    "APP_ENV": "production",
+    // hourly 照合ドリフト通知の宛先(非機密)。空 = 通知スキップ(warn ログのみ)。
     // 本番は検証済み実メールを設定する。
-    "OPS_ALERT_EMAIL": ""
+    "OPS_ALERT_EMAIL": "",
+    // 本番の招待リンクは固定 HTTPS origin を必ず設定する。
+    "INVITE_BASE_URL": "",
+    // Credential-less dev grant is disabled by default and only overridden by
+    // a local .dev.vars value. Never set this to true in a production env.
+    "AUTH_DEV_GRANT": "false",
+    // JSON array of {directory,binding,secret} tuples derived from catalog
+    // deployable domains. Empty in this non-deployable template repository.
+    "ADMIN_DOMAIN_IDENTITIES": "[]"
     // INVITE_BASE_URL(任意): 招待リンクの基底 URL の明示オーバーライド。
     // 既定はリクエスト origin から導出されるので通常は不要。
   }

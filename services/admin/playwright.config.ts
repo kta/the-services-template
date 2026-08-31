@@ -1,4 +1,5 @@
 import { defineConfig, devices } from '@playwright/test'
+import { JWT_TEST_PRIVATE_KEY, JWT_TEST_PUBLIC_KEY } from '../../packages/shared/test/jwt-keys'
 
 function withDisposableState(command: string): string {
   return `E2E_STATE_PATH="$(mktemp -d)" && export E2E_STATE_PATH && trap 'rm -rf "$E2E_STATE_PATH"' EXIT && ${command}`
@@ -18,6 +19,18 @@ export default defineConfig({
     command: withDisposableState(
       'pnpm exec wrangler d1 migrations apply admin --local --persist-to "$E2E_STATE_PATH" && pnpm run build && pnpm exec vite preview --port 4174 --strictPort',
     ),
+    env: {
+      APP_ENV: 'development',
+      AUTH_DEV_GRANT: 'true',
+      AUTH_PEPPER: 'e2e-auth-pepper',
+      E2E_AUTH: 'true',
+      DOMAIN_TO_ADMIN_KEY: 'e2e-domain-to-admin-key',
+      ADMIN_TO_EXAMPLE_SERVICE_KEY: 'e2e-admin-to-example-service-key',
+      ADMIN_TO_NOTIFIER_KEY: 'e2e-admin-to-notifier-key',
+      JWT_PRIVATE_KEY: JWT_TEST_PRIVATE_KEY,
+      JWT_PUBLIC_KEY: JWT_TEST_PUBLIC_KEY,
+      AUTH_DEV_PRIVATE_KEY: JWT_TEST_PRIVATE_KEY,
+    },
     url: 'http://localhost:4174',
     reuseExistingServer: false,
     timeout: 120_000,

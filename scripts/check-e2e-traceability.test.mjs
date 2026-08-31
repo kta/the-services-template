@@ -56,6 +56,20 @@ test('reports an approved identifier without an E2E mapping', async () => {
   })
 })
 
+test('rejects UC/AC identifiers hidden in a verification table', async () => {
+  await withFixture(
+    {
+      'specs/infra/features/001/spec.md':
+        '# Infrastructure\n\n- ステータス: Approved\n\n| ID | Check |\n|---|---|\n| `AC-INFRA-01` | Node test |\n',
+    },
+    async (root) => {
+      assert.deepEqual(await validateTraceability(root), [
+        'Specification identifier AC-INFRA-01 in specs/infra/features/001/spec.md:7 must be a UC/AC definition bullet or use a non-UC/AC verification ID.',
+      ])
+    },
+  )
+})
+
 test('reports an unknown E2E mapping', async () => {
   await withFixture(
     {

@@ -20,11 +20,12 @@ notifierは内部限定の同期通知Workerである。`POST /api/internal/send
 
 ## 非交渉ルール
 
-- endpointは `x-internal-key` を `INTERNAL_KEY` と照合する。未設定、誤値、外部呼び出しをfail closeする。
+- endpoint は `x-internal-caller`（`admin` / `domain` / `ops`）と `x-internal-key` を組み合わせ、caller 固有の `ADMIN_TO_NOTIFIER_KEY` / `DOMAIN_TO_NOTIFIER_KEY` / `OPS_TO_NOTIFIER_KEY` と照合する。鍵は 32 bytes 以上、未設定、誤値、別方向の鍵、外部呼び出しを fail close する。
+- caller ごとの通知 type allowlist を維持する（admin: `user.invited` / `ops.sync_drift`、domain: `item.created`、ops: `ops.*`）。鍵を知っていても別 caller の通知を送れないことをテストする。
 - request bodyは `packages/contracts` の `NotificationJob` を `zValidator` で検証する。独自の手書きpayload typeを作らない。
-- `RESEND_API_KEY` と `INTERNAL_KEY` はsecretであり、vars、log、response、fixtureへ実値を書かない。
+- `RESEND_API_KEY` と caller-specific な内部鍵は secret であり、vars、log、response、fixture へ実値を書かない。
 - `MAIL_DEV_LOG=true` は明示的なdev動作だけに使う。本番でsender未設定をLogSenderへ暗黙fallbackしない。
-- dedupe keyはjob IDから決定し、TTL 24時間を維持する。KV failure時は送信を試みるbest-effort設計であり、exactly-onceと表現しない。
+- dedupe keyは`x-internal-caller:job.id`から決定し、TTL 24時間を維持する。KV failure時は送信を試みるbest-effort設計であり、exactly-onceと表現しない。
 - Resendへの送信には同じidempotency keyを渡す。非2xxを成功扱いしない。
 - KV記録のタイミング、送信失敗時のkey有無、同一job再送の挙動を変更する場合は通知設計の承認を得る。
 - email本文やlogへtoken/payload全体を不用意に出さない。招待URLなど既存仕様で必要な値だけをformatする。

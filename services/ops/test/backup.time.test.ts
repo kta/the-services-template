@@ -35,8 +35,12 @@ describe('isStale: 鮮度閾値(既定 13h)の境界', () => {
     expect(isStale(new Date(now.getTime() - 13.5 * HOUR).toISOString(), now)).toBe(true)
   })
 
-  it('未来時刻(時計ずれ)は stale ではない', () => {
-    expect(isStale(new Date(now.getTime() + HOUR).toISOString(), now)).toBe(false)
+  it('許容範囲内の未来時刻(時計ずれ)は fresh と扱う', () => {
+    expect(isStale(new Date(now.getTime() + 5 * 60 * 1000).toISOString(), now)).toBe(false)
+  })
+
+  it('大きく未来の時刻は stale として扱う(fail closed)', () => {
+    expect(isStale(new Date(now.getTime() + 5 * 60 * 1000 + 1).toISOString(), now)).toBe(true)
   })
 
   it('latest 不在・壊れた時刻は stale 扱い(fail closed)', () => {

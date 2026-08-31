@@ -8,10 +8,11 @@
 
 - 1つのCloudflare WorkerがReact SPAとHono APIを同一オリジンで配信する。
 - サービス専用D1がitemと同期済みorganizationを所有する。
-- adminからorganizationをservice bindingで受信し、notifierをservice bindingで同期呼び出しする。
+- adminからorganizationをservice bindingで受信し、`ADMIN_TO_EXAMPLE_SERVICE_KEY` で認証する。notifierは `x-internal-caller=domain` + `DOMAIN_TO_NOTIFIER_KEY` でservice binding同期呼び出しする。
 - Zod契約、Hono RPC、Drizzle、tenant scope、共有UI tokenの正しい組み合わせを示す。
+- Web専用雛形として、same-origin fetchとsessionStorageを使う。native対応サービスは`example_tauri_service`をコピーする。
 
-本番へこのサービス自体をdeployしない。新サービス作成時はリポジトリの `new-service` skillでコピーし、名前、binding、DB、契約、entity、テストを置換する。
+本番へこのサービス自体をdeployしない。新サービス作成時はリポジトリの `new-service` skillでコピーし、名前、binding、DB、契約、entity、テストを置換する。コピー先を本番へ出す前に、IdP/admin gateway と domain audience、`sid` revoke 照合を実装した `src/worker/production-auth.ts` と `test/production-auth.test.ts` を追加する。未実装の domain は `require-production-domain-auth.mjs` が fail close する。
 
 ## 構成と入口
 
@@ -21,6 +22,7 @@
 | `src/worker/db/schema.ts` | item domainのDrizzle schema |
 | `src/web/main.tsx` / `App.tsx` | SPA entryと代表画面 |
 | `src/web/client.ts` | `hc<AppType>` typed client |
+| `src/web/platform/transport.ts` / `auth/session.ts` | same-origin Web fetchとsessionStorageのexample dev session |
 | `migrations/` | D1 migration履歴 |
 | `test/` | Workers integration、契約、権限、tenant isolation |
 | `e2e/` | 実workerd + SPA smoke |
@@ -32,9 +34,11 @@
 - 他tenantのitemは読めない、更新できない、存在も推測しにくい応答にする。変更時は複数tenant integration testを維持する。
 - API契約は `packages/contracts/src/example_service.ts` のZodを単一ソースとする。routeはchainを切らず `AppType` を保つ。
 - DB schema変更は `docs/database/DATABASE_RULE.md` に従い、Drizzle生成migrationを作る。FKは宣言しない。
-- organizationはadminが源泉。このD1の行は同期コピーであり、このサービスから運営情報を独自変更しない。
-- 通知は `@app/shared` のinternal helperからNOTIFIER bindingへ同期送信する。通知失敗でdomain writeを巻き戻すかbest-effortにするかは既存仕様を確認し、握りつぶす経路はログと戻り値をテストする。
+- organizationはadminが源泉。このD1の行は同期コピーであり、このサービスから運営情報を独自変更しない。`synced_at` は受信 lease で、2時間を超えた行や不完全な旧行は `not_synced` (503) として fail closed にする。admin の reconcile は hourly で動かす。production API は `tenantAuth` の後に `requireLiveDomainSession` を置き、admin の refresh session / user / org を毎リクエスト照合する。org lease はこの live 認証の代替ではない。
+- 通知は `@app/shared` のinternal helperからNOTIFIER bindingへ `x-internal-caller=domain` + `DOMAIN_TO_NOTIFIER_KEY` で同期送信する。通知失敗でdomain writeを巻き戻すかbest-effortにするかは既存仕様を確認し、握りつぶす経路はログと戻り値をテストする。
 - CORSや別API originを追加しない。SPA/APIは同一Worker・同一originを維持する。
+- sessionStorageは許可されたdev login fallbackだけで使い、access tokenとorganization ID以外を永続化しない。
+- access JWT は RS256。admin が JWT_PRIVATE_KEY で署名し、この domain Worker は JWT_PUBLIC_KEY だけで検証する。AUTH_DEV_PRIVATE_KEY と AUTH_DEV_GRANT はローカル専用で、本番へ持ち込まない。
 - 色、font、radiusは `@app/ui` とtheme token経由だけを使う。
 
 ## コマンド
@@ -53,7 +57,7 @@ pnpm --filter @app/example_service db:generate
 pnpm --filter @app/example_service db:migrate:local
 ```
 
-通常のローカル起動はルートで `make dev/example_service`。adminとのbinding連携も確認する場合は `make dev/all`。
+通常のローカル起動はルートで `make dev/example_service`。adminとのbinding連携も確認する場合は `make dev/all`。本番 deploy は行わず、fork 後の実サービスだけに protected main / production environment の deploy 設定を追加する。
 
 ## 必須テスト
 
@@ -63,6 +67,7 @@ pnpm --filter @app/example_service db:migrate:local
 - Worker flow: `items.integration.test.ts` でD1結果、status、通知成功/失敗を検証する。
 - 時刻を使う機能: `*.time.test.ts` を分け、実時刻でなく引数注入する。
 - UI変更: `src/web/App.test.tsx`（workspace sign-in/out、loading、validation、create/error/401、表示とaccessibility）と `client.test.ts`（bearer/logout）を対象に応じて先に失敗させ、`test:web` と e2e を実行する。新しい production behavior は frontend も例外なく test-first。
+- Web transport/session変更: `src/web/platform/transport.test.ts` と `src/web/auth/session.test.ts` でsame-origin fetch、sessionStorage、bearer/logoutを先に固定する。
 - Approved UC/AC: `e2e/smoke.spec.ts` の `@e2e-covers` を各scenario直前に置き、`docs/testing/E2E_TRACEABILITY.md` の100%対応を維持する。
 
 ## コピー時の確認
@@ -72,7 +77,8 @@ pnpm --filter @app/example_service db:migrate:local
 3. admin側のbindingとorganization sync先を人間承認済み設計に合わせる。
 4. `packages/contracts/src/index.ts` と新サービスの `AppType` exportを接続する。
 5. `pnpm -r cf-typegen`、migration、seed、`pnpm check`、対象e2eを通す。
-6. CODEMAP、deploy/infra文書、サービス固有AGENTSを新しい責務へ更新する。
+6. Tauriを使うサービスはこの雛形ではなく`example_tauri_service`をコピーする。
+7. CODEMAP、deploy/infra文書、サービス固有AGENTSを新しい責務へ更新する。
 
 ## 文書と完了
 

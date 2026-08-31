@@ -2,9 +2,15 @@
  * 認証コアロジック。
  *
  * hono から切り離した純度の高い関数群。public(/api/auth/*)ルートがこれを呼ぶ。
- * 副作用は D1 と KV のみで、cookie 化は呼び出し側(ルート)の責務。
+ * 副作用は D1 のみで、cookie 化は呼び出し側(ルート)の責務。
  */
-import type { LoginResponse, RefreshResponse, Role } from '@app/contracts'
+import {
+  type AuthSessionCheckRequest,
+  type AuthSessionStatus,
+  type LoginResponse,
+  type RefreshResponse,
+  Role,
+} from '@app/contracts'
 import {
   ACCESS_TTL_SECONDS,
   generateRefreshToken,
@@ -14,25 +20,36 @@ import {
   signAccessToken,
   verifyStretched,
 } from '@app/shared'
-import type { KVNamespace } from '@cloudflare/workers-types'
-import { and, eq, isNull, lt } from 'drizzle-orm'
+import { and, eq, isNull, lte, sql } from 'drizzle-orm'
 import type { DrizzleD1Database } from 'drizzle-orm/d1'
-import { authEvents, invitations, organizations, refreshTokens, users } from '../db/schema'
+import {
+  authEvents,
+  invitations,
+  loginRateLimits,
+  organizations,
+  refreshTokens,
+  users,
+} from '../db/schema'
 
 type Db = DrizzleD1Database<Record<string, never>>
 
 type AuthConfig = {
   pepper: string
-  jwtSecret: string
+  jwtPrivateKey: string
   /** テスト用の固定時刻(秒)。未指定なら実時刻。 */
   now?: number
 }
 
-export type AuthDeps = { db: Db; kv: KVNamespace } & AuthConfig
+export type AuthDeps = { db: Db } & AuthConfig
 
 /** ログイン試行のロックアウト閾値 / ウィンドウ。 */
 export const MAX_LOGIN_FAILURES = 5
 export const LOCKOUT_WINDOW_SECONDS = 15 * 60
+// A second, IP-scoped bucket prevents an attacker from creating an unbounded
+// number of email+IP rows with syntactically valid throw-away addresses.
+// It is deliberately much higher than the per-account lockout threshold so a
+// shared office/NAT address is not locked out by a handful of bad passwords.
+const MAX_LOGIN_ATTEMPTS_PER_IP = 1_000
 
 /**
  * 多タブ同時 refresh の猶予(秒)。複数タブが同じ cookie で並行 refresh すると、
@@ -57,6 +74,44 @@ type Fail = {
 export type LoginOutcome = { ok: true; response: LoginResponse } | Fail
 export type RefreshOutcome = { ok: true; response: RefreshResponse } | Fail
 export type AcceptOutcome = { ok: true; response: LoginResponse } | Fail
+
+/**
+ * Check the live state behind an access token presented to a domain Worker.
+ * The domain never gets this D1 or the JWT private key; it sends only the
+ * already verified `sid`/`sub`/`org` tuple over its caller-specific binding.
+ */
+export async function liveSessionStatus(
+  deps: AuthDeps,
+  input: AuthSessionCheckRequest,
+): Promise<AuthSessionStatus> {
+  const now = isoFromSec(nowSec(deps))
+  const sessions = await deps.db
+    .select({ id: refreshTokens.id })
+    .from(refreshTokens)
+    .where(
+      and(
+        eq(refreshTokens.id, input.sid),
+        eq(refreshTokens.userId, input.sub),
+        eq(refreshTokens.organizationId, input.org),
+        isNull(refreshTokens.revokedAt),
+        isNull(refreshTokens.rotatedTo),
+        sql`${refreshTokens.expiresAt} > ${now}`,
+      ),
+    )
+    .limit(1)
+  if (!sessions[0]) return { active: false, role: null }
+
+  const user = await loadUserById(deps, input.sub)
+  const org = await loadOrg(deps, input.org)
+  const role = user ? Role.safeParse(user.role) : null
+  if (!user?.passwordHash) {
+    return { active: false, role: null }
+  }
+  if (user.organizationId !== input.org || !org || org.isDisabled !== '0' || !role?.success) {
+    return { active: false, role: null }
+  }
+  return { active: true, role: role.data }
+}
 
 function nowSec(deps: AuthDeps): number {
   return deps.now ?? Math.floor(Date.now() / 1000)
@@ -101,21 +156,57 @@ async function loadOrg(deps: AuthDeps, id: string): Promise<OrgRow | undefined> 
   return rows[0] as OrgRow | undefined
 }
 
+async function reserveLoginBucket(
+  deps: AuthDeps,
+  key: string,
+  now: string,
+  expiresAt: string,
+  maxFailures: number,
+): Promise<number> {
+  const reservation = await deps.db
+    .insert(loginRateLimits)
+    .values({ key, failures: 1, expiresAt })
+    .onConflictDoUpdate({
+      target: loginRateLimits.key,
+      set: {
+        failures: sql`CASE
+          WHEN ${loginRateLimits.expiresAt} <= ${now} THEN 1
+          WHEN ${loginRateLimits.failures} < ${maxFailures}
+            THEN ${loginRateLimits.failures} + 1
+          ELSE ${maxFailures + 1}
+        END`,
+        expiresAt: sql`CASE
+          WHEN ${loginRateLimits.expiresAt} <= ${now} THEN ${expiresAt}
+          ELSE ${loginRateLimits.expiresAt}
+        END`,
+      },
+    })
+    .returning({ failures: loginRateLimits.failures })
+  return reservation[0]?.failures ?? maxFailures + 1
+}
+
 /**
  * access JWT + 新しい refresh トークンを発行し、refresh を DB に保存する。
  * login と accept-invite が共有。返り値の refreshToken は平文(以降は保存しない)。
  */
 async function issueSession(deps: AuthDeps, user: UserRow, org: OrgRow): Promise<LoginResponse> {
   const sec = nowSec(deps)
+  const refreshId = crypto.randomUUID()
   const token = await signAccessToken(
-    { sub: user.id, org: user.organizationId, email: user.email, role: user.role as Role },
-    deps.jwtSecret,
+    {
+      sub: user.id,
+      org: user.organizationId,
+      email: user.email,
+      role: user.role as Role,
+      sid: refreshId,
+    },
+    deps.jwtPrivateKey,
     ACCESS_TTL_SECONDS,
     sec,
   )
   const refreshToken = generateRefreshToken()
   await deps.db.insert(refreshTokens).values({
-    id: crypto.randomUUID(),
+    id: refreshId,
     userId: user.id,
     organizationId: user.organizationId,
     tokenHash: await hashToken(refreshToken),
@@ -138,8 +229,9 @@ async function issueSession(deps: AuthDeps, user: UserRow, org: OrgRow): Promise
 }
 
 /**
- * ログイン。email+IP で失敗回数を KV でカウントし 5 回でロックアウト(429)。
- * 成功でカウンタ解除。stretched(クライアント PBKDF2 出力)を pepper HMAC 照合。
+ * ログイン。email+IP の試行予約を D1 の UPSERT で原子的にカウントし、5 回を
+ * 超えたらロックアウト(429)。KV の get→put では並行リクエストが閾値を回避する
+ * ため使わない。成功で CAS 的にカウンタを解除する。
  */
 export async function login(
   deps: AuthDeps,
@@ -147,9 +239,34 @@ export async function login(
 ): Promise<LoginOutcome> {
   const email = input.email.toLowerCase()
   const ip = input.ip ?? 'unknown'
-  const rlKey = `rl:login:${email}:${ip}`
-  const failures = Number(await deps.kv.get(rlKey)) || 0
-  if (failures >= MAX_LOGIN_FAILURES) {
+  const sec = nowSec(deps)
+  const now = isoFromSec(sec)
+  const expiresAt = isoFromSec(sec + LOCKOUT_WINDOW_SECONDS)
+  // Do not persist the email/IP pair itself. Each insert-on-conflict update is
+  // a single SQLite statement, so parallel requests receive distinct counters.
+  // The IP bucket bounds how many account-specific rows one source can create
+  // during a window, even when it rotates through unique email addresses.
+  const ipKey = await hashToken(`login-ip:${ip}`)
+  const ipAttempts = await reserveLoginBucket(
+    deps,
+    ipKey,
+    now,
+    expiresAt,
+    MAX_LOGIN_ATTEMPTS_PER_IP,
+  )
+  if (ipAttempts > MAX_LOGIN_ATTEMPTS_PER_IP) {
+    await recordEvent(deps, { organizationId: null, email, kind: 'ip_lockout', ip })
+    return {
+      ok: false,
+      status: 429,
+      error: 'too_many_requests',
+      retryAfter: LOCKOUT_WINDOW_SECONDS,
+    }
+  }
+
+  const rlKey = await hashToken(`login:${email}:${ip}`)
+  const failures = await reserveLoginBucket(deps, rlKey, now, expiresAt, MAX_LOGIN_FAILURES)
+  if (failures > MAX_LOGIN_FAILURES) {
     await recordEvent(deps, { organizationId: null, email, kind: 'lockout', ip })
     return {
       ok: false,
@@ -159,13 +276,8 @@ export async function login(
     }
   }
 
-  const bump = async () => {
-    await deps.kv.put(rlKey, String(failures + 1), { expirationTtl: LOCKOUT_WINDOW_SECONDS })
-  }
-
   const user = await loadUserByEmail(deps, email)
   if (!user?.passwordHash) {
-    await bump()
     await recordEvent(deps, {
       organizationId: user?.organizationId ?? null,
       email,
@@ -177,7 +289,6 @@ export async function login(
   const org = await loadOrg(deps, user.organizationId)
   const ok = await verifyStretched(input.stretched, deps.pepper, user.passwordHash)
   if (!ok || !org) {
-    await bump()
     await recordEvent(deps, {
       organizationId: user.organizationId,
       email,
@@ -191,13 +302,16 @@ export async function login(
   // この 403 でもカウンタは増やす — ここだけ bump しないと、無効 org の有効資格
   // 情報を持つ相手にレート制限のかからない probe 経路を残すことになる。
   if (org.isDisabled === '1') {
-    await bump()
     await recordEvent(deps, { organizationId: org.id, email, kind: 'login_failure', ip })
     return { ok: false, status: 403, error: 'org_disabled' }
   }
 
-  // KV write は無料枠(1,000/日)を食うので、カウンタがあるときだけ消す。
-  if (failures > 0) await deps.kv.delete(rlKey)
+  // A concurrent failure may have advanced the counter after this request's
+  // reservation. Delete only when it is still our value; never erase a newer
+  // failed-attempt record.
+  await deps.db
+    .delete(loginRateLimits)
+    .where(and(eq(loginRateLimits.key, rlKey), eq(loginRateLimits.failures, failures)))
   await recordEvent(deps, { organizationId: org.id, email, kind: 'login_success', ip })
   return { ok: true, response: await issueSession(deps, user, org) }
 }
@@ -248,7 +362,7 @@ export async function refresh(
   }
 
   const sec = nowSec(deps)
-  if (new Date(row.expiresAt).getTime() / 1000 < sec) {
+  if (new Date(row.expiresAt).getTime() / 1000 <= sec) {
     return { ok: false, status: 401, error: 'expired_token' }
   }
 
@@ -260,30 +374,56 @@ export async function refresh(
   const newToken = generateRefreshToken()
   const newId = crypto.randomUUID()
   const accessToken = await signAccessToken(
-    { sub: user.id, org: user.organizationId, email: user.email, role: user.role as Role },
-    deps.jwtSecret,
+    {
+      sub: user.id,
+      org: user.organizationId,
+      email: user.email,
+      role: user.role as Role,
+      sid: newId,
+    },
+    deps.jwtPrivateKey,
     ACCESS_TTL_SECONDS,
     sec,
   )
-  await deps.db.batch([
-    deps.db.insert(refreshTokens).values({
-      id: newId,
-      userId: user.id,
-      organizationId: user.organizationId,
-      tokenHash: await hashToken(newToken),
-      expiresAt: isoFromSec(sec + REFRESH_TTL_SECONDS),
-      rotatedTo: null,
-      revokedAt: null,
-      createdAt: isoFromSec(sec),
-    }),
-    deps.db.update(refreshTokens).set({ rotatedTo: newId }).where(eq(refreshTokens.id, row.id)),
+  const successorTokenHash = await hashToken(newToken)
+  // The compare-and-set update is deliberately the first statement. D1
+  // serializes the batch transaction: exactly one concurrent caller can mark
+  // the old row with its own successor id. The insert then checks that marker,
+  // so a loser cannot leave an orphan successor row behind.
+  const results = await deps.db.batch([
+    deps.db
+      .update(refreshTokens)
+      .set({ rotatedTo: newId })
+      .where(
+        and(
+          eq(refreshTokens.id, row.id),
+          isNull(refreshTokens.rotatedTo),
+          isNull(refreshTokens.revokedAt),
+        ),
+      ),
+    deps.db.insert(refreshTokens).select(
+      sql`
+        SELECT ${newId}, ${user.id}, ${user.organizationId}, ${successorTokenHash},
+          ${isoFromSec(sec + REFRESH_TTL_SECONDS)}, ${null}, ${null}, ${isoFromSec(sec)}
+        WHERE EXISTS (
+          SELECT 1 FROM ${refreshTokens}
+          WHERE ${refreshTokens.id} = ${row.id}
+            AND ${refreshTokens.rotatedTo} = ${newId}
+            AND ${refreshTokens.revokedAt} IS NULL
+        )
+      `,
+    ),
     // 掃除: 期限切れ行はもう再利用検知に寄与しない(期限チェックが先に 401 を
     // 返す)ので、ローテーションのついでに削除する。放置するとテーブルが refresh
     // のたび無限に育ち、認証ホットパスの rows_read(無料枠 5M/日)を食い潰す。
     deps.db
       .delete(refreshTokens)
-      .where(and(eq(refreshTokens.userId, user.id), lt(refreshTokens.expiresAt, isoFromSec(sec)))),
+      .where(and(eq(refreshTokens.userId, user.id), lte(refreshTokens.expiresAt, isoFromSec(sec)))),
   ])
+  const inserted = results[1]?.meta.changes === 1
+  if (!inserted) {
+    return { ok: false, status: 401, error: 'rotation_race', keepCookie: true }
+  }
   return { ok: true, response: { token: accessToken, refreshToken: newToken } }
 }
 
@@ -297,7 +437,7 @@ export async function acceptInvite(
   const inv = rows[0]
   if (!inv) return { ok: false, status: 404, error: 'invite_not_found' }
   const sec = nowSec(deps)
-  if (inv.consumedAt || new Date(inv.expiresAt).getTime() / 1000 < sec) {
+  if (inv.consumedAt || new Date(inv.expiresAt).getTime() / 1000 <= sec) {
     return { ok: false, status: 410, error: 'invite_expired' }
   }
   // email は stretch の salt。招待と違う email で受諾させると「別 salt のハッシュ」が
@@ -308,6 +448,10 @@ export async function acceptInvite(
   }
   const user = await loadUserByEmail(deps, inv.email.toLowerCase())
   if (!user) return { ok: false, status: 404, error: 'user_not_found' }
+  // Invitation acceptance is account creation, not password reset. Keep this
+  // invariant in the service layer as well as the HTTP route so another caller
+  // cannot use a still-pending row to replace an existing credential.
+  if (user.passwordHash) return { ok: false, status: 410, error: 'invite_expired' }
   // クロステナント防御: 招待の org とユーザーの所属 org が一致しない招待は
   // 受諾させない(他 org 既存ユーザーのパスワード上書き = アカウント乗っ取り防止)。
   if (user.organizationId !== inv.organizationId) {
@@ -318,13 +462,44 @@ export async function acceptInvite(
   if (org.isDisabled === '1') return { ok: false, status: 403, error: 'org_disabled' }
 
   const passwordHash = await hashStretched(input.stretched, deps.pepper)
-  await deps.db.batch([
-    deps.db.update(users).set({ passwordHash }).where(eq(users.id, user.id)),
+  const consumedAt = isoFromSec(sec)
+  const claimNonce = crypto.randomUUID()
+  // Claim the invitation first with a conditional update. Only the winner of
+  // this statement can satisfy the EXISTS predicate in the following update;
+  // a concurrent accept therefore cannot overwrite the winner's password.
+  const [claim, passwordUpdate] = await deps.db.batch([
     deps.db
       .update(invitations)
-      .set({ consumedAt: isoFromSec(sec) })
-      .where(eq(invitations.id, inv.id)),
+      .set({ consumedAt, consumedNonce: claimNonce })
+      .where(
+        and(
+          eq(invitations.id, inv.id),
+          isNull(invitations.consumedAt),
+          sql`${invitations.expiresAt} > ${consumedAt}`,
+        ),
+      ),
+    deps.db
+      .update(users)
+      .set({ passwordHash })
+      .where(
+        and(
+          eq(users.id, user.id),
+          sql`EXISTS (
+            SELECT 1 FROM invitations
+            WHERE invitations.id = ${inv.id}
+              AND invitations.consumed_at = ${consumedAt}
+              AND invitations.consumed_nonce = ${claimNonce}
+          )`,
+        ),
+      ),
+    deps.db
+      .update(invitations)
+      .set({ consumedNonce: null })
+      .where(and(eq(invitations.id, inv.id), eq(invitations.consumedNonce, claimNonce))),
   ])
+  if (claim.meta.changes !== 1 || passwordUpdate.meta.changes !== 1) {
+    return { ok: false, status: 410, error: 'invite_expired' }
+  }
   await recordEvent(deps, { organizationId: org.id, email: user.email, kind: 'invite_accepted' })
   return { ok: true, response: await issueSession(deps, { ...user, passwordHash }, org) }
 }

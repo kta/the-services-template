@@ -37,6 +37,7 @@ describe('admin browser session', () => {
     vi.restoreAllMocks()
     vi.useRealTimers()
     sessionStorage.clear()
+    localStorage.clear()
   })
 
   it('logs in with a stretched password and attaches its bearer token', async () => {
@@ -59,6 +60,7 @@ describe('admin browser session', () => {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ email: 'admin@example.com', stretched: 'stretched' }),
+      redirect: 'error',
     })
     expect(new Headers(fetch.mock.calls[1]?.[1]?.headers).get('authorization')).toBe(
       'Bearer access-token',
@@ -79,7 +81,10 @@ describe('admin browser session', () => {
     const response = await session.authFetch('/api/protected')
 
     expect(response.ok).toBe(true)
-    expect(fetch).toHaveBeenNthCalledWith(2, '/api/auth/refresh', { method: 'POST' })
+    expect(fetch).toHaveBeenNthCalledWith(2, '/api/auth/refresh', {
+      method: 'POST',
+      redirect: 'error',
+    })
     expect(new Headers(fetch.mock.calls[2]?.[1]?.headers).get('authorization')).toBe(
       'Bearer renewed',
     )
@@ -160,6 +165,91 @@ describe('admin browser session', () => {
     expect(sessionStorage.getItem('app.admin.dev.token')).toBeNull()
   })
 
+  it('blocks cookie refresh after an offline browser logout until an explicit login succeeds', async () => {
+    shared.stretchPassword.mockResolvedValue('stretched')
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json({ token: 'browser-token' }))
+      .mockRejectedValueOnce(new Error('offline'))
+    vi.stubGlobal('fetch', fetch)
+    const session = await loadSession()
+
+    await session.login('admin@example.com', 'password')
+    await session.logout()
+    expect(localStorage.getItem('app.admin.logout.intent')).toBe('1')
+
+    const reloaded = await loadSession()
+    fetch.mockClear()
+    await expect(reloaded.bootstrap()).resolves.toBe(false)
+    expect(fetch).not.toHaveBeenCalled()
+
+    fetch.mockResolvedValueOnce(json({ token: 'logged-in-again' }))
+    await reloaded.login('admin@example.com', 'password')
+    expect(localStorage.getItem('app.admin.logout.intent')).toBeNull()
+  })
+
+  it('fails closed when an offline logout cannot persist its browser tombstone', async () => {
+    shared.stretchPassword.mockResolvedValue('stretched')
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json({ token: 'browser-token' }))
+      .mockRejectedValueOnce(new Error('offline'))
+    vi.stubGlobal('fetch', fetch)
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('storage disabled')
+    })
+    const session = await loadSession()
+
+    await session.login('admin@example.com', 'password')
+    await expect(session.logout()).rejects.toMatchObject({ name: 'LogoutError' })
+    expect(session.isAuthenticated()).toBe(false)
+    await expect(session.bootstrap()).resolves.toBe(false)
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('fails closed when the browser logout tombstone cannot be read', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')))
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new Error('storage disabled')
+    })
+    const session = await loadSession()
+
+    await expect(session.bootstrap()).resolves.toBe(false)
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('does not let an in-flight refresh resurrect a session after logout', async () => {
+    let resolveRefresh: ((response: Response) => void) | undefined
+    const refreshResponse = new Promise<Response>((resolve) => {
+      resolveRefresh = resolve
+    })
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(null, { status: 401 }))
+      .mockImplementationOnce(() => refreshResponse)
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+    vi.stubGlobal('fetch', fetch)
+    const session = await loadSession()
+
+    const request = session.authFetch('/api/protected')
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2))
+    const logout = session.logout()
+    await expect(
+      session.authFetch('/api/mutation', { headers: { authorization: 'Bearer old' } }),
+    ).rejects.toMatchObject({
+      name: 'LogoutError',
+    })
+    expect(fetch).toHaveBeenCalledTimes(2)
+    resolveRefresh?.(json({ token: 'must-not-be-installed' }))
+
+    await expect(request).resolves.toMatchObject({ status: 401 })
+    await logout
+
+    expect(session.isAuthenticated()).toBe(false)
+    expect(fetch).toHaveBeenCalledTimes(3)
+    expect(fetch.mock.calls[2]?.[0]).toBe('/api/auth/logout')
+  })
+
   it('exposes failed API logins as status-bearing errors', async () => {
     shared.stretchPassword.mockResolvedValue('stretched')
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 403 })))
@@ -211,6 +301,24 @@ describe('admin browser session', () => {
     expect(session.isAuthenticated()).toBe(true)
   })
 
+  it('does not restore or persist development tokens in Tauri session storage', async () => {
+    tauriWindow().__TAURI_INTERNALS__ = {}
+    sessionStorage.setItem('app.admin.dev.token', jwt(1_893_456_000))
+    invoke
+      .mockResolvedValueOnce({ status: 401, headers: {}, body: '{"error":"unauthorized"}' })
+      .mockResolvedValueOnce({
+        status: 200,
+        headers: {},
+        body: JSON.stringify({ token: 'dev-native-token' }),
+      })
+    const session = await loadSession()
+
+    await expect(session.bootstrap()).resolves.toBe(false)
+    expect(sessionStorage.getItem('app.admin.dev.token')).toBeNull()
+    await expect(session.devLogin('org-admin')).resolves.toBe(true)
+    expect(sessionStorage.getItem('app.admin.dev.token')).toBeNull()
+  })
+
   it('uses native IPC for invite, development login, and logout failure clears memory', async () => {
     tauriWindow().__TAURI_INTERNALS__ = {}
     shared.stretchPassword.mockResolvedValue('stretched')
@@ -226,6 +334,7 @@ describe('admin browser session', () => {
         body: JSON.stringify({ token: 'dev-native-token' }),
       })
       .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce(undefined)
     const session = await loadSession()
 
     await session.acceptInvite('invite', 'staff@example.com', 'password')
@@ -250,6 +359,67 @@ describe('admin browser session', () => {
       headers: {},
       body: null,
     })
+    expect(invoke).toHaveBeenNthCalledWith(4, 'clear_session')
     expect(session.isAuthenticated()).toBe(false)
+  })
+
+  it('serializes login and logout so a late login cannot restore a cleared session', async () => {
+    tauriWindow().__TAURI_INTERNALS__ = {}
+    shared.stretchPassword.mockResolvedValue('stretched')
+    let resolveLogin: ((value: unknown) => void) | undefined
+    invoke
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveLogin = resolve
+        }),
+      )
+      .mockResolvedValueOnce({ status: 204, headers: {}, body: '' })
+      .mockResolvedValueOnce(undefined)
+    const session = await loadSession()
+
+    const login = session.login('admin@example.com', 'password')
+    const logout = session.logout()
+    resolveLogin?.({
+      status: 200,
+      headers: {},
+      body: JSON.stringify({ token: 'late-login-token' }),
+    })
+
+    await login
+    await logout
+
+    expect(session.isAuthenticated()).toBe(false)
+    expect(invoke).toHaveBeenNthCalledWith(2, 'api_request', {
+      method: 'POST',
+      path: '/api/auth/logout',
+      headers: {},
+      body: null,
+    })
+    expect(invoke).toHaveBeenNthCalledWith(3, 'clear_session')
+  })
+
+  it('reports a native protected-store clear failure after clearing renderer state', async () => {
+    tauriWindow().__TAURI_INTERNALS__ = {}
+    shared.stretchPassword.mockResolvedValue('stretched')
+    invoke
+      .mockResolvedValueOnce({
+        status: 200,
+        headers: {},
+        body: JSON.stringify({ token: 'native-token' }),
+      })
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockRejectedValueOnce(new Error('keyring unavailable'))
+    const session = await loadSession()
+
+    await session.login('admin@example.com', 'password')
+    await expect(session.logout()).rejects.toMatchObject({ name: 'LogoutError' })
+    expect(session.isAuthenticated()).toBe(false)
+    expect(invoke).toHaveBeenNthCalledWith(2, 'api_request', {
+      method: 'POST',
+      path: '/api/auth/logout',
+      headers: {},
+      body: null,
+    })
+    expect(invoke).toHaveBeenNthCalledWith(3, 'clear_session')
   })
 })

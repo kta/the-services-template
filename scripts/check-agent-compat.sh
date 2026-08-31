@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="${1:-$(git rev-parse --show-toplevel)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
 fail() {
@@ -14,7 +15,7 @@ fail() {
 [[ "$(readlink CLAUDE.md)" == "AGENTS.md" ]] || fail "CLAUDE.md must point to AGENTS.md"
 [[ -r CLAUDE.md ]] || fail "CLAUDE.md link is broken"
 
-for service in admin example_service notifier ops; do
+for service in admin example_service example_tauri_service notifier ops; do
   agents="services/$service/AGENTS.md"
   claude="services/$service/CLAUDE.md"
   [[ -f "$agents" && ! -L "$agents" ]] || fail "$agents must be the canonical regular file"
@@ -55,6 +56,12 @@ if [[ -e .agents/skills || -e .claude/skills || -L .claude/skills ]]; then
     ' "$skill_file" || fail "$skill_file is missing frontmatter description"
   done < <(find -L .agents/skills -mindepth 2 -maxdepth 2 -name SKILL.md -type f | sort)
   (( skill_count > 0 )) || fail ".agents/skills does not contain any SKILL.md"
+fi
+
+new_service_skill=".agents/skills/new-service/SKILL.md"
+if [[ -f "$new_service_skill" ]]; then
+  node "$SCRIPT_DIR/check-new-service-skill.mjs" "$new_service_skill" ||
+    fail "new-service template choice contract is invalid"
 fi
 
 printf 'agent-compat: ok (%s)\n' "$(basename "$ROOT")"

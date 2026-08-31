@@ -22,8 +22,9 @@ fn main() {
     // must not read a runtime or JavaScript-provided replacement.
     println!("cargo:rustc-env=TAURI_ADMIN_API_ORIGIN={origin}");
     tauri_build::try_build(
-        tauri_build::Attributes::new()
-            .app_manifest(tauri_build::AppManifest::new().commands(&["api_request"])),
+        tauri_build::Attributes::new().app_manifest(
+            tauri_build::AppManifest::new().commands(&["api_request", "clear_session"]),
+        ),
     )
     .expect("failed to generate Tauri ACL");
 }

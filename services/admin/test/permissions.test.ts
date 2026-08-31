@@ -13,11 +13,15 @@
 
 import { createExecutionContext, env, SELF } from 'cloudflare:test'
 import { signAccessToken } from '@app/shared'
+import { sign as signJwt } from 'hono/jwt'
 import { describe, expect, it } from 'vitest'
+import { JWT_TEST_PRIVATE_KEY } from '../../../packages/shared/test/jwt-keys'
 
 const BASE = 'https://admin.test'
 const JSON_HEADERS = { 'content-type': 'application/json' }
-const JWT_SECRET = 'dev-jwt-secret-change-me'
+const TEST_PRIVATE_KEY =
+  (env as typeof env & { AUTH_DEV_PRIVATE_KEY?: string }).AUTH_DEV_PRIVATE_KEY ||
+  JWT_TEST_PRIVATE_KEY
 
 type Actor = 'none' | 'staff' | 'tenant-admin' | 'operator-admin' | 'expired' | 'wrong-secret'
 
@@ -52,7 +56,9 @@ async function tenantAdminToken(): Promise<string> {
   })
   const { acceptUrl } = (await invited.json()) as { acceptUrl?: string }
   if (!acceptUrl) throw new Error('invite did not return an acceptUrl')
-  const token = new URL(acceptUrl).searchParams.get('token') ?? ''
+  const parsed = new URL(acceptUrl)
+  const token =
+    new URLSearchParams(parsed.hash.slice(1)).get('token') ?? parsed.searchParams.get('token') ?? ''
   const accepted = await SELF.fetch(`${BASE}/api/auth/accept-invite`, {
     method: 'POST',
     headers: JSON_HEADERS,
@@ -74,15 +80,16 @@ async function headersFor(actor: Actor): Promise<Record<string, string>> {
     case 'expired': {
       const expired = await signAccessToken(
         { sub: 'u1', org: 'operator-org', email: 'a@b.test', role: 'admin' },
-        JWT_SECRET,
+        TEST_PRIVATE_KEY,
         -1, // 1 秒前に失効
       )
       return { authorization: `Bearer ${expired}` }
     }
     case 'wrong-secret': {
-      const other = await signAccessToken(
-        { sub: 'u1', org: 'operator-org', email: 'a@b.test', role: 'admin' },
+      const other = await signJwt(
+        { sub: 'u1', org: 'operator-org', email: 'a@b.test', role: 'admin', exp: 2_000_000_000 },
         'a-different-secret',
+        'HS256',
       )
       return { authorization: `Bearer ${other}` }
     }
@@ -186,6 +193,11 @@ describe('公開ルート(認証不要)', () => {
     expect(res.status).toBe(401)
     expect(((await res.json()) as { error: string }).error).toBe('no_session')
   })
+
+  it('未定義の /api/auth/* は公開例外に含めず default-deny で 401', async () => {
+    const res = await SELF.fetch(`${BASE}/api/auth/not-a-route`)
+    expect(res.status).toBe(401)
+  })
 })
 
 describe('内部ルートの鍵ゲート(JWT では通れない)', () => {
@@ -214,6 +226,39 @@ describe('dev トークングラントの fail close', () => {
         body: JSON.stringify({ organizationId: 'o1' }),
       }),
       { ...env, AUTH_DEV_GRANT: 'false' } as never,
+      createExecutionContext(),
+    )
+    expect(res.status).toBe(404)
+  })
+
+  it('AUTH_DEV_GRANT が true でも dev signing key が無ければ 404', async () => {
+    const { default: worker } = await import('../src/worker/index')
+    const res = await worker.fetch(
+      new Request(`${BASE}/api/auth/token`, {
+        method: 'POST',
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ organizationId: 'o1' }),
+      }),
+      { ...env, AUTH_DEV_GRANT: 'true', AUTH_DEV_PRIVATE_KEY: '' } as never,
+      createExecutionContext(),
+    )
+    expect(res.status).toBe(404)
+  })
+
+  it('production marker があれば dev grant の両設定が揃っていても 404', async () => {
+    const { default: worker } = await import('../src/worker/index')
+    const res = await worker.fetch(
+      new Request(`${BASE}/api/auth/token`, {
+        method: 'POST',
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ organizationId: 'production-dev-grant', role: 'admin' }),
+      }),
+      {
+        ...env,
+        APP_ENV: 'production',
+        AUTH_DEV_GRANT: 'true',
+        AUTH_DEV_PRIVATE_KEY: JWT_TEST_PRIVATE_KEY,
+      } as never,
       createExecutionContext(),
     )
     expect(res.status).toBe(404)

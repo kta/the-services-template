@@ -1,0 +1,1 @@
+CREATE INDEX `login_rate_limits_expires_at_idx` ON `login_rate_limits` (`expires_at`);

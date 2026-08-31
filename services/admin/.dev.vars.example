@@ -1,7 +1,13 @@
-# ローカル開発用の dev 値。`make init` が .dev.vars にコピーする(.dev.vars は gitignore)。
-# 本番は `wrangler secret put` で設定(docs/howto/deploy.md)。
-INTERNAL_KEY=dev-internal-key
-JWT_SECRET=dev-jwt-secret-change-me
+# ローカル開発用の dev 値。`make init` が .dev.vars にコピーし、鍵を生成する
+# APP_ENV は credential-less なローカル認証を明示するための実行環境マーカー。
+APP_ENV=development
+# (`.dev.vars` は gitignore)。本番は protected production workflow の allowlist 経由で設定する。
+DOMAIN_TO_ADMIN_KEY=dev-domain-to-admin-key-000000000000
+ADMIN_TO_EXAMPLE_SERVICE_KEY=dev-admin-to-example-service-key-000000000000
+ADMIN_TO_NOTIFIER_KEY=dev-admin-to-notifier-key-000000000000
+JWT_PRIVATE_KEY=
+JWT_PUBLIC_KEY=
+AUTH_DEV_PRIVATE_KEY=
 AUTH_PEPPER=dev-auth-pepper-change-me
-# credential 無しの dev トークングラント(/api/auth/token)を有効化。本番では設定しない(fail close)。
+# credential 無しの dev トークングラント(/api/auth/token)を有効化。本番では設定しない。
 AUTH_DEV_GRANT=true

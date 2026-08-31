@@ -1,4 +1,9 @@
 import { defineConfig, devices } from '@playwright/test'
+import { JWT_TEST_PRIVATE_KEY, JWT_TEST_PUBLIC_KEY } from '../../packages/shared/test/jwt-keys'
+import { fixtureSecret } from './e2e/fixture-secret'
+
+export const E2E_FIXTURE_CONTROL_TOKEN = fixtureSecret('E2E_FIXTURE_CONTROL_TOKEN', process.env)
+export const E2E_FIXTURE_INTERNAL_KEY = fixtureSecret('E2E_FIXTURE_INTERNAL_KEY', process.env)
 
 function withDisposableState(command: string): string {
   return `E2E_STATE_PATH="$(mktemp -d)" && export E2E_STATE_PATH && trap 'rm -rf "$E2E_STATE_PATH"' EXIT && ${command}`
@@ -18,7 +23,7 @@ export default defineConfig({
   webServer: [
     {
       command: withDisposableState(
-        'pnpm exec wrangler dev -c e2e/notifier-failure.wrangler.jsonc --local --port 8788 --persist-to "$E2E_STATE_PATH"',
+        `pnpm exec wrangler dev -c e2e/notifier-failure.wrangler.jsonc --local --port 8788 --persist-to "$E2E_STATE_PATH" --var E2E_FIXTURE_CONTROL_TOKEN:${E2E_FIXTURE_CONTROL_TOKEN} --var E2E_FIXTURE_INTERNAL_KEY:${E2E_FIXTURE_INTERNAL_KEY}`,
       ),
       url: 'http://localhost:8788/health',
       name: 'Notifier failure fixture',
@@ -29,6 +34,15 @@ export default defineConfig({
       command: withDisposableState(
         'pnpm exec wrangler d1 migrations apply example_service --local --persist-to "$E2E_STATE_PATH" && pnpm run build && pnpm exec vite preview --port 4173 --strictPort',
       ),
+      env: {
+        APP_ENV: 'development',
+        AUTH_DEV_GRANT: 'true',
+        AUTH_DEV_PRIVATE_KEY: JWT_TEST_PRIVATE_KEY,
+        E2E_AUTH: 'true',
+        ADMIN_TO_EXAMPLE_SERVICE_KEY: 'e2e-admin-to-example-service-key',
+        DOMAIN_TO_NOTIFIER_KEY: E2E_FIXTURE_INTERNAL_KEY,
+        JWT_PUBLIC_KEY: JWT_TEST_PUBLIC_KEY,
+      },
       url: 'http://localhost:4173',
       name: 'Example service',
       reuseExistingServer: false,

@@ -6,9 +6,9 @@
 Zod を単一ソースに、ドメインごと `src/<service>.ts`。バックは `zValidator`、フロントは `z.infer` で共有。手書き型・`any` 禁止。
 
 ## 認証（`packages/shared`）
-- 自前 JWT（HS256、access 15 分）+ 不透明 refresh（HttpOnly cookie、ローテーション + 再利用検知）。パスワードは**クライアント側 PBKDF2 600k + サーバ pepper HMAC**（Workers CPU 10ms 対応、`password.ts`）。
-- hono ミドルウェア: `tenantAuth` / `requireActiveOrg`（未同期 503 / 無効化 403）/ `requireRole` / `requirePlan`（`auth-server.ts`）。認証源泉は admin サービス（login / 招待 / ロックアウト）。
-- dev は `/api/auth/token`（dev グラント、`AUTH_DEV_GRANT` fail-close）。**本番は未設定 = 無効**。
+- 自前 JWT（RS256、access 15 分、issuer=`admin`、admin audience=`admin`、domain audience=`domain:<service_name>`）+ 不透明 refresh（HttpOnly cookie、ローテーション + 再利用検知）。署名用 `JWT_PRIVATE_KEY` は admin だけ、検証用 `JWT_PUBLIC_KEY` は admin と各 domain Worker に配置する。各 Worker は自分の audience だけを受け付ける。パスワードは**クライアント側 PBKDF2 600k + サーバ pepper HMAC**（Workers CPU 10ms 対応、`password.ts`）。
+- hono ミドルウェア: `tenantAuth` / domain の `requireLiveDomainSession`（admin の refresh session と現行 user/org を毎 request 照合、障害は 503 fail close）/ `requireActiveOrg`（未同期 503 / 無効化 403）/ `requireRole` / `requirePlan`（`auth-server.ts`）。認証源泉は admin サービス（login / 招待 / ロックアウト）。同期 org lease は live session の代替ではない。
+- dev は `/api/auth/token`（`AUTH_DEV_GRANT=true` と local-only `AUTH_DEV_PRIVATE_KEY` の両方が必要な dev グラント、fail-close）。**本番は未設定 = 無効**。
 
 ## 通知（`services/notifier` — Queue なし・無料枠）
 - 呼び出し側（各サービス）→ `sendNotification`（@app/shared）で notifier の `POST /api/internal/send` に **service binding 同期 POST**（best-effort）。
@@ -22,4 +22,4 @@ GA4 `trackEvent` + 中央レジストリ `ANALYTICS_EVENTS`（snake_case・PII �
 共有デザインシステム（components + tokens CSS）。両 SPA が `@app/ui` を利用。
 
 ## 規約（`AGENTS.md` / `docs/`）
-SDD（Specify→Plan→Tasks→Implement）・TDD（テスト先行）・テナントスコープ強制・1サービス1 D1・cross-D1 JOIN 禁止・secrets は `wrangler secret put`。
+SDD（Specify→Plan→Tasks→Implement）・TDD（テスト先行）・テナントスコープ強制・1サービス1 D1・cross-D1 JOIN 禁止・production secrets は protected production workflow の allowlist 経由（`scripts/put-production-secret.mjs` は validation-only）。

@@ -44,9 +44,12 @@ Approved かつ UC/AC を持つ spec は item feature と admin の browser-obse
 feature である。Tauri feature の native shell、Rust core、protected store、artifact build は
 Playwright suite の対象ではないため、spec 内で `NATIVE-*` / `WEB-*` / `CI-*` の検証要件として
 Rust unit、Vitest、CI workflow に割り当てる。これらを `@e2e-covers` で主張してはならない。
-`admin` の service spec と infrastructure-only の文書には UC/AC がないため、分母には入らない
+`admin` の service spec と infrastructure-only の文書には definition bullet の UC/AC がないため、分母には入らない
 （機械的な免除ではなく、そもそも product behavior を定義していない）。新しい browser
 behavior は Approved spec に UC/AC を付け、この表と E2E mapping を同じ変更で追加する。
+Tauri template separation は `STATIC-TPL-*` / `CI-TPL-*` という非 UC/AC の検証 ID を使い、
+Node/shell/workflow test が検証する。Playwright で観測できない要件を `AC-*` の表へ置いて
+validator の分母から隠したり、偽の `@e2e-covers` を付けたりしてはならない。
 
 | Spec ID | Playwright scenario |
 |---|---|

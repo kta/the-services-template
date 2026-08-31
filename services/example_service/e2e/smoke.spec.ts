@@ -1,4 +1,5 @@
 import { type APIRequestContext, expect, test } from '@playwright/test'
+import { E2E_FIXTURE_CONTROL_TOKEN, E2E_FIXTURE_INTERNAL_KEY } from '../playwright.config'
 
 async function issueToken(request: APIRequestContext, organizationId: string): Promise<string> {
   const response = await request.post('/api/auth/token', { data: { organizationId } })
@@ -10,8 +11,20 @@ function authHeaders(token: string): Record<string, string> {
   return { authorization: `Bearer ${token}` }
 }
 
+function fixtureControlHeaders(): Record<string, string> {
+  return { 'x-e2e-control-token': E2E_FIXTURE_CONTROL_TOKEN }
+}
+
+function fixtureInternalHeaders(): Record<string, string> {
+  return {
+    'content-type': 'application/json',
+    'x-internal-key': E2E_FIXTURE_INTERNAL_KEY,
+    'x-internal-caller': 'domain',
+  }
+}
+
 function unique(value: string): string {
-  return `${value}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  return `${value}-${crypto.randomUUID()}`
 }
 
 // e2e against the production build in workerd (`vite preview`): the same
@@ -85,7 +98,11 @@ test('creation persists and appears in the ledger when the notifier fixture retu
   request,
 }) => {
   const fixture = 'http://127.0.0.1:8788'
+  const untrustedStatus = await request.get(`${fixture}/__e2e/status`)
+  expect(untrustedStatus.status()).toBe(401)
+
   const preflight = await request.post(`${fixture}/api/internal/send`, {
+    headers: fixtureInternalHeaders(),
     data: {
       id: 'preflight-notification',
       type: 'item.created',
@@ -96,7 +113,7 @@ test('creation persists and appears in the ledger when the notifier fixture retu
   expect(preflight.status()).toBe(418)
   expect(preflight.headers()['x-e2e-notifier-fixture']).toBe('failure')
 
-  const reset = await request.post(`${fixture}/__e2e/reset`)
+  const reset = await request.post(`${fixture}/__e2e/reset`, { headers: fixtureControlHeaders() })
   expect(reset.status()).toBe(200)
   expect(await reset.json()).toEqual({ calls: 0 })
 
@@ -119,22 +136,28 @@ test('creation persists and appears in the ledger when the notifier fixture retu
 
   await expect
     .poll(async () => {
-      const status = await request.get(`${fixture}/__e2e/status`)
+      const status = await request.get(`${fixture}/__e2e/status`, {
+        headers: fixtureControlHeaders(),
+      })
       expect(status.status()).toBe(200)
       return ((await status.json()) as { calls: number }).calls
     })
     .toBeGreaterThanOrEqual(1)
 
-  const status = await request.get(`${fixture}/__e2e/status`)
+  const status = await request.get(`${fixture}/__e2e/status`, {
+    headers: fixtureControlHeaders(),
+  })
   expect(status.status()).toBe(200)
   const observed = (await status.json()) as {
     calls: number
     lastRequest: {
-      headers: Record<string, string>
+      caller: string
       job: {
         id: string
-        payload: { itemId: string; title: string }
-        to: string
+        itemId: string
+        payloadKeys: string[]
+        recipientDomain: string
+        titleLength: number
         type: string
       }
       method: string
@@ -143,15 +166,16 @@ test('creation persists and appears in the ledger when the notifier fixture retu
   }
   expect(observed.calls).toBeGreaterThanOrEqual(1)
   expect(observed.lastRequest).toMatchObject({
+    caller: 'domain',
     method: 'POST',
     pathname: '/api/internal/send',
     job: {
+      itemId: created.id,
+      payloadKeys: ['itemId', 'title'],
+      recipientDomain: 'example.com',
       type: 'item.created',
-      to: 'team@example.com',
-      payload: { itemId: created.id, title },
+      titleLength: title.length,
     },
   })
-  expect(observed.lastRequest.headers['content-type']).toContain('application/json')
-  expect(observed.lastRequest.headers['x-internal-key']).toBeTruthy()
   expect(observed.lastRequest.job.id).toBe(`item.created:${created.id}`)
 })

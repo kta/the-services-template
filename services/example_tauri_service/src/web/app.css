@@ -1,0 +1,6 @@
+@import "tailwindcss";
+@import "@app/ui/theme.css";
+
+/* Tailwind v4 doesn't traverse pnpm symlinks — tell it to scan the shared UI
+ * package for class names used by its components. */
+@source "../../../../packages/ui/src";

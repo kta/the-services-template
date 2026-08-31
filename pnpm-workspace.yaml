@@ -1,4 +1,5 @@
 packages:
+  # Both service templates are first-class workspaces: Web-only and Web + Tauri.
   - 'services/*'
   - 'packages/*'
 

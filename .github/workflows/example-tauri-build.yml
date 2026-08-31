@@ -1,0 +1,270 @@
+name: Example Tauri Service native artifacts
+
+on:
+  workflow_dispatch: {}
+
+# This workflow only produces unsigned/debug verification artifacts. It never
+# signs, notarizes, or uploads to Apple/Google stores.
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: 22
+  # Keep native verification reproducible. If Tauri changes its generated
+  # Android project, the alignment step below fails until these pins are
+  # reviewed and updated deliberately.
+  ANDROID_PLATFORM_API: 35
+  ANDROID_NDK_VERSION: 27.2.12479018
+  XCODEGEN_VERSION: 2.46.0
+
+jobs:
+  macos-universal:
+    name: example_tauri_service macOS universal app bundle
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - name: Capture trusted absolute Node path
+        id: trusted-node
+        shell: bash
+        run: |
+          set -euo pipefail
+          node_path="$(node -p 'require("node:fs").realpathSync(process.execPath)')"
+          case "$node_path" in
+            /*) ;;
+            *) echo "Node did not resolve to an absolute path" >&2; exit 1 ;;
+          esac
+          test -x "$node_path"
+          case "$node_path" in
+            "$GITHUB_WORKSPACE"/*) echo "Node resolved inside the checkout" >&2; exit 1 ;;
+          esac
+          printf 'path=%s\n' "$node_path" >> "$GITHUB_OUTPUT"
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Check native security boundary
+        run: ${{ steps.trusted-node.outputs.path }} scripts/native-workflow.mjs example_tauri_service boundary
+      - name: Check pinned Rust toolchain
+        run: test "$(rustc --version | awk '{print $2}')" = "1.88.0"
+      - name: Check unsigned desktop release boundary
+        run: ${{ steps.trusted-node.outputs.path }} scripts/native-workflow.mjs example_tauri_service check-release
+      - name: Install universal Rust targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Check Apple build tools
+        run: |
+          xcodebuild -version
+          pod --version
+      - name: Build unsigned universal debug app
+        run: ${{ steps.trusted-node.outputs.path }} scripts/native-workflow.mjs example_tauri_service build-macos
+      - name: Scan macOS artifact for secrets
+        run: ${{ steps.trusted-node.outputs.path }} scripts/native-workflow.mjs example_tauri_service verify-macos
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: example-tauri-service-macos-universal-debug
+          path: services/example_tauri_service/src-tauri/target/universal-apple-darwin/debug/bundle/macos/*.app
+          if-no-files-found: error
+          retention-days: 7
+
+  ios-simulator:
+    name: example_tauri_service iOS simulator app
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - name: Capture trusted absolute Node path
+        id: trusted-node
+        shell: bash
+        run: |
+          set -euo pipefail
+          node_path="$(node -p 'require("node:fs").realpathSync(process.execPath)')"
+          case "$node_path" in
+            /*) ;;
+            *) echo "Node did not resolve to an absolute path" >&2; exit 1 ;;
+          esac
+          test -x "$node_path"
+          case "$node_path" in
+            "$GITHUB_WORKSPACE"/*) echo "Node resolved inside the checkout" >&2; exit 1 ;;
+          esac
+          printf 'path=%s\n' "$node_path" >> "$GITHUB_OUTPUT"
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Check native security boundary
+        run: ${{ steps.trusted-node.outputs.path }} scripts/native-workflow.mjs example_tauri_service boundary
+      - name: Check pinned Rust toolchain
+        run: test "$(rustc --version | awk '{print $2}')" = "1.88.0"
+      - name: Install iOS simulator Rust target
+        run: rustup target add aarch64-apple-ios-sim
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Check Apple build tools
+        run: |
+          xcodebuild -version
+          pod --version
+          test "$(xcodegen --version)" = "Version: ${XCODEGEN_VERSION}"
+      - name: Initialize iOS project
+        run: ${{ steps.trusted-node.outputs.path }} scripts/native-workflow.mjs example_tauri_service init-ios
+      - name: Re-check native security boundary after iOS generation
+        run: ${{ steps.trusted-node.outputs.path }} scripts/native-workflow.mjs example_tauri_service boundary
+      - name: Build unsigned simulator artifact
+        run: ${{ steps.trusted-node.outputs.path }} scripts/native-workflow.mjs example_tauri_service build-ios
+      - name: Scan iOS artifact for secrets
+        run: ${{ steps.trusted-node.outputs.path }} scripts/native-workflow.mjs example_tauri_service verify-ios
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: example-tauri-service-ios-simulator
+          path: services/example_tauri_service/src-tauri/gen/apple/build
+          if-no-files-found: error
+          retention-days: 7
+
+  android-debug-apk:
+    name: example_tauri_service Android debug APK
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+      - name: Capture trusted absolute Node path
+        id: trusted-node
+        shell: bash
+        run: |
+          set -euo pipefail
+          node_path="$(node -p 'require("node:fs").realpathSync(process.execPath)')"
+          case "$node_path" in
+            /*) ;;
+            *) echo "Node did not resolve to an absolute path" >&2; exit 1 ;;
+          esac
+          test -x "$node_path"
+          case "$node_path" in
+            "$GITHUB_WORKSPACE"/*) echo "Node resolved inside the checkout" >&2; exit 1 ;;
+          esac
+          printf 'path=%s\n' "$node_path" >> "$GITHUB_OUTPUT"
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Check native security boundary
+        run: ${{ steps.trusted-node.outputs.path }} scripts/native-workflow.mjs example_tauri_service boundary
+      - name: Check pinned Rust toolchain
+        run: test "$(rustc --version | awk '{print $2}')" = "1.88.0"
+      - name: Install Android SDK prerequisites
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platform-tools" "platforms;android-${ANDROID_PLATFORM_API}" "ndk;${ANDROID_NDK_VERSION}"
+      - name: Install Android Rust target
+        run: rustup target add aarch64-linux-android
+      - name: Initialize Android project
+        run: ${{ steps.trusted-node.outputs.path }} scripts/native-workflow.mjs example_tauri_service init-android
+      - name: Re-check native security boundary after Android generation
+        run: ${{ steps.trusted-node.outputs.path }} scripts/native-workflow.mjs example_tauri_service boundary
+      - name: Align NDK with generated Gradle project
+        shell: bash
+        run: |
+          compile_sdk="$(rg -o 'compileSdk(Version)?[[:space:]]*=[[:space:]]*[0-9]+' services/example_tauri_service/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*[^0-9]([0-9]+)$/\1/' | head -1)"
+          test "$compile_sdk" = "$ANDROID_PLATFORM_API"
+          build_tools="$(rg -o 'buildToolsVersion[[:space:]]*=[[:space:]]*"[^"]+"' services/example_tauri_service/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*"([^"]+)".*/\1/' | head -1)"
+          if [[ -n "$build_tools" ]]; then
+            sdkmanager "build-tools;$build_tools"
+          fi
+          ndk_version="$(rg -o 'ndkVersion[[:space:]]*=[[:space:]]*"[^"]+"' services/example_tauri_service/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*"([^"]+)".*/\1/' | head -1)"
+          test "$ndk_version" = "$ANDROID_NDK_VERSION"
+      - name: Build debug APK
+        run: ${{ steps.trusted-node.outputs.path }} scripts/native-workflow.mjs example_tauri_service build-android-apk
+      - name: Scan Android APK for secrets
+        run: ${{ steps.trusted-node.outputs.path }} scripts/native-workflow.mjs example_tauri_service verify-android-apk
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: example-tauri-service-android-debug-apk
+          path: services/example_tauri_service/src-tauri/gen/android/app/build/outputs/apk/**/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7
+
+  android-debug-aab:
+    name: example_tauri_service Android debug AAB
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+      - name: Capture trusted absolute Node path
+        id: trusted-node
+        shell: bash
+        run: |
+          set -euo pipefail
+          node_path="$(node -p 'require("node:fs").realpathSync(process.execPath)')"
+          case "$node_path" in
+            /*) ;;
+            *) echo "Node did not resolve to an absolute path" >&2; exit 1 ;;
+          esac
+          test -x "$node_path"
+          case "$node_path" in
+            "$GITHUB_WORKSPACE"/*) echo "Node resolved inside the checkout" >&2; exit 1 ;;
+          esac
+          printf 'path=%s\n' "$node_path" >> "$GITHUB_OUTPUT"
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Check native security boundary
+        run: ${{ steps.trusted-node.outputs.path }} scripts/native-workflow.mjs example_tauri_service boundary
+      - name: Check pinned Rust toolchain
+        run: test "$(rustc --version | awk '{print $2}')" = "1.88.0"
+      - name: Install Android SDK prerequisites
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platform-tools" "platforms;android-${ANDROID_PLATFORM_API}" "ndk;${ANDROID_NDK_VERSION}"
+      - name: Install Android Rust target
+        run: rustup target add aarch64-linux-android
+      - name: Initialize Android project
+        run: ${{ steps.trusted-node.outputs.path }} scripts/native-workflow.mjs example_tauri_service init-android
+      - name: Re-check native security boundary after Android generation
+        run: ${{ steps.trusted-node.outputs.path }} scripts/native-workflow.mjs example_tauri_service boundary
+      - name: Align NDK with generated Gradle project
+        shell: bash
+        run: |
+          compile_sdk="$(rg -o 'compileSdk(Version)?[[:space:]]*=[[:space:]]*[0-9]+' services/example_tauri_service/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*[^0-9]([0-9]+)$/\1/' | head -1)"
+          test "$compile_sdk" = "$ANDROID_PLATFORM_API"
+          build_tools="$(rg -o 'buildToolsVersion[[:space:]]*=[[:space:]]*"[^"]+"' services/example_tauri_service/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*"([^"]+)".*/\1/' | head -1)"
+          if [[ -n "$build_tools" ]]; then
+            sdkmanager "build-tools;$build_tools"
+          fi
+          ndk_version="$(rg -o 'ndkVersion[[:space:]]*=[[:space:]]*"[^"]+"' services/example_tauri_service/src-tauri/gen/android -g '*.gradle*' | sed -E 's/.*"([^"]+)".*/\1/' | head -1)"
+          test "$ndk_version" = "$ANDROID_NDK_VERSION"
+      - name: Build debug AAB
+        run: ${{ steps.trusted-node.outputs.path }} scripts/native-workflow.mjs example_tauri_service build-android-aab
+      - name: Scan Android AAB for secrets
+        run: ${{ steps.trusted-node.outputs.path }} scripts/native-workflow.mjs example_tauri_service verify-android-aab
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: example-tauri-service-android-debug-aab
+          path: services/example_tauri_service/src-tauri/gen/android/app/build/outputs/bundle/**/debug/*.aab
+          if-no-files-found: error
+          retention-days: 7

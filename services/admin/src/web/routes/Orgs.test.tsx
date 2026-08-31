@@ -77,6 +77,7 @@ function organization(overrides: Partial<Organization> = {}): Organization {
   return {
     id: 'org-1',
     name: 'Acme Inc.',
+    version: 1,
     plan: 'free',
     isDisabled: false,
     createdAt: '2026-08-22T00:00:00.000Z',

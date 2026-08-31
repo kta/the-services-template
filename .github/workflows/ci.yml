@@ -23,18 +23,63 @@ jobs:
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: pnpm
+      - name: Harden reviewed Node tool permissions
+        shell: bash
+        run: |
+          set -euo pipefail
+          node_path="$(node -p 'require("node:fs").realpathSync(process.execPath)')"
+          case "$node_path" in
+            "$GITHUB_WORKSPACE"/*) echo "Node resolved inside the checkout" >&2; exit 1 ;;
+            /*) ;;
+            *) echo "Node did not resolve to an absolute path" >&2; exit 1 ;;
+          esac
+          chmod go-w "$node_path" "$(dirname "$node_path")"
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.10.5
+          terraform_wrapper: false
+      - name: Require main branch protection for production boundary
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: test "${{ github.ref_protected }}" = "true"
       - run: pnpm install --frozen-lockfile
       - name: Generate worker binding types
         run: pnpm -r --if-present cf-typegen
+      - name: Terraform format and validate
+        run: pnpm run infra:check
+      - name: Check pinned Rust toolchain
+        run: test "$(rustc --version | awk '{print $2}')" = "1.88.0"
+      - name: Install Tauri Linux prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+      - name: Rust format and Tauri unit tests
+        run: |
+          node scripts/service-catalog.mjs native-manifests |
+            while IFS= read -r manifest; do
+              cargo fmt --check --manifest-path "$manifest"
+              cargo test --locked --manifest-path "$manifest"
+              cargo clippy --all-targets --manifest-path "$manifest" -- -D warnings
+            done
       - name: Check agent compatibility
         run: bash scripts/check-agent-compat.sh
       - name: Lint + format
-        run: pnpm exec biome check .
+        run: pnpm run lint
       - name: Dependency audit
         run: pnpm run deps:check
       - name: Typecheck
@@ -55,18 +100,20 @@ jobs:
       matrix:
         include:
           - { name: example_service, pkg: '@app/example_service', dir: services/example_service }
+          - { name: example_tauri_service, pkg: '@app/example_tauri_service', dir: services/example_tauri_service }
           - { name: admin, pkg: '@app/admin', dir: services/admin }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # e2e は dev グラント(AUTH_DEV_GRANT)等の dev 値に依存する。.dev.vars は
-      # gitignore なので、CI では example からコピーして用意する(make dev-vars)。
-      - run: make dev-vars
+      # Each Playwright config injects an isolated test-only RSA fixture into
+      # its webServer; CI never copies or uploads a developer .dev.vars file.
       - run: pnpm --filter ${{ matrix.pkg }} exec playwright install --with-deps chromium
       - run: pnpm --filter ${{ matrix.pkg }} run e2e
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -76,52 +123,277 @@ jobs:
           path: ${{ matrix.dir }}/playwright-report/
           retention-days: 7
 
-  # Deploy each service on push to main. Set CLOUDFLARE_API_TOKEN (scoped:
-  # Workers Scripts/D1/KV/R2 Edit + Account Read — no Queues permission: this
-  # template does not use Queues) + CLOUDFLARE_ACCOUNT_ID as repo secrets. Each service
-  # deploys its SPA and API together (one Worker), so no per-SPA API-origin
-  # variables are needed. Prerequisite: `terraform apply` (infra) before the
-  # first deploy.
-  deploy:
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    # e2e is not a gate here (manual-only). verify covers agent compatibility,
-    # lint, dependency audit, typecheck, and unit tests with coverage gates.
+  # Compile the exact protected-main commit without a production environment
+  # permission. The credentialed deploy job only uploads these outputs in
+  # --no-bundle mode; it never executes a repository build script.
+  build-production:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true
     needs: [verify]
     runs-on: ubuntu-latest
-    environment: production
-    # Serialize deploys and never cancel one mid-migration/mid-upload.
-    concurrency:
-      group: deploy-production
-      cancel-in-progress: false
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      # Binding-aware order: notifier (no deps) → admin (binds example_service +
-      # notifier) → ops (binds notifier + admin, so deploys last). On the very
-      # first deploy a service may reference a not-yet-created binding target
-      # (wrangler deploys anyway; the binding resolves once both exist).
-      # NOTE: example_service is the template SCAFFOLD (copy source for
-      # new-service) — it is verified/e2e'd but NOT deployed to prod. Your real
-      # domain services (copied from it) go in this matrix instead. Secrets are
-      # never committed: dev values live in each service's .dev.vars (local
-      # only); prod values are set once via `wrangler secret put` (deploy.md).
-      matrix:
-        include:
-          - { pkg: '@app/notifier' }
-          - { pkg: '@app/admin' }
-          - { pkg: '@app/ops' }
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    outputs:
+      bundle_sha256: ${{ steps.package-worker-artifact.outputs.bundle_sha256 }}
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pin checkout to the actual main branch
+        run: git checkout -B main "$GITHUB_SHA"
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      # Apply remote D1 migrations before deploying code that expects the
-      # schema. No-op for Workers without a db:migrate:remote script.
-      - run: pnpm --filter ${{ matrix.pkg }} --if-present run db:migrate:remote
-      - run: pnpm --filter ${{ matrix.pkg }} run deploy
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Build admin (no Cloudflare credentials)
+        run: node scripts/production-service.mjs admin build
+      - name: Build notifier (no Cloudflare credentials)
+        run: node scripts/production-service.mjs notifier build
+      - name: Build ops (no Cloudflare credentials)
+        run: node scripts/production-service.mjs ops build
+      - name: Verify and package production Worker bundles
+        run: node scripts/production-artifacts.mjs ci package admin notifier ops
+      - name: Record exact Worker bundle digest
+        id: package-worker-artifact
+        run: node scripts/production-artifacts.mjs ci record-digest
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: upload-worker-artifact
+        with:
+          name: production-worker-bundles
+          path: production-worker-bundles.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  # Deploy each production Worker on a protected main push. The job is
+  # intentionally one ordered chain because service bindings and migrations
+  # have dependencies; a matrix's max-parallel=1 does not promise ordering.
+  # Only this job receives the production environment and Cloudflare credentials.
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true
+    # e2e is not a gate here (manual-only). verify covers agent compatibility,
+    # lint, dependency audit, typecheck, and unit tests with coverage gates.
+    needs: [verify, build-production]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    environment: production
+    # Serialize deploys and never cancel one mid-migration/mid-upload.
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      # actions/checkout may leave a detached HEAD depending on its ref
+      # resolution. Make the actual checkout branch explicit so the package
+      # guard cannot be satisfied by forged GITHUB_* variables alone.
+      - name: Pin checkout to the actual main branch
+        run: git checkout -B main "$GITHUB_SHA"
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: production-worker-bundles
+      - name: Verify exact build artifact digest before credentials
+        env:
+          EXPECTED_BUNDLE_SHA256: ${{ needs.build-production.outputs.bundle_sha256 }}
+        run: node scripts/production-artifacts.mjs ci verify-digest
+      - name: Capture trusted production tool paths
+        id: trusted-tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          resolve_tool() {
+            local name="$1"
+            local path resolved owner mode
+            path="$(command -v -- "$name")"
+            test -n "$path" && test -x "$path"
+            resolved="$(realpath "$path")"
+            case "$resolved" in
+              "$GITHUB_WORKSPACE"/*)
+                echo "$name resolved inside the checkout" >&2
+                return 1
+                ;;
+            esac
+            owner="$(stat -c '%u' "$resolved")"
+            mode="$(stat -c '%a' "$resolved")"
+            test "$owner" = "0" || test "$owner" = "$(id -u)"
+            (( 8#$mode & 18 == 0 ))
+            case "$name:$resolved" in
+              node:*/node|pnpm:*/pnpm|pnpm:*/pnpm.js|pnpm:*/pnpm.cjs|git:*/git) ;;
+              *)
+                echo "$name resolved to an unexpected executable" >&2
+                return 1
+                ;;
+            esac
+            printf '%s' "$resolved"
+          }
+          node_path="$(resolve_tool node)"
+          git_path="$(resolve_tool git)"
+          pnpm_path="$(resolve_tool pnpm)"
+          printf 'node=%s\n' "$node_path" >> "$GITHUB_OUTPUT"
+          printf 'pnpm=%s\n' "$pnpm_path" >> "$GITHUB_OUTPUT"
+          printf 'path=%s:%s:/usr/local/bin:/usr/bin:/bin\n' \
+            "$(dirname "$node_path")" "$(dirname "$git_path")" \
+            >> "$GITHUB_OUTPUT"
+      - name: Verify locked Wrangler before production credentials
+        env:
+          PNPM: ${{ steps.trusted-tools.outputs.pnpm }}
+        working-directory: services/admin
+        run: test "$($PNPM --config.offline=true exec wrangler --version)" = "4.125.0"
+      - name: Revalidate published protected main before production credentials
+        env:
+          PATH: ${{ steps.trusted-tools.outputs.path }}
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/require-production-deploy.mjs
+      - name: Verify and install reviewed production Worker bundles
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/production-artifacts.mjs ci install admin notifier ops
+      - name: Verify GitHub production environment policy
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PATH: ${{ steps.trusted-tools.outputs.path }}
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/check-github-production-environment.mjs
+      - name: Resolve reviewed production resource identities before credentials
+        id: reviewed-resources
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/production-resource-identities.mjs
+      - name: Verify admin production config before credentials
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.reviewed-resources.outputs.account_id }}
+          PATH: ${{ steps.trusted-tools.outputs.path }}
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/production-service.mjs admin config
+      - name: Verify notifier production config before credentials
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.reviewed-resources.outputs.account_id }}
+          PATH: ${{ steps.trusted-tools.outputs.path }}
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/production-service.mjs notifier config
+      - name: Verify ops production config before credentials
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ steps.reviewed-resources.outputs.account_id }}
+          PATH: ${{ steps.trusted-tools.outputs.path }}
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/production-service.mjs ops config
+      - name: Verify Cloudflare account and D1 resource identities
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          REVIEWED_ACCOUNT_ID: ${{ steps.reviewed-resources.outputs.account_id }}
+          REVIEWED_DEDUPE_ID: ${{ steps.reviewed-resources.outputs.dedupe_id }}
+          REVIEWED_BUCKET_NAME: ${{ steps.reviewed-resources.outputs.bucket_name }}
+          EXPECTED_DEDUPE_ID: ${{ secrets.PRODUCTION_NOTIFIER_DEDUPE_ID }}
+          EXPECTED_BUCKET_NAME: ${{ secrets.PRODUCTION_BACKUP_BUCKET_NAME }}
+          PRODUCTION_RESOURCE_MANIFEST: ${{ secrets.PRODUCTION_RESOURCE_MANIFEST }}
+          REVIEWED_D1_IDENTITIES: ${{ steps.reviewed-resources.outputs.database_identities }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$PRODUCTION_RESOURCE_MANIFEST"
+          printf '%s' "$PRODUCTION_RESOURCE_MANIFEST" | jq -e \
+            --arg account "$REVIEWED_ACCOUNT_ID" \
+            --arg bucket "$REVIEWED_BUCKET_NAME" \
+            --arg dedupe "$REVIEWED_DEDUPE_ID" \
+            --argjson databases "$REVIEWED_D1_IDENTITIES" \
+            'type == "object" and .accountId == $account and .bucketName == $bucket and .dedupeId == $dedupe and (.databaseIdentities | type == "array") and ((.databaseIdentities | sort_by(.service)) == ($databases | sort_by(.service)))' >/dev/null
+          test "$CLOUDFLARE_ACCOUNT_ID" = "$REVIEWED_ACCOUNT_ID"
+          account="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 10 \
+            --header 'accept: application/json' \
+            --header "authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$REVIEWED_ACCOUNT_ID")"
+          printf '%s' "$account" | jq -e --arg id "$REVIEWED_ACCOUNT_ID" \
+            '.success == true and .result.id == $id' >/dev/null
+          test "$REVIEWED_DEDUPE_ID" = "$EXPECTED_DEDUPE_ID"
+          test "$REVIEWED_BUCKET_NAME" = "$EXPECTED_BUCKET_NAME"
+          kv="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 10 \
+            --header 'accept: application/json' \
+            --header "authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$REVIEWED_ACCOUNT_ID/storage/kv/namespaces/$EXPECTED_DEDUPE_ID")"
+          printf '%s' "$kv" | jq -e --arg id "$EXPECTED_DEDUPE_ID" \
+            '.success == true and .result.id == $id' >/dev/null
+          bucket="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 10 \
+            --header 'accept: application/json' \
+            --header "authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$REVIEWED_ACCOUNT_ID/r2/buckets/$EXPECTED_BUCKET_NAME")"
+          printf '%s' "$bucket" | jq -e --arg name "$EXPECTED_BUCKET_NAME" \
+            '.success == true and .result.name == $name' >/dev/null
+          while IFS= read -r identity; do
+            database_id="$(printf '%s' "$identity" | jq -er '.databaseId')"
+            database_name="$(printf '%s' "$identity" | jq -er '.databaseName')"
+            database="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 10 \
+              --header 'accept: application/json' \
+              --header "authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              "https://api.cloudflare.com/client/v4/accounts/$REVIEWED_ACCOUNT_ID/d1/database/$database_id")"
+            printf '%s' "$database" | jq -e \
+              --arg id "$database_id" --arg name "$database_name" \
+              '.success == true and .result.id == $id and .result.name == $name' >/dev/null
+          done < <(printf '%s' "$REVIEWED_D1_IDENTITIES" | jq -c '.[]')
+          echo 'Cloudflare account and D1 resource identities: verified'
+      - name: Verify admin remote production secret names
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/production-service.mjs admin remote-secrets
+      - name: Verify notifier remote production secret names
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/production-service.mjs notifier remote-secrets
+      - name: Verify ops remote production secret names
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/production-service.mjs ops remote-secrets
+      - name: Verify R2 backup bucket privacy
+        run: |
+          set -euo pipefail
+          api="https://api.cloudflare.com/client/v4/accounts/${{ steps.reviewed-resources.outputs.account_id }}/r2/buckets/${{ steps.reviewed-resources.outputs.bucket_name }}/domains"
+          managed="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 10 \
+            --header 'accept: application/json' \
+            --header "authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "$api/managed")"
+          printf '%s' "$managed" | jq -e '.success == true and .result.enabled == false' >/dev/null
+          custom="$(curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 10 \
+            --header 'accept: application/json' \
+            --header "authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "$api/custom")"
+          printf '%s' "$custom" | jq -e '.success == true and (.result.domains | type == "array") and all(.[]; .enabled == false)' >/dev/null
+          echo 'R2 backup bucket public access: disabled'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      # Catalog entries with deployable=false (example_service and
+      # example_tauri_service) are intentionally absent from this production
+      # chain. Forks add the copied domain package here after production review.
+      - name: Deploy notifier
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PRODUCTION_PNPM_PATH: ${{ steps.trusted-tools.outputs.pnpm }}
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/production-service.mjs notifier deploy
+      - name: Apply admin remote migrations
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PRODUCTION_PNPM_PATH: ${{ steps.trusted-tools.outputs.pnpm }}
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/production-service.mjs admin migrate
+      - name: Deploy admin
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PRODUCTION_PNPM_PATH: ${{ steps.trusted-tools.outputs.pnpm }}
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/production-service.mjs admin deploy
+      - name: Deploy ops
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PRODUCTION_PNPM_PATH: ${{ steps.trusted-tools.outputs.pnpm }}
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/production-service.mjs ops deploy

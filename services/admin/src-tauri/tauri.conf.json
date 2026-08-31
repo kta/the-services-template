@@ -24,9 +24,10 @@
       "csp": {
         "default-src": "'self'",
         "base-uri": "'self'",
+        "form-action": "'self'",
         "object-src": "'none'",
         "script-src": "'self'",
-        "style-src": "'self' 'unsafe-inline'",
+        "style-src": "'self'",
         "img-src": "'self' data:",
         "font-src": "'self'",
         "connect-src": "'self' ipc: http://ipc.localhost"
@@ -34,12 +35,13 @@
       "devCsp": {
         "default-src": "'self'",
         "base-uri": "'self'",
+        "form-action": "'self'",
         "object-src": "'none'",
         "script-src": "'self'",
         "style-src": "'self' 'unsafe-inline'",
         "img-src": "'self' data:",
         "font-src": "'self'",
-        "connect-src": "'self' ipc: http://ipc.localhost http://localhost:5174"
+        "connect-src": "'self' ipc: http://ipc.localhost http://localhost:5174 ws://localhost:5174 ws://127.0.0.1:5174 ws://localhost:1421 ws://127.0.0.1:1421"
       },
       "freezePrototype": true
     }

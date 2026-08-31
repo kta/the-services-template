@@ -1,169 +1,160 @@
 # Cloudflare 初期設定（手動手順）
 
-**ローカルで動かすだけなら Cloudflare アカウントは不要**（`make dev/*`・test・e2e はすべてローカルの workerd で動く）。ここは「インターネットに公開する（＝デプロイする）」ときに一度だけ必要な作業。
+ローカルで動かすだけなら Cloudflare アカウントは不要（make dev/*・test・e2e はすべてローカルの workerd で動く）。ここはインターネットに公開するときに一度だけ必要な作業である。
 
-エージェントに丸ごと任せるなら [`README.md`](../../README.md) の「Cloudflare につなぐ」のプロンプトを使う。この文書は**自分で手を動かす場合**と、**エージェントが参照する手順書**を兼ねる。人間にしかできないのは **① ブラウザでのアカウント作成 ② `wrangler login` の OAuth ③ API トークンの発行**の 3 つだけ。
+エージェントに任せる場合は README の「Cloudflare につなぐ」プロンプトを使う。この文書は「自分で手を動かす場合」と、エージェントが参照する手順書を兼ねる。人間にしかできないのは、アカウント作成、wrangler login の OAuth、API トークン発行、GitHub environment protection の最終承認である。
 
-デプロイ手順そのもの（順序・secrets の全量・本番前チェック）は [`deploy.md`](./deploy.md)。ここは「まだ何も無い状態」から deploy.md に入るまでの橋渡し。
+デプロイ手順の全量（secret の境界、main 限定、production environment、チェックリスト）は deploy.md が正である。
 
-## 1. アカウントと wrangler の認証
+## 1. アカウントと Wrangler の認証
 
-```sh
-# アカウント作成: https://dash.cloudflare.com/sign-up （Free プランで全機能動く）
-pnpm --filter @app/example_service exec wrangler login   # ブラウザで OAuth
-pnpm --filter @app/example_service exec wrangler whoami  # Account ID を控える
-```
+    set -euo pipefail
+    # アカウント作成: https://dash.cloudflare.com/sign-up（Free プラン）
+    pnpm --filter @app/admin exec wrangler login
+    pnpm --filter @app/admin exec wrangler whoami
 
-wrangler は各サービスの devDependency なので**個別インストール不要**。
+Wrangler は各サービスの devDependency なので個別インストール不要である。
 
-## 2. CI 用の API トークンを発行する
+## 2. CI 用 API トークン
 
-GitHub Actions で `main` から本番（`prd`）へ自動デプロイする場合だけ必要である。ブラウザで [API Tokens](https://dash.cloudflare.com/profile/api-tokens) を開き、次の順で作成する。
+ダッシュボード → My Profile → API Tokens → Create Token で発行する。これは GitHub Actions の
+production deploy/bootstrap と Terraform 用の token であり、必要権限は Workers Scripts:Edit、D1:Edit、
+Workers KV Storage:Edit、Workers R2 Storage:Edit、Account Settings:Read である。Queues 権限は不要である。
 
-1. **Create Token** → **Edit Cloudflare Workers** を選ぶ。このテンプレートには Worker の CI/CD に必要な標準権限が入るため、空の Custom Token から作らない。
-2. 名前は `github-actions-prd-deploy` のように用途が分かるものにする。
-3. テンプレートの既存権限を残したまま、次の 2 つを追加する。
+この token を restore 操作や ops Worker の D1 export に流用しない。D1 export は ops の
+`D1_EXPORT_API_TOKEN`（対象 account の D1 REST export に必要な read-only scope）のみを使う。
+R2 世代からの restore は別の operator token（R2 Object Read/List/Write/Delete と、明示的な
+D1 create/execute/time-travel に必要な最小 scope）を使い、`docs/howto/restore.md` の
+account ID 一致確認を通す。Write は Time Travel 前の退避、Delete は operator cleanup に
+必要であり、対象 bucket のみに限定する。
+deploy token、D1 export token、restore operator token は別 token として発行・棚卸しする。
 
-| Resource group | Permission | このテンプレートで必要な理由 |
-|---|---|---|
-| Account | `D1:Edit` | Terraform による D1 作成と、CI でのリモート migration |
-| Account | `Account Rulesets:Read` | Wrangler が配信対象アカウントの ruleset 情報を照会するため |
+GitHub Actions の Cloudflare credential は repository secret ではなく production environment secret に登録する。
+production environment には次の 17 個を**全て**登録し、repository secret 側には同名を置かない。
+`PRODUCTION_NOTIFIER_DEDUPE_ID` と `PRODUCTION_BACKUP_BUCKET_NAME` は機密値ではないが、review 済み
+resource identity の source-of-truth として environment secret に固定する。さらに
+`PRODUCTION_RESOURCE_MANIFEST` には account、bucket、dedupe、各 D1 の reviewed ID/name を
+JSON で登録し、repository 側 config の書き換えだけで本番先を差し替えられないようにする。
 
-最終的な権限セットは次のとおり。Cloudflare の画面によって `Edit` が `Write` と表示されることがあるが、同じ書込み権限を指す。
+    set -euo pipefail
+    gh secret set CLOUDFLARE_API_TOKEN --env production
+    gh secret set CLOUDFLARE_ACCOUNT_ID --env production --body "<wrangler whoami の Account ID>"
+    gh secret set PRODUCTION_NOTIFIER_DEDUPE_ID --env production --body "<notifier DEDUPE KV namespace id>"
+    gh secret set PRODUCTION_BACKUP_BUCKET_NAME --env production --body "<ops BACKUPS bucket name>"
+    gh secret set PRODUCTION_RESOURCE_MANIFEST --env production < ./production-resource-manifest.json
+    gh secret list --env production
 
-| Resource group | Permission | 用途 |
-|---|---|---|
-| Account | `Account Settings:Read` | Worker 配信時のアカウント情報照会 |
-| Account | `Account Rulesets:Read` | 配信前の ruleset 情報照会 |
-| Account | `D1:Edit` | D1 の作成・更新と migration |
-| Account | `Workers KV Storage:Edit` | Terraform による KV namespace 作成・更新 |
-| Account | `Workers R2 Storage:Edit` | R2 バケットと lifecycle の作成・更新 |
-| Account | `Workers Scripts:Edit` | Worker 本体、static assets、Worker secrets の配信 |
-| Zone | `Workers Routes:Edit` | カスタムドメインを Worker route で接続するときだけ必要（Worker template が付与） |
-| User | `User Details:Read` / `Memberships:Read` | user token を使う Wrangler CI/CD の標準照会（Worker template が付与） |
+API token をコマンド引数やリポジトリへ書かない。Account ID は非機密だが、運用を揃えるため environment secret として登録する。Settings → Environments → production で、Deployment branches and tags は **selected branch `main` のみ**（protected branches only ではない custom branch policy）、required reviewer、self-review 防止、environment secrets を必ず設定する。`scripts/check-github-production-environment.mjs` が API で `main` 以外の許可や旧 protected-branches-only 設定を検出すると fail close する。
 
-4. **Account Resources** は、初回設定では **All accounts** を選ぶ。複数アカウントを運用する場合は、動作確認後にデプロイ先の 1 アカウントだけへ絞る。カスタムドメインを使う場合は **Zone Resources** も対象ゾーンに限定する。
-5. **Continue to summary** → 内容を確認 → **Create Token**。表示されたトークンを直ちにコピーする。
+## 3. リソースを作る — 承認済み infrastructure workflow から実行
 
-トークンの値は発行時に一度しか表示されない。コード、`wrangler.jsonc`、Terraform の state、シェルスクリプトには保存しない。Queues、Workers Analytics、Billing、DNS の権限は、このテンプレートの標準デプロイには不要である。
+Terraform（D1 / KV / R2 の定義。適用は protected workflow のみ）:
 
-## 3. GitHub の `prd` Environment に登録する
+Terraform は `mise.toml` で **1.10.5** に固定する（`mise install`）。
+S3/R2 backend の `use_lockfile` を使うため、1.10 未満では実行しない。
 
-GitHub リポジトリの **Settings** → **Environments** → **New environment** で `prd` を作成する。必要ならデプロイ前の承認者もこの Environment に設定する。
+ローカルでは `make infra/check` または次の credentialless 検査だけを実行する。
 
-次に **`prd` Environment の Secrets** として、以下を登録する。
+    terraform -chdir=infra/terraform/cloudflare fmt -check -diff
+    terraform -chdir=infra/terraform/cloudflare init -backend=false -input=false
+    terraform -chdir=infra/terraform/cloudflare validate
 
-| Secret | 値 |
-|---|---|
-| `CLOUDFLARE_API_TOKEN` | 手順 2 で発行した API トークン |
-| `CLOUDFLARE_ACCOUNT_ID` | `wrangler whoami` で確認した Account ID |
+本番リソースの作成・変更は、組織の protected `main` / required reviewer 付き
+infrastructure workflow で reviewed plan artifact を承認して行う。ローカルから
+Terraform apply や Wrangler の resource create を実行しない。`terraform.tfvars` と state
+はリポジトリへ commit せず、state は application backup と別の private R2 bucket に置く。
 
-### ターミナルから登録する（推奨）
+`example_service` は雛形のため、本番 Worker/D1 としては作成・deploy しない。自ドメインへ fork したら、そのサービス用 D1 を作成する。
 
-GitHub CLI でログイン済みであることを確認してから、トークンは対話入力で登録する。トークンをコマンド引数や履歴に残さない。
+## 4. ID を wrangler.jsonc に反映
 
-```sh
-gh auth status
-gh secret set --repo "OWNER/REPO" --env prd CLOUDFLARE_API_TOKEN
-# プロンプトに API トークンを貼り付けて Enter
-gh secret set --repo "OWNER/REPO" --env prd CLOUDFLARE_ACCOUNT_ID
-# プロンプトに Account ID を貼り付けて Enter
-gh secret list --repo "OWNER/REPO" --env prd
-```
-
-現在のシェルに値を一時的に持たせる場合は、登録直後に必ず消す。値を表示する `echo` は使わない。
-
-```sh
-export CF_API_TOKEN=""
-export CF_ACCOUNT_ID=""
-
-print -rn -- "$CF_API_TOKEN" | gh secret set --repo "OWNER/REPO" --env prd CLOUDFLARE_API_TOKEN
-print -rn -- "$CF_ACCOUNT_ID" | gh secret set --repo "OWNER/REPO" --env prd CLOUDFLARE_ACCOUNT_ID
-
-unset CF_API_TOKEN CF_ACCOUNT_ID
-```
-
-`OWNER/REPO` は対象リポジトリに置き換える。同じリポジトリの中で実行する場合は `--repo "OWNER/REPO"` を省略できる。以降に必要となる R2 用キーや Worker runtime secrets は、デプロイ手順の指示に従って同じ `prd` Environment に追加する。
-
-### Terraform state 用の R2 アクセスキーも発行する
-
-上記の `CLOUDFLARE_API_TOKEN` は Cloudflare API（Worker、D1、KV、R2 バケット管理）用である。Terraform のリモート state は S3 互換 API を使うため、**別の R2 API token** が必要になる。
-
-R2 → **Manage R2 API Tokens** → **Create API Token** で、次のように発行する。
-
-| 項目 | 設定 |
-|---|---|
-| Permission | `Object Read & Write` |
-| Bucket scope | Terraform state 用に作成した 1 バケットのみ |
-| GitHub `prd` secrets | `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` |
-
-この token から表示される Access Key ID と Secret Access Key も一度しか表示されない。state バケットの作成時だけは R2 の bucket 管理権限が必要だが、作成後の Terraform backend にはこのバケット限定のアクセスキーを使う。
-
-## 4. リソースを作る — Terraform か wrangler 単体か
-
-**Terraform**（D1 / KV / R2 をまとめて作成。推奨。state 用 R2 バケットが先に必要 → [`../architecture/infra.md`](../architecture/infra.md)）:
-
-```sh
-cd infra/terraform/cloudflare
-export CLOUDFLARE_API_TOKEN=<上で作ったトークン>
-cp terraform.tfvars.example terraform.tfvars   # account_id を記入
-terraform init && terraform apply
-terraform output   # 出てきた id を次のステップで貼る
-```
-
-**wrangler 単体**（試しに 1 サービスだけデプロイしたいとき）:
-
-```sh
-pnpm --filter @app/example_service exec wrangler d1 create example_service
-# → 出力の database_id を控える（admin も同様）
-# KV / R2 は wrangler kv namespace create / wrangler r2 bucket create
-```
-
-## 5. id を wrangler.jsonc に貼る
-
-`services/<name>/wrangler.jsonc` の placeholder を実値に:
-
-```jsonc
-"d1_databases": [{
-  "binding": "DB",
-  "database_name": "example_service",
-  "database_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"  // ← terraform output / d1 create の値
-}]
-```
-
-貼り替えが必要な箇所:
+services/<name>/wrangler.jsonc の placeholder を実値に置き換える。
 
 | サービス | 項目 |
-|---|---|
-| admin | `d1_databases[0].database_id` / KV `AUTH_RL` の `id` |
-| example_service（＝フォーク後の自ドメインサービス） | `d1_databases[0].database_id` |
-| notifier | KV `DEDUPE` の `id` |
-| ops | `vars.CF_ACCOUNT_ID` / バックアップ対象の `*_DB_ID`（R2 バケットは TF が作成） |
+| --- | --- |
+| admin | d1_databases[0].database_id |
+| 自ドメインサービス | d1_databases[0].database_id |
+| notifier | KV DEDUPE の id |
+| ops | vars.CF_ACCOUNT_ID / バックアップ対象の *_DB_ID / R2 bucket |
 
-貼り替え後は `pnpm -r cf-typegen`。
+反映後:
 
-## 6. secrets → マイグレーション → デプロイ
+    set -euo pipefail
+    pnpm -r --if-present cf-typegen
 
-```sh
-openssl rand -hex 32   # 高エントロピー値の生成例
-echo -n "<値>" | pnpm --filter @app/admin exec wrangler secret put INTERNAL_KEY
-echo -n "<値>" | pnpm --filter @app/admin exec wrangler secret put JWT_SECRET
-echo -n "<値>" | pnpm --filter @app/admin exec wrangler secret put AUTH_PEPPER
+## 5. Worker secret の境界
 
-pnpm --filter @app/notifier run deploy
-pnpm --filter @app/admin run db:migrate:remote && pnpm --filter @app/admin run deploy
-# → https://admin.<your-subdomain>.workers.dev で管理コンソールが動く
-```
+本番の access JWT は RS256 で署名する。JWT_PRIVATE_KEY は admin にだけ登録し、domain Worker には JWT_PUBLIC_KEY だけを登録する。admin 自身も JWT_PUBLIC_KEY で検証する。issuer は `admin`、audience は admin API が `admin`、domain API が `domain:<service_name>`（雛形は `domain:example_service`）に固定される。以前の共有署名 secret を再利用しない。domain をコピーしたら service 名に対応する audience も一意にする。
 
-**どのサービスにどの secret が要るか・binding 依存のデプロイ順・本番前チェックリストは [`deploy.md`](./deploy.md) が正**（上は最小の抜粋）。特に:
+| Secret | 登録先 |
+| --- | --- |
+| JWT_PRIVATE_KEY | admin のみ |
+| JWT_PUBLIC_KEY | admin と各 domain Worker |
+| DOMAIN_TO_ADMIN_KEY | admin / domain（domain → admin live-session introspection の専用鍵） |
+| ADMIN_TO_<DOMAIN>_KEY | admin と対応する deployable domain。domain 0 件の雛形 production では不要（`ADMIN_TO_EXAMPLE_SERVICE_KEY` は dev/test 専用） |
+| ADMIN_TO_NOTIFIER_KEY | admin と notifier |
+| DOMAIN_TO_NOTIFIER_KEY | 各 domain Worker と notifier |
+| OPS_TO_NOTIFIER_KEY | ops と notifier |
+| AUTH_PEPPER | admin のみ |
+| RESEND_API_KEY | notifier |
+| D1_EXPORT_API_TOKEN | ops |
+| R2_POLICY_CHECK_API_TOKEN | deploy/bootstrap/ops の R2 公開設定確認 |
 
-- `INTERNAL_KEY` は service binding でつながる**全サービスで同一値**、`JWT_SECRET` は発行側(admin)と検証側(各ドメインサービス)で同一値、`AUTH_PEPPER` は **admin のみ**。
-- `AUTH_DEV_GRANT` は**本番に設定しない**（未設定 = dev グラント無効）。
-- notifier は `RESEND_API_KEY` 未設定かつ `MAIL_DEV_LOG` 未設定なら**送信が fail close（502）**。`MAIL_FROM` は Resend 検証済みドメインのアドレスに。
-- example_service は雛形なので本番にデプロイしない（CI の deploy matrix 対象外）。
+JWT key pair は deploy.md の一時ファイル手順で生成する。private key を Tauri、ブラウザ、domain、CI artifact、Terraform state にコピーしない。
 
-## 7. 費用の話
+内部 API の鍵は caller と受信先の方向ごとに別のランダム値を生成する。複数の Worker に登録する場合も、その方向の両端だけに同じ値を登録し、別方向へ再利用しない。domain Worker ごとの `ADMIN_TO_<DOMAIN>_KEY` も別値にする必要があるが、現行 bootstrap が write 前に一意性を検査できるのは最大 1 deployable domain の bundle だけである。`DOMAIN_TO_ADMIN_KEY` は domain → admin live-session introspection の両端に置く専用鍵で、JWT_PRIVATE_KEY や admin → domain、domain → notifier の値とは分離する。生成した単一 domain bundle は GitHub `production` environment secret として登録し、protected workflow の allowlist 検査で bundle 内の全方向鍵重複を確認する。topology-wide multi-domain の一意性は保証せず、deployable domain が 2 件以上なら bootstrap は fail close する。全 domain key を一度に検査する bundle 設計が人間承認・実装されるまでは 1 domain に限定する。`scripts/put-production-secret.mjs` は validation-only で、ローカルから secret を書き込まない。
 
-このテンプレートは **Workers Free プランの範囲内**で全機能（Workers / D1 / KV / R2 / Cron / Workflows）が動くよう設計してある。Queues など Paid 限定の機能は使っていない。上限に近づいたときの挙動と設計対処は [`free-tier-limits.md`](./free-tier-limits.md)。
+現行 catalog の deployable domain は 0 件であり、production domain token 発行経路も未実装である。issuer/key ownership を定義する gateway/IdP は人間承認が必要なアーキテクチャ変更とする。正規利用者が `aud=domain:<service>` と live `sid/sub/org` を持つ token を取得でき、成功、wrong audience、`sid` 欠落、logout/rotation、user/org 無効化、admin failure 503 を fixture で実行するまでは domain readiness を false とし、bootstrap/migration/deploy/secret provisioning を許可しない。
 
-R2 は無料枠でもクレジットカード登録を求められる場合がある（バックアップを使わないなら ops をデプロイしなければよい）。
+ローカルでは `make init` が validated catalog の全 SPA/Worker にある regular `.dev.vars.example` を 0600 の `.dev.vars` へコピーする。admin で生成した local RSA pair の `JWT_PUBLIC_KEY` / `AUTH_DEV_PRIVATE_KEY` は全 domain（両 example とコピー後に catalog 登録したサービス）へ配布する。symlink、catalog 外 path、部分 pair は fail close する。AUTH_DEV_GRANT=true と AUTH_DEV_PRIVATE_KEY はローカル credential-less grant 専用で、本番には登録しない。`AUTH_DEV_GRANT` だけを設定しても `/api/auth/token` は 404 のままになる。
+
+## 6. マイグレーションと deploy
+
+Worker の production deploy / remote migration は GitHub Actions の protected-main push
+だけが実行する。作業前に CI が使う clean な main checkout と、取得済み `origin/main`
+との commit 一致をローカルで確認し、実際の反映は PR merge 後の production environment
+で行う。既存 Worker の secret 登録、remote seed、restore も protected `main` の
+production workflow と required reviewer を通す。初回 Worker 作成を伴う secret
+bootstrap は通常の deploy workflow やローカル CLI では行わず、
+`.github/workflows/production-bootstrap.yml` の `workflow_dispatch` だけを使う。
+この workflow は protected `main`、`production` environment の required reviewer、
+コピー済み domain の入力検証、Worker ごとの secret allowlist を要求する。
+`PRODUCTION_*` environment secrets の準備と、domain に JWT_PRIVATE_KEY を渡さない
+allowlist の詳細は [deploy.md](./deploy.md) の 3-2 を参照する。
+
+初回 bootstrap の前に、ops の backup bucket が非公開であることを確認する。さらに CI は
+reviewed な account ID、R2 bucket、各 D1 の UUID/name を Cloudflare API の実リソースと
+照合してから credentialed Wrangler を実行する。
+`wrangler.jsonc` の R2 binding だけでは r2.dev managed domain や custom domain の公開設定を
+無効化できないため、次の preflight は両方の設定を Cloudflare API で確認し、1 つでも有効・
+取得不能なら停止する。
+
+    node scripts/check-r2-private.mjs
+
+本番 `latest.json` の署名用には、JWT pair と別に RSA pair を生成する。private half は
+`PRODUCTION_BACKUP_SIGNING_PRIVATE_KEY` environment secret として ops へ登録し、public half は
+review 済み `services/ops/wrangler.jsonc` の `vars.BACKUP_SIGNING_PUBLIC_KEY` に置く。
+restore operator は public half だけを `BACKUP_SIGNING_PUBLIC_KEY` として使い、private half を
+取得しない。
+
+bootstrap は JWT と backup signer の RSA 型、2048 bit 以上、pair 一致、用途間の非再利用、
+公開済み test key fingerprint の不一致を secret bundle write 前に検査する。固定順序は
+`notifier bootstrap → admin remote migration（exactly once）→ admin bootstrap → domain remote migration（exactly once）→ domain bootstrap → ops bootstrap` であり、migration 失敗時は対応 deploy へ進まない。
+
+    git fetch origin main --prune
+    git status --short
+    git branch --show-current
+    test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"
+    pnpm run test:deploy-boundary
+
+本番用 Make target と package script は Cloudflare CLI の本番書き込み entry point を公開しない。production deploy / remote migration は protected-main push の CI guard、secret bootstrap / rotation・remote seed・restore は protected `main` の production workflow と required reviewer を必要とする。build には Cloudflare credential を渡さず、credentialed workflow は lockfile から検証した Wrangler を offline で固定コマンド実行する。`put-production-secret.mjs` は validation-only であり、ローカルの `PRODUCTION_WRANGLER_PATH` や raw Wrangler による書き込み手順は提供しない。example_service には本番 deploy target がない。
+
+CI の deploy は `.github/workflows/ci.yml` の protected main push かつ production environment のみで起動する。workflow_dispatch は verify/e2e または unsigned Tauri artifact の検証用途であり、Cloudflare credential を持たない。bootstrap だけは `.github/workflows/production-bootstrap.yml` の workflow_dispatch を使えるが、protected main、selected main environment、required reviewer、入力値検証、secret allowlist を全て要求する。どちらも `id-token: write` や GitHub OIDC を使わない。
+
+初回の secret bootstrap workflow は上記の production environment reviewer を通過した
+場合だけ Cloudflare credential を利用する。`domain_service` に `example_service`、
+`admin`、`notifier`、`ops`、またはパス形式などの値を渡しても拒否される。
+
+## 7. 費用
+
+このテンプレートは Workers Free の範囲で Workers / D1 / KV / R2 / Cron / Workflows を動かす設計である。Queues は採用していない。上限と対処は free-tier-limits.md を参照する。

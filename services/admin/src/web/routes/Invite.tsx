@@ -1,24 +1,46 @@
 import { Button, Notice, TextInput } from '@app/ui'
-import { type FormEvent, useState } from 'react'
-import { useNavigate, useSearchParams } from 'react-router'
+import { type FormEvent, useEffect, useState } from 'react'
+import { useLocation, useNavigate, useSearchParams } from 'react-router'
 import { acceptInvite, LoginError } from '../auth/session'
 
 const MIN_PASSWORD = 12
 
 /**
- * 招待受諾(Login と同型)。URL の `?token=` を受け、email + パスワード(≥12)を
- * 設定してそのままログイン状態に。email は stretch の salt 一致のため入力させる
- * (URL には載せない)。
+ * 招待受諾(Login と同型)。URL fragment の `#token=` を受け、email + パスワード
+ * (≥12)を設定してそのままログイン状態にする。fragment は HTTP request target や
+ * Referer に送信されないため、bearer token のログ露出を避けられる。email は
+ * stretch の salt 一致のため入力させる(URL には載せない)。旧 query link も一時的に
+ * 読み取れるが、新規発行は fragment のみ。
  */
 export function Invite() {
   const navigate = useNavigate()
-  const [params] = useSearchParams()
-  const token = params.get('token') ?? ''
+  const location = useLocation()
+  const [params, setParams] = useSearchParams()
+  // Capture the bearer once, then remove it from the address/history as soon
+  // as the route mounts. The form still owns the token in React memory for
+  // this one-time submission, while referrers/history do not retain it.
+  const [fragmentToken] = useState(
+    () => new URLSearchParams(location.hash.replace(/^#/, '')).get('token') ?? '',
+  )
+  const [token] = useState(() => fragmentToken || params.get('token') || '')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    if (!token) return
+    if (fragmentToken && location.hash) {
+      navigate(`${location.pathname}${location.search}`, { replace: true })
+      return
+    }
+    if (params.has('token')) {
+      const sanitized = new URLSearchParams(params)
+      sanitized.delete('token')
+      setParams(sanitized, { replace: true })
+    }
+  }, [fragmentToken, location, navigate, params, setParams, token])
 
   const tooShort = password.length > 0 && password.length < MIN_PASSWORD
   const mismatch = confirm.length > 0 && confirm !== password

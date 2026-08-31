@@ -56,11 +56,16 @@ function visit(path: string) {
 
 describe('admin application routes', () => {
   afterEach(async () => {
+    // Teardown must use the web transport even when the test exercised the
+    // native route; the native invoke bridge is intentionally not installed in
+    // this component test suite.
+    delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 204 })))
     await logout()
+    sessionStorage.clear()
+    localStorage.clear()
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
-    delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
     window.history.replaceState({}, '', '/')
   })
 

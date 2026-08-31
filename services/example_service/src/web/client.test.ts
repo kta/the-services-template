@@ -1,5 +1,5 @@
-import { auth } from '@app/shared'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { auth } from './auth/session'
 import { client } from './client'
 
 const item = {

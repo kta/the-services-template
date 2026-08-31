@@ -5,6 +5,11 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { validateTauriBoundary } from './check-tauri-boundary.mjs'
 
+const reviewedNativeWorkflowTemplate = await readFile(
+  join(process.cwd(), '.github/workflows/example-tauri-build.yml'),
+  'utf8',
+)
+
 async function withFixture(files, check) {
   const root = await mkdtemp(join(tmpdir(), 'tauri-boundary-'))
   try {
@@ -21,15 +26,36 @@ async function withFixture(files, check) {
   }
 }
 
+async function replaceWithSymlink(root, relativePath, scope, kind) {
+  const outside = await mkdtemp(join(tmpdir(), 'tauri-boundary-target-'))
+  const target =
+    scope === 'inside' ? join(root, '.symlink-target', relativePath) : join(outside, relativePath)
+  const link = join(root, relativePath)
+  await rm(link, { recursive: true, force: true })
+  if (kind === 'directory') {
+    await mkdir(target, { recursive: true })
+  } else {
+    await mkdir(join(target, '..'), { recursive: true })
+    await writeFile(target, '{}')
+  }
+  await mkdir(join(link, '..'), { recursive: true })
+  await symlink(target, link, kind === 'directory' ? 'dir' : 'file')
+  return outside
+}
+
 const cleanConfig = JSON.stringify({
+  build: { devUrl: 'http://localhost:5174' },
   app: {
+    windows: [{ label: 'main', title: 'Test' }],
     security: {
+      capabilities: ['default'],
       csp: {
         'default-src': "'self'",
         'base-uri': "'self'",
+        'form-action': "'self'",
         'object-src': "'none'",
         'script-src': "'self'",
-        'style-src': "'self' 'unsafe-inline'",
+        'style-src': "'self'",
         'img-src': "'self' data:",
         'font-src': "'self'",
         'connect-src': "'self' ipc: http://ipc.localhost",
@@ -37,49 +63,822 @@ const cleanConfig = JSON.stringify({
       devCsp: {
         'default-src': "'self'",
         'base-uri': "'self'",
+        'form-action': "'self'",
         'object-src': "'none'",
         'script-src': "'self'",
         'style-src': "'self' 'unsafe-inline'",
         'img-src': "'self' data:",
         'font-src': "'self'",
-        'connect-src': "'self' ipc: http://ipc.localhost http://localhost:5174",
+        'connect-src':
+          "'self' ipc: http://ipc.localhost http://localhost:5174 ws://localhost:5174 ws://127.0.0.1:5174 ws://localhost:1421 ws://127.0.0.1:1421",
       },
     },
   },
 })
 const cleanConfigValue = (name) => JSON.parse(cleanConfig).app.security[name]
+const exampleTauriCleanConfig = cleanConfig
+  .replaceAll('localhost:5174', 'localhost:5175')
+  .replaceAll('127.0.0.1:5174', '127.0.0.1:5175')
 const cleanCapability = JSON.stringify({
   identifier: 'default',
   windows: ['main'],
-  permissions: [],
+  permissions: ['allow-api-request'],
+})
+const adminCleanCapability = JSON.stringify({
+  identifier: 'default',
+  windows: ['main'],
+  permissions: ['allow-api-request', 'allow-clear-session'],
+})
+const adminNavigationGuard = [
+  'mod origin;',
+  'tauri::Builder::default()',
+  '  .plugin(',
+  '    tauri::plugin::Builder::<tauri::Wry>::new("navigation-guard")',
+  '      .on_navigation(|_, url| {',
+  '        origin::navigation_allowed(url, env!("TAURI_ADMIN_API_ORIGIN"))',
+  '      })',
+  '      .build(),',
+  '  )',
+].join('\n')
+const exampleTauriNavigationGuard = adminNavigationGuard.replaceAll(
+  'TAURI_ADMIN_API_ORIGIN',
+  'TAURI_EXAMPLE_TAURI_SERVICE_API_ORIGIN',
+)
+
+const nativeTransport = [
+  "import { invoke } from '@tauri-apps/api/core'",
+  '',
+  'export async function platformFetch(path: string) {',
+  "  return invoke('api_request', { path })",
+  '}',
+].join('\n')
+const fixedReleaseOrigin = [
+  'const APPROVED_RELEASE_ORIGINS: [&str; 1] = ["https://example.example.com"];',
+  '',
+  'pub fn parse(raw: &str, release: bool) -> Result<String, String> {',
+  '    if release && !APPROVED_RELEASE_ORIGINS.contains(&raw) {',
+  '        return Err("release API origin is not approved".to_owned());',
+  '    }',
+  '    Ok(raw.to_owned())',
+  '}',
+].join('\n')
+const adminFixedReleaseOrigin = fixedReleaseOrigin.replace(
+  'https://example.example.com',
+  'https://admin.example.com',
+)
+
+function nativeBoundaryManifest(directory, overrides = {}) {
+  const admin = directory === 'admin'
+  return JSON.stringify({
+    releaseOrigin: admin ? 'https://admin.example.com' : `https://${directory}.example.com`,
+    browserStorage: [
+      {
+        path: 'src/web/auth/session.ts',
+        tokenKey: admin ? 'app.admin.dev.token' : `app.${directory}.auth.token`,
+        ...(admin
+          ? { logoutIntentKey: 'app.admin.logout.intent' }
+          : { organizationKey: `app.${directory}.auth.org` }),
+        reason: admin
+          ? 'Browser development grant and logout tombstone; native auth is never persisted here.'
+          : 'Browser-only development grant; the Tauri runtime keeps access tokens in memory.',
+      },
+    ],
+    ...overrides,
+  })
+}
+
+function domainDevSessionSource(directory) {
+  return [
+    "import { platformFetch } from '../platform/transport'",
+    `const DEV_TOKEN_KEY = 'app.${directory}.auth.token'`,
+    `const DEV_ORG_KEY = 'app.${directory}.auth.org'`,
+    'export async function devLogin(organizationId: string) {',
+    "  const response = await platformFetch('/api/auth/token')",
+    '  const { token } = await response.json()',
+    '  sessionStorage.setItem(DEV_TOKEN_KEY, token)',
+    '  sessionStorage.setItem(DEV_ORG_KEY, organizationId)',
+    '}',
+  ].join('\n')
+}
+
+const adminDevSessionSource = [
+  "import { platformFetch } from '../platform/transport'",
+  "const DEV_TOKEN_KEY = 'app.admin.dev.token'",
+  "const LOGOUT_INTENT_KEY = 'app.admin.logout.intent'",
+  'export async function devLogin() {',
+  "  const response = await platformFetch('/api/auth/token')",
+  '  const { token } = await response.json()',
+  '  sessionStorage.setItem(DEV_TOKEN_KEY, token)',
+  '}',
+  "export function logout() { localStorage.setItem(LOGOUT_INTENT_KEY, '1') }",
+].join('\n')
+const platformOverlays = {
+  'services/example_tauri_service/src-tauri/tauri.android.conf.json': JSON.stringify({
+    bundle: { android: { minSdkVersion: 24 } },
+  }),
+  'services/example_tauri_service/src-tauri/tauri.ios.conf.json': JSON.stringify({
+    bundle: { iOS: { minimumSystemVersion: '14.0' } },
+  }),
+  'services/example_tauri_service/src-tauri/tauri.macos.conf.json': JSON.stringify({
+    bundle: { targets: ['app'], macOS: { minimumSystemVersion: '10.13' } },
+  }),
+}
+
+const catalogService = (directory, templateKind, deployable = false) => ({
+  directory,
+  package: `@app/${directory}`,
+  templateKind,
+  deployable,
+  native: templateKind === 'tauri',
+  ...(templateKind === 'tauri'
+    ? { nativeWorkflow: `.github/workflows/${directory}-tauri-build.yml` }
+    : {}),
 })
 
-function baseFiles(extra = {}) {
+const reviewedNativePackageScripts = {
+  'build:tauri': 'node ../../scripts/native-workflow.mjs package build',
+  tauri: 'node ../../scripts/native-workflow.mjs package tauri',
+}
+
+function catalogJson(extra = []) {
+  return JSON.stringify({
+    services: [
+      catalogService('admin', 'tauri', true),
+      catalogService('example_service', 'web'),
+      catalogService('example_tauri_service', 'tauri'),
+      ...extra,
+    ],
+  })
+}
+
+function nativeWorkflow(directory) {
+  return reviewedNativeWorkflowTemplate
+    .replace('name: Example Tauri Service native artifacts', `name: ${directory} native artifacts`)
+    .replaceAll('example_tauri_service', directory)
+    .replaceAll('example-tauri-service', directory.replaceAll('_', '-'))
+}
+
+function overlaysFor(directory, macOSMinimum = '10.13') {
   return {
-    'services/admin/src/web/App.tsx': 'export function App() { return null }\n',
-    'services/admin/src-tauri/tauri.conf.json': cleanConfig,
-    'services/admin/src-tauri/capabilities/default.json': cleanCapability,
-    ...extra,
+    [`services/${directory}/src-tauri/tauri.android.conf.json`]: JSON.stringify({
+      bundle: { android: { minSdkVersion: 24 } },
+    }),
+    [`services/${directory}/src-tauri/tauri.ios.conf.json`]: JSON.stringify({
+      bundle: { iOS: { minimumSystemVersion: '14.0' } },
+    }),
+    [`services/${directory}/src-tauri/tauri.macos.conf.json`]: JSON.stringify({
+      bundle: { targets: ['app'], macOS: { minimumSystemVersion: macOSMinimum } },
+    }),
   }
 }
+
+function separatedTemplateFiles(extra = {}) {
+  const normalizedExtra = { ...extra }
+  for (const [path, source] of Object.entries(normalizedExtra)) {
+    const packageMatch = path.match(/^services\/([a-z][a-z0-9_]*)\/package\.json$/)
+    if (!packageMatch || typeof source !== 'string') continue
+    try {
+      const packageJson = JSON.parse(source)
+      if (packageJson && typeof packageJson === 'object' && packageJson.name === undefined) {
+        normalizedExtra[path] = JSON.stringify({ name: `@app/${packageMatch[1]}`, ...packageJson })
+      }
+    } catch {
+      // Malformed-JSON fixtures must remain malformed so diagnostics can be tested.
+    }
+  }
+  return {
+    'service-catalog.json': catalogJson(),
+    '.github/workflows/admin-tauri-build.yml': nativeWorkflow('admin'),
+    '.github/workflows/example_tauri_service-tauri-build.yml':
+      nativeWorkflow('example_tauri_service'),
+    'services/admin/package.json': JSON.stringify({
+      name: '@app/admin',
+      scripts: reviewedNativePackageScripts,
+      dependencies: { '@tauri-apps/api': 'catalog:' },
+    }),
+    'services/admin/src/web/App.tsx': 'export function App() { return null }\n',
+    'services/admin/src/web/platform/transport.ts': nativeTransport,
+    'services/admin/src/web/auth/session.ts': adminDevSessionSource,
+    'services/admin/tauri-boundary.json': nativeBoundaryManifest('admin'),
+    'services/admin/src-tauri/Cargo.toml': '[package]\nname = "admin"\n',
+    'services/admin/src-tauri/tauri.conf.json': cleanConfig,
+    'services/admin/src-tauri/capabilities/default.json': adminCleanCapability,
+    'services/admin/src-tauri/src/lib.rs': adminNavigationGuard,
+    'services/admin/src-tauri/src/origin.rs': adminFixedReleaseOrigin,
+    ...overlaysFor('admin', '10.15'),
+    'services/example_service/src/web/App.tsx': 'export function App() { return null }\n',
+    'services/example_service/package.json': JSON.stringify({
+      name: '@app/example_service',
+      scripts: { dev: 'vite dev' },
+      dependencies: { react: 'catalog:' },
+    }),
+    'services/example_tauri_service/package.json': JSON.stringify({
+      name: '@app/example_tauri_service',
+      scripts: reviewedNativePackageScripts,
+      dependencies: { '@tauri-apps/api': 'catalog:' },
+      devDependencies: { '@tauri-apps/cli': 'catalog:' },
+    }),
+    'services/example_tauri_service/src/web/App.tsx': 'export function App() { return null }\n',
+    'services/example_tauri_service/src/web/auth/session.ts':
+      domainDevSessionSource('example_tauri_service'),
+    'services/example_tauri_service/tauri-boundary.json': nativeBoundaryManifest(
+      'example_tauri_service',
+      { releaseOrigin: 'https://example.example.com' },
+    ),
+    'services/example_tauri_service/src-tauri/Cargo.toml': '[package]\nname = "example"\n',
+    'services/example_tauri_service/src-tauri/tauri.conf.json': exampleTauriCleanConfig,
+    'services/example_tauri_service/src-tauri/capabilities/default.json': cleanCapability,
+    'services/example_tauri_service/src-tauri/src/lib.rs': exampleTauriNavigationGuard,
+    'services/example_tauri_service/src-tauri/src/origin.rs': fixedReleaseOrigin,
+    'services/example_tauri_service/src/web/platform/transport.ts': nativeTransport,
+    ...platformOverlays,
+    ...normalizedExtra,
+  }
+}
+
+function baseFiles(extra = {}) {
+  return separatedTemplateFiles(extra)
+}
+
+function assertWebTemplateTauriViolation(violations, category) {
+  assert.ok(
+    violations.some(
+      (violation) =>
+        violation.includes('services/example_service') &&
+        violation.includes('Tauri') &&
+        violation.toLowerCase().includes(category),
+    ),
+  )
+}
+
+function assertTauriTemplateViolation(violations, asset) {
+  assert.ok(
+    violations.some(
+      (violation) =>
+        violation.includes('services/example_tauri_service') &&
+        violation.includes('Tauri') &&
+        violation.toLowerCase().includes('template') &&
+        violation.includes(asset),
+    ),
+  )
+}
+
+for (const [asset, category, files] of [
+  [
+    'src-tauri directory',
+    'src-tauri',
+    {
+      'services/example_service/src-tauri/tauri.conf.json': exampleTauriCleanConfig,
+    },
+  ],
+  [
+    '@tauri-apps API dependency',
+    'dependency',
+    {
+      'services/example_service/package.json': JSON.stringify({
+        dependencies: { '@tauri-apps/api': 'catalog:' },
+      }),
+    },
+  ],
+  [
+    '@tauri-apps plugin dependency',
+    'dependency',
+    {
+      'services/example_service/package.json': JSON.stringify({
+        dependencies: { '@tauri-apps/plugin-shell': 'catalog:' },
+      }),
+    },
+  ],
+  [
+    '@tauri-apps CLI development dependency',
+    'dependency',
+    {
+      'services/example_service/package.json': JSON.stringify({
+        devDependencies: { '@tauri-apps/cli': 'catalog:' },
+      }),
+    },
+  ],
+  [
+    '@tauri-apps plugin development dependency',
+    'dependency',
+    {
+      'services/example_service/package.json': JSON.stringify({
+        devDependencies: { '@tauri-apps/plugin-opener': 'catalog:' },
+      }),
+    },
+  ],
+  [
+    '@tauri-apps API optional dependency',
+    'dependency',
+    {
+      'services/example_service/package.json': JSON.stringify({
+        optionalDependencies: { '@tauri-apps/api': 'catalog:' },
+      }),
+    },
+  ],
+  [
+    '@tauri-apps CLI optional dependency',
+    'dependency',
+    {
+      'services/example_service/package.json': JSON.stringify({
+        optionalDependencies: { '@tauri-apps/cli': 'catalog:' },
+      }),
+    },
+  ],
+  [
+    '@tauri-apps plugin optional dependency',
+    'dependency',
+    {
+      'services/example_service/package.json': JSON.stringify({
+        optionalDependencies: { '@tauri-apps/plugin-fs': 'catalog:' },
+      }),
+    },
+  ],
+  [
+    '@tauri-apps API peer dependency',
+    'dependency',
+    {
+      'services/example_service/package.json': JSON.stringify({
+        peerDependencies: { '@tauri-apps/api': 'catalog:' },
+      }),
+    },
+  ],
+  [
+    '@tauri-apps CLI peer dependency',
+    'dependency',
+    {
+      'services/example_service/package.json': JSON.stringify({
+        peerDependencies: { '@tauri-apps/cli': 'catalog:' },
+      }),
+    },
+  ],
+  [
+    '@tauri-apps plugin peer dependency',
+    'dependency',
+    {
+      'services/example_service/package.json': JSON.stringify({
+        peerDependencies: { '@tauri-apps/plugin-opener': 'catalog:' },
+      }),
+    },
+  ],
+  [
+    'tauri package script',
+    'script',
+    {
+      'services/example_service/package.json': JSON.stringify({
+        scripts: { tauri: 'tauri' },
+      }),
+    },
+  ],
+  [
+    'tauri-prefixed package script',
+    'script',
+    {
+      'services/example_service/package.json': JSON.stringify({
+        scripts: { 'tauri:android': 'tauri android build' },
+      }),
+    },
+  ],
+  [
+    'tauri-suffixed package script',
+    'script',
+    {
+      'services/example_service/package.json': JSON.stringify({
+        scripts: { 'build:tauri': 'vite --config vite.tauri.config.ts build' },
+      }),
+    },
+  ],
+]) {
+  test(`rejects ${asset} in the Web-only example template`, async () => {
+    await withFixture(separatedTemplateFiles(files), async (root) => {
+      const violations = await validateTauriBoundary(root)
+      assertWebTemplateTauriViolation(violations, category)
+    })
+  })
+}
+
+for (const [asset, missingPath] of [
+  ['Cargo.toml', 'services/example_tauri_service/src-tauri/Cargo.toml'],
+  ['tauri.conf.json', 'services/example_tauri_service/src-tauri/tauri.conf.json'],
+  [
+    'capabilities/default.json',
+    'services/example_tauri_service/src-tauri/capabilities/default.json',
+  ],
+  ['platform/transport.ts', 'services/example_tauri_service/src/web/platform/transport.ts'],
+  ['src/origin.rs', 'services/example_tauri_service/src-tauri/src/origin.rs'],
+  ['tauri.android.conf.json', 'services/example_tauri_service/src-tauri/tauri.android.conf.json'],
+  ['tauri.ios.conf.json', 'services/example_tauri_service/src-tauri/tauri.ios.conf.json'],
+  ['tauri.macos.conf.json', 'services/example_tauri_service/src-tauri/tauri.macos.conf.json'],
+]) {
+  test(`requires ${asset} in the Tauri example template`, async () => {
+    const files = separatedTemplateFiles()
+    delete files[missingPath]
+    await withFixture(files, async (root) => {
+      const violations = await validateTauriBoundary(root)
+      assertTauriTemplateViolation(violations, asset)
+    })
+  })
+}
+
+test('requires the Tauri template to keep its fixed release origin allowlist', async () => {
+  await withFixture(
+    separatedTemplateFiles({
+      'services/example_tauri_service/src-tauri/src/origin.rs':
+        'pub fn parse(raw: &str) -> String { raw.to_owned() }\n',
+    }),
+    async (root) => {
+      assertTauriTemplateViolation(await validateTauriBoundary(root), 'src/origin.rs')
+    },
+  )
+})
+
+test('requires the Tauri template to use the native invoke transport', async () => {
+  await withFixture(
+    separatedTemplateFiles({
+      'services/example_tauri_service/src/web/platform/transport.ts':
+        'export const platformFetch = (path) => fetch(path)\n',
+    }),
+    async (root) => {
+      assertTauriTemplateViolation(await validateTauriBoundary(root), 'platform/transport.ts')
+    },
+  )
+})
+
+for (const [name, path, overlay] of [
+  [
+    'Android minSdkVersion',
+    'services/example_tauri_service/src-tauri/tauri.android.conf.json',
+    { bundle: { android: {} } },
+  ],
+  [
+    'Android minSdkVersion value',
+    'services/example_tauri_service/src-tauri/tauri.android.conf.json',
+    { bundle: { android: { minSdkVersion: 25 } } },
+  ],
+  [
+    'iOS minimumSystemVersion',
+    'services/example_tauri_service/src-tauri/tauri.ios.conf.json',
+    { bundle: { iOS: {} } },
+  ],
+  [
+    'iOS minimumSystemVersion value',
+    'services/example_tauri_service/src-tauri/tauri.ios.conf.json',
+    { bundle: { iOS: { minimumSystemVersion: '15.0' } } },
+  ],
+  [
+    'macOS app target',
+    'services/example_tauri_service/src-tauri/tauri.macos.conf.json',
+    { bundle: { macOS: { minimumSystemVersion: '10.13' } } },
+  ],
+  [
+    'macOS app target value',
+    'services/example_tauri_service/src-tauri/tauri.macos.conf.json',
+    { bundle: { targets: ['dmg'], macOS: { minimumSystemVersion: '10.13' } } },
+  ],
+  [
+    'macOS minimumSystemVersion',
+    'services/example_tauri_service/src-tauri/tauri.macos.conf.json',
+    { bundle: { targets: ['app'], macOS: {} } },
+  ],
+  [
+    'macOS minimumSystemVersion value',
+    'services/example_tauri_service/src-tauri/tauri.macos.conf.json',
+    { bundle: { targets: ['app'], macOS: { minimumSystemVersion: '11.0' } } },
+  ],
+]) {
+  test(`requires ${name} in the Tauri template platform overlay`, async () => {
+    await withFixture(separatedTemplateFiles({ [path]: JSON.stringify(overlay) }), async (root) => {
+      assertTauriTemplateViolation(await validateTauriBoundary(root), path.split('/').at(-1))
+    })
+  })
+}
+
+test('accepts a separated Web and secure Tauri template fixture', async () => {
+  await withFixture(separatedTemplateFiles(), async (root) => {
+    assert.deepEqual(await validateTauriBoundary(root), [])
+  })
+})
 
 test('accepts the current safe Tauri boundary', async () => {
   await withFixture(
     baseFiles({
-      'services/admin/src/web/platform/transport.ts':
-        'export function platformFetch() { return fetch("/api/items") }\n',
+      'services/admin/src/web/platform/transport.ts': nativeTransport,
       'services/admin/src/web/auth/session.ts': [
         "import { platformFetch } from '../platform/transport'",
         "const DEV_TOKEN_KEY = 'app.admin.dev.token'",
+        "const LOGOUT_INTENT_KEY = 'app.admin.logout.intent'",
         'export async function devLogin() {',
         "  const res = await platformFetch('/api/auth/token')",
         '  const { token } = await res.json()',
         '  sessionStorage.setItem(DEV_TOKEN_KEY, token)',
         '}',
+        "export function logout() { localStorage.setItem(LOGOUT_INTENT_KEY, '1') }",
       ].join('\n'),
     }),
     async (root) => assert.deepEqual(await validateTauriBoundary(root), []),
   )
+})
+
+test('allows a copied Tauri service only through its reviewed Web storage manifest', async () => {
+  const bookingSecurity = JSON.parse(cleanConfig).app.security
+  bookingSecurity.devCsp['connect-src'] = bookingSecurity.devCsp['connect-src']
+    .replaceAll('5174', '5180')
+    .replaceAll('5173', '5180')
+  const safeBookingConfig = JSON.stringify({
+    build: { devUrl: 'http://localhost:5180' },
+    app: {
+      windows: [{ label: 'main', title: 'Booking' }],
+      security: {
+        ...bookingSecurity,
+      },
+    },
+  })
+  await withFixture(
+    baseFiles({
+      'service-catalog.json': catalogJson([catalogService('booking', 'tauri', true)]),
+      '.github/workflows/booking-tauri-build.yml': nativeWorkflow('booking'),
+      'services/booking/package.json': JSON.stringify({
+        name: '@app/booking',
+        scripts: reviewedNativePackageScripts,
+        dependencies: { '@tauri-apps/api': 'catalog:' },
+      }),
+      'services/booking/src/web/App.tsx': 'export function App() { return null }\n',
+      'services/booking/src/web/platform/transport.ts': nativeTransport,
+      'services/booking/src/web/auth/session.ts': domainDevSessionSource('booking'),
+      'services/booking/tauri-boundary.json': nativeBoundaryManifest('booking'),
+      'services/booking/src-tauri/Cargo.toml': '[package]\nname = "booking"\n',
+      'services/booking/src-tauri/tauri.conf.json': safeBookingConfig,
+      'services/booking/src-tauri/capabilities/default.json': cleanCapability,
+      'services/booking/src-tauri/src/origin.rs': fixedReleaseOrigin.replace(
+        'https://example.example.com',
+        'https://booking.example.com',
+      ),
+      'services/booking/src-tauri/src/lib.rs': [
+        'mod origin;',
+        'tauri::Builder::default()',
+        '  .plugin(',
+        '    tauri::plugin::Builder::<tauri::Wry>::new("navigation-guard")',
+        '      .on_navigation(|_, url| {',
+        '        origin::navigation_allowed(url, env!("TAURI_BOOKING_API_ORIGIN"))',
+        '      })',
+        '      .build(),',
+        '  )',
+      ].join('\n'),
+      ...overlaysFor('booking'),
+    }),
+    async (root) => {
+      assert.deepEqual(await validateTauriBoundary(root), [])
+    },
+  )
+})
+
+test('rejects a copied native service without an explicit boundary manifest', async () => {
+  const files = baseFiles({
+    'service-catalog.json': catalogJson([catalogService('booking', 'tauri', true)]),
+    '.github/workflows/booking-tauri-build.yml': nativeWorkflow('booking'),
+    'services/booking/package.json': JSON.stringify({
+      name: '@app/booking',
+      scripts: reviewedNativePackageScripts,
+      dependencies: { '@tauri-apps/api': 'catalog:' },
+    }),
+    'services/booking/src/web/App.tsx': 'export function App() { return null }\n',
+    'services/booking/src/web/platform/transport.ts': nativeTransport,
+    'services/booking/src-tauri/Cargo.toml': '[package]\nname = "booking"\n',
+    'services/booking/src-tauri/tauri.conf.json': exampleTauriCleanConfig,
+    'services/booking/src-tauri/capabilities/default.json': cleanCapability,
+    'services/booking/src-tauri/src/origin.rs': fixedReleaseOrigin,
+    'services/booking/src-tauri/src/lib.rs': exampleTauriNavigationGuard,
+    ...overlaysFor('booking'),
+  })
+  await withFixture(files, async (root) => {
+    const violations = await validateTauriBoundary(root)
+    assert.ok(
+      violations.some(
+        (violation) =>
+          violation.includes('services/booking/tauri-boundary.json') &&
+          violation.includes('required'),
+      ),
+      violations.join('\n'),
+    )
+  })
+})
+
+test('rejects malformed or unreviewed storage manifest entries', async () => {
+  for (const manifest of [
+    '{ malformed',
+    nativeBoundaryManifest('example_tauri_service', {
+      browserStorage: [
+        {
+          path: '../outside.ts',
+          tokenKey: 'app.example_tauri_service.auth.token',
+          reason: '',
+          escape: true,
+        },
+      ],
+    }),
+  ]) {
+    await withFixture(
+      baseFiles({ 'services/example_tauri_service/tauri-boundary.json': manifest }),
+      async (root) => {
+        const violations = await validateTauriBoundary(root)
+        assert.ok(
+          violations.some(
+            (violation) =>
+              violation.includes('tauri-boundary.json') &&
+              /malformed|path|reason|field/i.test(violation),
+          ),
+          violations.join('\n'),
+        )
+      },
+    )
+  }
+})
+
+test('rejects Tauri runtime token persistence even when the Web fallback key is reviewed', async () => {
+  await withFixture(
+    baseFiles({
+      'service-catalog.json': catalogJson([catalogService('booking', 'tauri', true)]),
+      '.github/workflows/booking-tauri-build.yml': nativeWorkflow('booking'),
+      'services/booking/package.json': JSON.stringify({
+        name: '@app/booking',
+        scripts: reviewedNativePackageScripts,
+        dependencies: { '@tauri-apps/api': 'catalog:' },
+      }),
+      'services/booking/src/web/App.tsx': 'export function App() { return null }\n',
+      'services/booking/src/web/platform/transport.ts': nativeTransport,
+      'services/booking/src/web/auth/session.ts': [
+        domainDevSessionSource('booking'),
+        'export function persistNativeSession(token: string) {',
+        '  sessionStorage.setItem(DEV_TOKEN_KEY, token)',
+        '}',
+      ].join('\n'),
+      'services/booking/tauri-boundary.json': nativeBoundaryManifest('booking'),
+      'services/booking/src-tauri/Cargo.toml': '[package]\nname = "booking"\n',
+      'services/booking/src-tauri/tauri.conf.json': exampleTauriCleanConfig,
+      'services/booking/src-tauri/capabilities/default.json': cleanCapability,
+      'services/booking/src-tauri/src/origin.rs': fixedReleaseOrigin.replace(
+        'https://example.example.com',
+        'https://booking.example.com',
+      ),
+      'services/booking/src-tauri/src/lib.rs': exampleTauriNavigationGuard.replaceAll(
+        'TAURI_EXAMPLE_TAURI_SERVICE_API_ORIGIN',
+        'TAURI_BOOKING_API_ORIGIN',
+      ),
+      ...overlaysFor('booking'),
+    }),
+    async (root) => {
+      const violations = await validateTauriBoundary(root)
+      assert.ok(
+        violations.some(
+          (violation) =>
+            violation.includes('services/booking/src/web/auth/session.ts') &&
+            violation.includes('browser storage write is forbidden'),
+        ),
+        violations.join('\n'),
+      )
+    },
+  )
+})
+
+test('rejects Tauri dependencies in every catalog Web service', async () => {
+  await withFixture(
+    baseFiles({
+      'service-catalog.json': catalogJson([catalogService('booking', 'web', true)]),
+      'services/booking/package.json': JSON.stringify({
+        name: '@app/booking',
+        dependencies: { '@tauri-apps/api': 'catalog:' },
+      }),
+      'services/booking/src/web/App.tsx': 'export function App() { return null }\n',
+    }),
+    async (root) => {
+      const violations = await validateTauriBoundary(root)
+      assert.ok(
+        violations.some(
+          (violation) =>
+            violation.includes('services/booking/package.json') &&
+            violation.includes('@tauri-apps/api'),
+        ),
+      )
+    },
+  )
+})
+
+test('requires complete native assets in every catalog Tauri service', async () => {
+  await withFixture(
+    baseFiles({
+      'service-catalog.json': catalogJson([catalogService('booking', 'tauri', true)]),
+      '.github/workflows/booking-tauri-build.yml': nativeWorkflow('booking'),
+      'services/booking/package.json': JSON.stringify({
+        name: '@app/booking',
+        scripts: reviewedNativePackageScripts,
+      }),
+      'services/booking/src/web/App.tsx': 'export function App() { return null }\n',
+      'services/booking/src-tauri/tauri.conf.json': exampleTauriCleanConfig,
+      'services/booking/src-tauri/capabilities/default.json': cleanCapability,
+      'services/booking/src-tauri/src/lib.rs': exampleTauriNavigationGuard,
+      'services/booking/src-tauri/src/origin.rs': fixedReleaseOrigin,
+      'services/booking/src/web/platform/transport.ts': nativeTransport,
+      ...overlaysFor('booking'),
+    }),
+    async (root) => {
+      const violations = await validateTauriBoundary(root)
+      assert.ok(
+        violations.some(
+          (violation) =>
+            violation.includes('services/booking/src-tauri/Cargo.toml') &&
+            violation.includes('missing required asset'),
+        ),
+      )
+    },
+  )
+})
+
+for (const [label, path, kind] of [
+  ['native root', 'services/example_tauri_service/src-tauri', 'directory'],
+  ['capability root', 'services/example_tauri_service/src-tauri/capabilities', 'directory'],
+  ['required Cargo file', 'services/example_tauri_service/src-tauri/Cargo.toml', 'file'],
+  ['service package', 'services/example_tauri_service/package.json', 'file'],
+  ['platform overlay', 'services/example_tauri_service/src-tauri/tauri.android.conf.json', 'file'],
+]) {
+  for (const scope of ['inside', 'outside']) {
+    test(`rejects a ${scope}-workspace symlink for the ${label}`, async () => {
+      await withFixture(separatedTemplateFiles(), async (root) => {
+        const outside = await replaceWithSymlink(root, path, scope, kind)
+        try {
+          const violations = await validateTauriBoundary(root)
+          assert.ok(
+            violations.some(
+              (violation) => violation.includes(path) && violation.includes('symbolic link'),
+            ),
+            violations.join('\n'),
+          )
+        } finally {
+          await rm(outside, { recursive: true, force: true })
+        }
+      })
+    })
+  }
+}
+
+for (const [label, path] of [
+  ['Web package', 'services/example_service/package.json'],
+  ['Tauri package', 'services/example_tauri_service/package.json'],
+  ['main config', 'services/example_tauri_service/src-tauri/tauri.conf.json'],
+  ['platform overlay', 'services/example_tauri_service/src-tauri/tauri.android.conf.json'],
+]) {
+  const catalogIdentity = path.endsWith('/package.json')
+  test(`reports malformed JSON in the ${label} and ${catalogIdentity ? 'fails closed before target scanning' : 'continues checking'}`, async () => {
+    await withFixture(
+      separatedTemplateFiles({
+        [path]: '{ malformed',
+      }),
+      async (root) => {
+        await rm(join(root, 'services/example_tauri_service/src-tauri/Cargo.toml'))
+        const violations = await validateTauriBoundary(root)
+        assert.ok(
+          violations.some(
+            (violation) => violation.includes(path) && violation.includes('malformed JSON'),
+          ),
+          violations.join('\n'),
+        )
+        if (catalogIdentity) {
+          assert.ok(violations.every((violation) => violation.startsWith('service catalog:')))
+        } else {
+          assert.ok(
+            violations.some((violation) =>
+              violation.includes('services/example_tauri_service/src-tauri/Cargo.toml'),
+            ),
+            violations.join('\n'),
+          )
+        }
+      },
+    )
+  })
+}
+
+test('rejects non-regular required files and directories', async () => {
+  await withFixture(separatedTemplateFiles(), async (root) => {
+    const cargo = join(root, 'services/example_tauri_service/src-tauri/Cargo.toml')
+    const capabilities = join(root, 'services/example_tauri_service/src-tauri/capabilities')
+    await rm(cargo)
+    await mkdir(cargo)
+    await rm(capabilities, { recursive: true })
+    await writeFile(capabilities, '{}')
+    const violations = await validateTauriBoundary(root)
+    assert.ok(
+      violations.some(
+        (violation) => violation.includes('Cargo.toml') && violation.includes('regular file'),
+      ),
+      violations.join('\n'),
+    )
+    assert.ok(
+      violations.some(
+        (violation) =>
+          violation.includes('src-tauri/capabilities') && violation.includes('regular directory'),
+      ),
+      violations.join('\n'),
+    )
+  })
 })
 
 test('rejects fetch through call', async () => {
@@ -95,25 +894,130 @@ test('rejects fetch through call', async () => {
   )
 })
 
-test('allows only the generated api_request app command permission', async () => {
+test('allows only generated native app command permissions', async () => {
   const capability = JSON.parse(
     await readFile(
       join(process.cwd(), 'services/admin/src-tauri/capabilities/default.json'),
       'utf8',
     ),
   )
-  assert.deepEqual(capability.permissions, ['allow-api-request'])
+  assert.deepEqual(capability.permissions, ['allow-api-request', 'allow-clear-session'])
 
   const buildScript = await readFile(
     join(process.cwd(), 'services/admin/src-tauri/build.rs'),
     'utf8',
   )
-  assert.match(buildScript, /AppManifest::new\(\)\.commands\(&\["api_request"\]\)/)
+  assert.match(buildScript, /commands\(&\["api_request", "clear_session"\]\)/)
+})
+
+test('rejects remote, extra-window, and webview capability grants', async () => {
+  await withFixture(
+    baseFiles({
+      'services/admin/src-tauri/capabilities/wide.json': JSON.stringify({
+        identifier: 'wide',
+        windows: ['main', 'settings'],
+        webviews: ['main'],
+        remote: { urls: ['https://evil.example'] },
+        permissions: ['allow-api-request', 'allow-clear-session'],
+      }),
+    }),
+    async (root) => {
+      const violations = await validateTauriBoundary(root)
+      assert.ok(violations.some((violation) => violation.includes('remote capability access')))
+      assert.ok(violations.some((violation) => violation.includes('webview capability access')))
+      assert.ok(violations.some((violation) => violation.includes('exactly the local main window')))
+    },
+  )
+})
+
+test('rejects remote or non-main Tauri windows', async () => {
+  for (const windows of [
+    [{ label: 'main', url: 'https://attacker.example' }],
+    [{ label: 'main' }, { label: 'settings' }],
+    [{ label: 'settings' }],
+  ]) {
+    await withFixture(
+      baseFiles({
+        'services/admin/src-tauri/tauri.conf.json': JSON.stringify({
+          app: {
+            windows,
+            security: JSON.parse(cleanConfig).app.security,
+          },
+        }),
+      }),
+      async (root) => {
+        const violations = await validateTauriBoundary(root)
+        assert.ok(violations.some((violation) => violation.includes('window')))
+      },
+    )
+  }
+})
+
+test('rejects extra or remote capability references in the base config', async () => {
+  for (const capabilities of [['default', 'wide'], ['remote']]) {
+    await withFixture(
+      baseFiles({
+        'services/admin/src-tauri/tauri.conf.json': JSON.stringify({
+          app: {
+            windows: [{ label: 'main' }],
+            security: {
+              ...JSON.parse(cleanConfig).app.security,
+              capabilities,
+            },
+          },
+        }),
+      }),
+      async (root) => {
+        const violations = await validateTauriBoundary(root)
+        assert.ok(violations.some((violation) => violation.includes('capability reference')))
+      },
+    )
+  }
+})
+
+test('applies the same capability boundary to TOML files', async () => {
+  await withFixture(
+    baseFiles({
+      'services/example_tauri_service/src-tauri/capabilities/wide.toml': [
+        'identifier = "wide"',
+        'windows = ["main", "settings"]',
+        'webviews = ["main"]',
+        'permissions = ["allow-api-request"]',
+      ].join('\n'),
+    }),
+    async (root) => {
+      const violations = await validateTauriBoundary(root)
+      assert.ok(violations.some((violation) => violation.includes('wide.toml')))
+      assert.ok(violations.some((violation) => violation.includes('webview capability access')))
+      assert.ok(violations.some((violation) => violation.includes('exactly the local main window')))
+    },
+  )
+})
+
+test('keeps example_tauri_service Tauri devUrl on its strict Web Vite port', async () => {
+  const viteConfig = await readFile(
+    join(process.cwd(), 'services/example_tauri_service/vite.config.ts'),
+    'utf8',
+  )
+  assert.match(viteConfig, /port:\s*5175/)
+  assert.match(viteConfig, /strictPort:\s*true/)
+  assert.match(viteConfig, /TAURI_DEV_HOST/)
+
+  const tauriConfig = JSON.parse(
+    await readFile(
+      join(process.cwd(), 'services/example_tauri_service/src-tauri/tauri.conf.json'),
+      'utf8',
+    ),
+  )
+  assert.equal(tauriConfig.build.devUrl, 'http://localhost:5175')
 })
 
 test('rejects forbidden Tauri plugin imports in admin web production code', async () => {
   for (const plugin of [
     '@tauri-apps/plugin-http',
+    '@tauri-apps/plugin-fs',
+    '@tauri-apps/plugin-shell',
+    '@tauri-apps/plugin-opener',
     '@tauri-apps/plugin-store',
     '@tauri-apps/plugin-stronghold',
   ]) {
@@ -122,6 +1026,81 @@ test('rejects forbidden Tauri plugin imports in admin web production code', asyn
       async (root) => {
         const violations = await validateTauriBoundary(root)
         assert.ok(violations.some((violation) => violation.includes(plugin)))
+      },
+    )
+  }
+})
+
+test('rejects Tauri plugin references in Rust dependencies, builder, and config', async () => {
+  await withFixture(
+    baseFiles({
+      'services/example_tauri_service/src-tauri/Cargo.toml':
+        '[dependencies]\ntauri-plugin-fs = "2"\n',
+      'services/example_tauri_service/src-tauri/src/lib.rs':
+        'tauri::Builder::default().plugin(tauri_plugin_fs::init());\n',
+      'services/example_tauri_service/src-tauri/tauri.conf.json': JSON.stringify({
+        plugins: { fs: {} },
+        app: { security: JSON.parse(exampleTauriCleanConfig).app.security },
+      }),
+    }),
+    async (root) => {
+      const violations = await validateTauriBoundary(root)
+      assert.ok(violations.some((violation) => violation.includes('tauri-plugin-fs')))
+      assert.ok(violations.some((violation) => violation.includes('.plugin(')))
+      assert.ok(violations.some((violation) => violation.includes('plugins configuration')))
+    },
+  )
+})
+
+test('requires the exact top-level navigation guard in each Tauri shell', async () => {
+  await withFixture(
+    baseFiles({
+      'services/admin/src-tauri/src/lib.rs': 'tauri::Builder::default();\n',
+    }),
+    async (root) => {
+      const violations = await validateTauriBoundary(root)
+      assert.ok(violations.some((violation) => violation.includes('navigation guard')))
+    },
+  )
+})
+
+test('rejects plugin configuration in platform overlays', async () => {
+  await withFixture(
+    baseFiles({
+      'services/example_tauri_service/src-tauri/tauri.ios.conf.json': JSON.stringify({
+        plugins: { fs: {} },
+      }),
+    }),
+    async (root) => {
+      const violations = await validateTauriBoundary(root)
+      assert.ok(violations.some((violation) => violation.includes('tauri.ios.conf.json')))
+      assert.ok(violations.some((violation) => violation.includes('plugins configuration')))
+    },
+  )
+})
+
+test('rejects security and capability overrides in platform overlays', async () => {
+  for (const app of [
+    { security: { csp: "connect-src 'self' *" } },
+    { security: { capabilities: ['unsafe'] } },
+    { windows: [{ label: 'remote', url: 'https://attacker.example' }] },
+  ]) {
+    await withFixture(
+      baseFiles({
+        'services/example_tauri_service/src-tauri/tauri.ios.conf.json': JSON.stringify({
+          app,
+        }),
+      }),
+      async (root) => {
+        const violations = await validateTauriBoundary(root)
+        assert.ok(
+          violations.some(
+            (violation) =>
+              violation.includes('tauri.ios.conf.json') &&
+              (violation.includes('security configuration') ||
+                violation.includes('window configuration')),
+          ),
+        )
       },
     )
   }
@@ -138,6 +1117,76 @@ test('rejects raw fetch outside the transport source and ignores tests and dist'
       const violations = await validateTauriBoundary(root)
       assert.equal(violations.filter((violation) => violation.includes('raw fetch')).length, 1)
       assert.ok(violations.some((violation) => violation.includes('routes/Orgs.tsx')))
+    },
+  )
+})
+
+test('rejects a test-named module when production code imports it', async () => {
+  await withFixture(
+    baseFiles({
+      'services/admin/src/web/App.tsx': [
+        "import { unsafeFetch } from './bridge.test'",
+        'export function App() { unsafeFetch(); return null }',
+      ].join('\n'),
+      'services/admin/src/web/bridge.test.ts':
+        "export function unsafeFetch() { return fetch('/api/escaped') }\n",
+    }),
+    async (root) => {
+      const violations = await validateTauriBoundary(root)
+      assert.ok(
+        violations.some(
+          (violation) =>
+            violation.includes('bridge.test.ts') && violation.includes('production source'),
+        ),
+      )
+    },
+  )
+})
+
+test('checks example_tauri_service raw fetch outside its platform transport source', async () => {
+  await withFixture(
+    baseFiles({
+      'services/example_tauri_service/src/web/routes/Items.tsx':
+        'export const load = () => fetch("/api/items")\n',
+    }),
+    async (root) => {
+      const violations = await validateTauriBoundary(root)
+      assert.ok(violations.some((violation) => violation.includes('example_tauri_service')))
+      assert.ok(violations.some((violation) => violation.includes('raw fetch')))
+    },
+  )
+})
+
+test('allows only the documented example_tauri_service Web session fallback', async () => {
+  await withFixture(
+    baseFiles({
+      'services/example_tauri_service/src/web/platform/transport.ts': nativeTransport,
+      'services/example_tauri_service/src/web/auth/session.ts': [
+        "import { platformFetch } from '../platform/transport'",
+        "const DEV_TOKEN_KEY = 'app.example_tauri_service.auth.token'",
+        "const DEV_ORG_KEY = 'app.example_tauri_service.auth.org'",
+        'export async function devLogin(organizationId: string) {',
+        "  const response = await platformFetch('/api/auth/token')",
+        '  const { token } = await response.json()',
+        '  sessionStorage.setItem(DEV_TOKEN_KEY, token)',
+        '  sessionStorage.setItem(DEV_ORG_KEY, organizationId)',
+        '}',
+      ].join('\n'),
+    }),
+    async (root) => assert.deepEqual(await validateTauriBoundary(root), []),
+  )
+})
+
+test('rejects arbitrary example_tauri_service browser storage writes', async () => {
+  await withFixture(
+    baseFiles({
+      'services/example_tauri_service/src/web/auth/other.ts':
+        "sessionStorage.setItem('refresh', token)\n",
+    }),
+    async (root) => {
+      const violations = await validateTauriBoundary(root)
+      assert.ok(violations.some((violation) => violation.includes('example_tauri_service')))
+      assert.ok(violations.some((violation) => violation.includes('browser storage write')))
     },
   )
 })
@@ -223,6 +1272,23 @@ test('checks mts and cts web sources and rejects web symlinks', async () => {
       assert.ok(violations.some((violation) => violation.includes('Linked.tsx')))
     },
   )
+})
+
+test('rejects symlinks in Tauri source and capability directories', async () => {
+  await withFixture(baseFiles(), async (root) => {
+    await mkdir(join(root, 'services/admin/src-tauri/src'), { recursive: true })
+    await symlink(
+      join(root, 'services/admin/src/web/App.tsx'),
+      join(root, 'services/admin/src-tauri/src/linked.rs'),
+    )
+    await symlink(
+      join(root, 'services/admin/src-tauri/capabilities/default.json'),
+      join(root, 'services/admin/src-tauri/capabilities/linked.json'),
+    )
+    const violations = await validateTauriBoundary(root)
+    assert.ok(violations.some((violation) => violation.includes('src-tauri/src/linked.rs')))
+    assert.ok(violations.some((violation) => violation.includes('capabilities/linked.json')))
+  })
 })
 
 test('fails closed on unknown computed boundary properties', async () => {
@@ -581,16 +1647,11 @@ test('rejects missing, empty, or non-object CSP configuration', async () => {
     )
   }
 
-  await withFixture(
-    {
-      'services/admin/src/web/App.tsx': 'export function App() { return null }\n',
-      'services/admin/src-tauri/capabilities/default.json': cleanCapability,
-    },
-    async (root) => {
-      const violations = await validateTauriBoundary(root)
-      assert.ok(violations.some((violation) => violation.includes('tauri.conf.json')))
-    },
-  )
+  await withFixture(separatedTemplateFiles(), async (root) => {
+    await rm(join(root, 'services/admin/src-tauri/tauri.conf.json'))
+    const violations = await validateTauriBoundary(root)
+    assert.ok(violations.some((violation) => violation.includes('tauri.conf.json')))
+  })
 })
 
 test('rejects filesystem, shell, opener, and HTTP plugin capability permissions', async () => {
@@ -607,12 +1668,80 @@ test('rejects filesystem, shell, opener, and HTTP plugin capability permissions'
   }
 })
 
+test('rejects capability permissions outside the exact API command allowlist', async () => {
+  for (const permission of ['core:default', 'unknown:default', 'allow-api-request-extra']) {
+    await withFixture(
+      baseFiles({
+        'services/example_tauri_service/src-tauri/capabilities/default.json': JSON.stringify({
+          permissions: ['allow-api-request', permission],
+        }),
+      }),
+      async (root) =>
+        assert.ok((await validateTauriBoundary(root)).some((v) => v.includes(permission))),
+    )
+  }
+})
+
+test('checks TOML capabilities with the same exact permission allowlist', async () => {
+  await withFixture(
+    baseFiles({
+      'services/example_tauri_service/src-tauri/capabilities/review.toml': [
+        'identifier = "review"',
+        'windows = ["main"]',
+        'permissions = ["core:default"]',
+      ].join('\n'),
+    }),
+    async (root) => {
+      const violations = await validateTauriBoundary(root)
+      assert.ok(violations.some((v) => v.includes('capabilities/review.toml')))
+      assert.ok(violations.some((v) => v.includes('core:default')))
+    },
+  )
+})
+
 test('rejects server secrets mentioned in src-tauri source or config', async () => {
-  for (const secret of ['JWT_SECRET', 'AUTH_PEPPER', 'INTERNAL_KEY', 'RESEND']) {
+  for (const secret of [
+    'JWT_SECRET',
+    'JWT_PRIVATE_KEY',
+    'JWT_PUBLIC_KEY',
+    'AUTH_DEV_PRIVATE_KEY',
+    'AUTH_PEPPER',
+    'DOMAIN_TO_ADMIN_KEY',
+    'ADMIN_TO_EXAMPLE_SERVICE_KEY',
+    'ADMIN_TO_NOTIFIER_KEY',
+    'DOMAIN_TO_NOTIFIER_KEY',
+    'OPS_TO_NOTIFIER_KEY',
+    'INTERNAL_KEY',
+    'D1_EXPORT_API_TOKEN',
+    'R2_POLICY_CHECK_API_TOKEN',
+    'BACKUP_SIGNING_PRIVATE_KEY',
+    'RESEND_API_KEY',
+  ]) {
     await withFixture(
       baseFiles({ 'services/admin/src-tauri/src/lib.rs': `const name = "${secret}";\n` }),
       async (root) =>
         assert.ok((await validateTauriBoundary(root)).some((v) => v.includes(secret))),
     )
   }
+})
+
+test('allows inline styles only in the development CSP', async () => {
+  await withFixture(
+    baseFiles({
+      'services/admin/src-tauri/tauri.conf.json': JSON.stringify({
+        app: {
+          windows: [{ label: 'main', title: 'Test' }],
+          security: {
+            capabilities: ['default'],
+            csp: { ...cleanConfigValue('csp'), 'style-src': "'self' 'unsafe-inline'" },
+            devCsp: cleanConfigValue('devCsp'),
+          },
+        },
+      }),
+    }),
+    async (root) => {
+      const violations = await validateTauriBoundary(root)
+      assert.ok(violations.some((violation) => violation.includes("'unsafe-inline'")))
+    },
+  )
 })

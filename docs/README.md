@@ -27,6 +27,10 @@
 | インフラ構成を知る | [`architecture/infra.md`](./architecture/infra.md) |
 | 開発体制・ワークフロー | [`howto/agent-development.md`](./howto/agent-development.md) |
 | 依存を追加・削除・更新する | [`howto/dependency-management.md`](./howto/dependency-management.md) |
+| example_tauri_service を Tauri app として開発・検証する | [`howto/tauri-example-service.md`](./howto/tauri-example-service.md) |
+| admin / Web・Tauri 両 example の Make コマンドを確認する | ルートの `make help` と [`../README.md`](../README.md) |
+| 本番 deploy の branch / environment / secret 境界を確認する | [`howto/deploy.md`](./howto/deploy.md) と [`architecture/infra.md`](./architecture/infra.md) |
+| admin Tauri の署名・store 提出を準備する | [`howto/tauri-distribution.md`](./howto/tauri-distribution.md) |
 | AI（LLM）を組み込む機能を作る | [`security/AI_GUARDRAILS_RULE.md`](./security/AI_GUARDRAILS_RULE.md) |
 | 開発の大原則（なぜこのルールなのか） | [`constitution/SDD_CONSTITUTION.md`](./constitution/SDD_CONSTITUTION.md) |
 
