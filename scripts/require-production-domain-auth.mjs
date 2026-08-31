@@ -3,10 +3,12 @@
 import { lstatSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import {
+  loadServiceRepositoryCatalog,
+  requireCatalogDeployableService,
+} from './service-catalog.mjs'
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
-const SERVICE_PATTERN = /^[a-z][a-z0-9_]*$/
-const RESERVED_SERVICES = new Set(['admin', 'example_service', 'notifier', 'ops'])
 
 function regularFile(path) {
   try {
@@ -444,8 +446,12 @@ function hasExecutableAuthTest(tokens) {
  * closed instead of turning a deploy into an unreachable or accidentally
  * weakened service.
  */
-export function isProductionDomainAuthReady(service, rootDir = root) {
-  if (!SERVICE_PATTERN.test(service) || RESERVED_SERVICES.has(service)) return false
+export function isProductionDomainAuthReady(service, rootDir = root, catalog) {
+  try {
+    requireCatalogDeployableService(catalog, service, { domain: true })
+  } catch {
+    return false
+  }
   const serviceDir = resolve(rootDir, 'services', service)
   const authPath = join(serviceDir, 'src/worker/production-auth.ts')
   const workerPath = join(serviceDir, 'src/worker/index.ts')
@@ -522,23 +528,30 @@ export function isProductionDomainAuthReady(service, rootDir = root) {
   ) {
     return false
   }
-  return (
+  const receiverProof =
     hasProductionAuthTestImport(testTokens) &&
     hasExecutableAuthTest(testTokens) &&
     hasNegativeAuthAssertion(testTokens)
-  )
+  if (!receiverProof) return false
+
+  // The repository currently has no approved domain token issuer/gateway and
+  // no executable positive fixture proving an issued aud=domain token remains
+  // bound to sid/sub/org through logout/revoke and admin failures. A receiver-
+  // only negative test cannot authorize production provisioning.
+  return false
 }
 
-export function requireProductionDomainAuth(service, rootDir = root) {
-  if (!isProductionDomainAuthReady(service, rootDir)) {
+export function requireProductionDomainAuth(service, rootDir = root, catalog) {
+  requireCatalogDeployableService(catalog, service, { domain: true })
+  if (!isProductionDomainAuthReady(service, rootDir, catalog)) {
     throw new Error(
-      `production domain ${service} is blocked until a reviewed production-auth.ts middleware and test are added`,
+      `production domain ${service} is blocked until a human-approved issuer or gateway and executable positive live-session fixture are implemented`,
     )
   }
 }
 
 const currentFile = fileURLToPath(import.meta.url)
-if (process.argv[1] && resolve(process.argv[1]) === currentFile) {
+async function main() {
   const [service, ...unexpected] = process.argv.slice(2)
   if (unexpected.length > 0 || !service) {
     console.error(
@@ -547,7 +560,8 @@ if (process.argv[1] && resolve(process.argv[1]) === currentFile) {
     process.exitCode = 1
   } else {
     try {
-      requireProductionDomainAuth(service)
+      const catalog = await loadServiceRepositoryCatalog(root)
+      requireProductionDomainAuth(service, root, catalog)
       console.log(`production domain auth: ${service} ready`)
     } catch (error) {
       console.error(`production domain auth blocked: ${error.message}`)
@@ -555,3 +569,5 @@ if (process.argv[1] && resolve(process.argv[1]) === currentFile) {
     }
   }
 }
+
+if (process.argv[1] && resolve(process.argv[1]) === currentFile) await main()

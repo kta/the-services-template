@@ -629,9 +629,9 @@ for (const { directory: service } of serviceCatalog.services.filter(
   if (packageJson.name !== `@app/${service}`) {
     violations.push(`${service} package name must be @app/${service}`)
   }
-  if (!isProductionDomainAuthReady(service, root)) {
+  if (!isProductionDomainAuthReady(service, root, serviceCatalog)) {
     violations.push(
-      `${service} must add the reviewed production-auth.ts middleware and test before production wiring`,
+      `${service} must add a human-approved token issuer or gateway and executable positive live-session fixture before production wiring`,
     )
   }
   for (const scriptName of ['deploy', 'db:migrate:remote', 'db:seed:remote']) {

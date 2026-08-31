@@ -1,7 +1,18 @@
 import assert from 'node:assert/strict'
-import { createSign, generateKeyPairSync } from 'node:crypto'
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash, createSign, generateKeyPairSync } from 'node:crypto'
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
+import { tmpdir } from 'node:os'
+import { basename, join } from 'node:path'
 import test from 'node:test'
+import * as restoreCli from './restore-d1.mjs'
 import {
   canonicalJson,
   createPreRestoreArtifact,
@@ -464,5 +475,227 @@ test('time-travel pre-restore state is uploaded and read back before proceeding'
     assert.equal(calls.length, 2)
   } finally {
     rmSync(artifact.directory, { recursive: true, force: true })
+  }
+})
+
+test('every CLI operation reaches checkout, config, R2 preflight, and its fixed command', async () => {
+  assert.equal(typeof restoreCli.runRestoreCli, 'function')
+
+  const accountId = '0123456789abcdef0123456789abcdef'
+  const adminDatabaseId = '01234567-89ab-4cde-8123-456789abcdef'
+  const restoreDatabaseId = '11234567-89ab-4cde-8123-456789abcdef'
+  const backupKey = 'admin/2026-08-22T00-00-00.sql'
+  const sql = `${'-- reviewed restore fixture\n'.repeat(40)}CREATE TABLE users (id);\nINSERT INTO users VALUES (1);\n`
+  const sha256 = createHash('sha256').update(sql).digest('hex')
+  const manifest = signedManifest({
+    targets: {
+      admin: {
+        at: '2026-08-22T00:00:00.000Z',
+        key: backupKey,
+        sha256,
+        accountId,
+        databaseId: adminDatabaseId,
+      },
+    },
+  })
+  const environment = {
+    PATH: process.env.PATH,
+    CLOUDFLARE_API_TOKEN: 'restore-operator-token',
+    CLOUDFLARE_ACCOUNT_ID: accountId,
+    BACKUP_SIGNING_PUBLIC_KEY: manifestPublicKeyPem,
+  }
+  const configs = {
+    admin: {
+      databaseName: 'admin',
+      databaseId: adminDatabaseId,
+      accountId,
+      bucket: '',
+      backupTargets: [],
+      databaseIds: {},
+      signingPublicKey: '',
+    },
+    ops: {
+      databaseName: '',
+      databaseId: '',
+      accountId,
+      bucket: 'private-backups',
+      backupTargets: ['admin'],
+      databaseIds: { admin: adminDatabaseId },
+      signingPublicKey: manifestPublicKeyPem,
+    },
+  }
+  const cases = [
+    {
+      name: 'time-travel-info',
+      argv: ['time-travel-info', '--service', 'admin'],
+      final: ['d1', 'time-travel', 'info', adminDatabaseId],
+    },
+    {
+      name: 'time-travel-restore',
+      argv: [
+        'time-travel-restore',
+        '--service',
+        'admin',
+        '--timestamp',
+        '2026-08-22T00:00:00.000Z',
+        '--confirm',
+        'RESTORE_PRODUCTION',
+      ],
+      final: [
+        'd1',
+        'time-travel',
+        'restore',
+        adminDatabaseId,
+        '--timestamp=2026-08-22T00:00:00.000Z',
+      ],
+    },
+    {
+      name: 'export-before-restore',
+      argv: ['export-before-restore', '--service', 'admin', '--confirm', 'RESTORE_PRODUCTION'],
+      output: { option: '--output', extension: '.sql' },
+      finalPrefix: ['d1', 'export', adminDatabaseId, '--remote', '--skip-confirmation'],
+    },
+    {
+      name: 'download-backup',
+      argv: [
+        'download-backup',
+        '--target',
+        'admin',
+        '--key',
+        backupKey,
+        '--sha256',
+        sha256,
+        '--confirm',
+        'RESTORE_PRODUCTION',
+      ],
+      output: { option: '--output', extension: '.sql' },
+      finalPrefix: ['r2', 'object', 'get', `private-backups/${backupKey}`],
+    },
+    {
+      name: 'create-restore-db',
+      argv: [
+        'create-restore-db',
+        '--service',
+        'admin',
+        '--database',
+        'admin-restore',
+        '--confirm',
+        'RESTORE_PRODUCTION',
+      ],
+      final: ['d1', 'create', 'admin-restore'],
+    },
+    {
+      name: 'import-backup',
+      argv: [
+        'import-backup',
+        '--service',
+        'admin',
+        '--database',
+        'admin-restore',
+        '--database-id',
+        restoreDatabaseId,
+        '--target',
+        'admin',
+        '--key',
+        backupKey,
+        '--sha256',
+        sha256,
+        '--confirm',
+        'RESTORE_PRODUCTION',
+      ],
+      inputs: true,
+      finalPrefix: ['d1', 'execute', restoreDatabaseId, '--remote'],
+    },
+  ]
+
+  for (const scenario of cases) {
+    const directory = realpathSync(mkdtempSync(join(tmpdir(), `restore-cli-${scenario.name}-`)))
+    chmodSync(directory, 0o700)
+    const events = []
+    const argv = [...scenario.argv]
+    if (scenario.output) {
+      argv.push(scenario.output.option, join(directory, `result${scenario.output.extension}`))
+    }
+    if (scenario.inputs) {
+      const input = join(directory, 'restore.sql')
+      const localManifest = join(directory, 'latest.json')
+      writeFileSync(input, sql, { mode: 0o600 })
+      writeFileSync(localManifest, JSON.stringify(manifest), { mode: 0o600 })
+      argv.push('--file', input, '--manifest', localManifest)
+    }
+
+    try {
+      await restoreCli.runRestoreCli(argv, {
+        environment,
+        nowMs: Date.parse('2026-08-28T00:00:00.000Z'),
+        serviceConfig(service) {
+          const config = configs[service]
+          if (!config) throw new Error(`unexpected config ${service}`)
+          return config
+        },
+        execFileSync(_command, args, options) {
+          events.push({ kind: 'preflight', script: basename(args[0]), env: options.env })
+        },
+        runProductionWrangler(args) {
+          events.push({ kind: 'wrangler', args: [...args] })
+          if (args[0] === 'd1' && args[1] === 'info') {
+            return JSON.stringify({
+              database_id: args[2] === 'admin-restore' ? restoreDatabaseId : adminDatabaseId,
+            })
+          }
+          const outputOption = args.find(
+            (arg) => arg.startsWith('--output=') || arg.startsWith('--file='),
+          )
+          if (args[0] === 'd1' && args[1] === 'export' && outputOption) {
+            writeFileSync(outputOption.slice('--output='.length), sql, { mode: 0o600 })
+          }
+          if (args[0] === 'r2' && args[1] === 'object' && args[2] === 'get' && outputOption) {
+            const output = outputOption.slice('--file='.length)
+            writeFileSync(
+              output,
+              args[3].endsWith('/latest.json') ? JSON.stringify(manifest) : sql,
+              { mode: 0o600 },
+            )
+          }
+          return undefined
+        },
+        logger: { log() {}, error() {} },
+      })
+
+      assert.deepEqual(
+        events.filter((event) => event.kind === 'preflight').map((event) => event.script),
+        [
+          'require-production-provisioning.mjs',
+          'check-production-config.mjs',
+          'check-r2-private.mjs',
+        ],
+        scenario.name,
+      )
+      const preflightEvents = events.filter((event) => event.kind === 'preflight')
+      assert.equal(preflightEvents[0].env.CLOUDFLARE_API_TOKEN, undefined, scenario.name)
+      assert.equal(preflightEvents[0].env.CLOUDFLARE_ACCOUNT_ID, undefined, scenario.name)
+      for (const event of preflightEvents.slice(1)) {
+        assert.equal(event.env.CLOUDFLARE_API_TOKEN, 'restore-operator-token', scenario.name)
+        assert.equal(event.env.CLOUDFLARE_ACCOUNT_ID, accountId, scenario.name)
+      }
+      const commandEvents = events.filter((event) => event.kind === 'wrangler')
+      if (scenario.final) {
+        assert.ok(
+          commandEvents.some(
+            (event) => JSON.stringify(event.args) === JSON.stringify(scenario.final),
+          ),
+          scenario.name,
+        )
+      } else {
+        assert.ok(
+          commandEvents.some((event) =>
+            scenario.finalPrefix.every((value, index) => event.args[index] === value),
+          ),
+          scenario.name,
+        )
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
   }
 })

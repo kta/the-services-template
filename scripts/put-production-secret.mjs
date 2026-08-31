@@ -106,15 +106,12 @@ function configuredDomainServices(options = {}) {
   )
 }
 
-/**
- * A normal rotation bundle is deliberately topology-wide. Cloudflare does
- * not reveal secret values, so a per-Worker partial bundle cannot prove that a
- * newly supplied key is distinct from a key already assigned to another
- * Worker. The bootstrap workflow performs the same check over its complete
- * environment-secret set in shell before creating any Worker.
- */
-export function requiredTopologyProductionSecretNames(options = {}) {
-  const domainNames = configuredDomainServices(options).flatMap((domainService) =>
+export function requiredProductionSecretBundleNames(options = {}) {
+  const domains = configuredDomainServices(options)
+  if (domains.length > 1) {
+    throw new Error('production secret bundle supports at most one deployable domain')
+  }
+  const domainNames = domains.flatMap((domainService) =>
     requiredProductionSecretNames(domainService.replaceAll('-', '_'), options),
   )
   return [
@@ -128,7 +125,17 @@ export function requiredTopologyProductionSecretNames(options = {}) {
 }
 
 export function validateProductionSecretBundle(values, options = {}) {
-  const expected = new Set(requiredTopologyProductionSecretNames(options))
+  let requiredNames
+  try {
+    requiredNames = requiredProductionSecretBundleNames(options)
+  } catch (error) {
+    return [
+      error instanceof Error
+        ? error.message
+        : 'production secret bundle supports at most one deployable domain',
+    ]
+  }
+  const expected = new Set(requiredNames)
   const optional = new Set(['BACKUP_SIGNING_PUBLIC_KEY'])
   const actual = Object.keys(values ?? {})
   return [

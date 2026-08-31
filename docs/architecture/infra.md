@@ -35,6 +35,13 @@ access JWT は RS256 固定である。admin が JWT_PRIVATE_KEY で署名し、
 
 production domain の API middleware は `tenantAuth` の署名・audience 検証だけで認証を完了させない。`requireLiveDomainSession` が `sid/sub/org` を admin の refresh session と現行 user/org に service binding で照合し、logout、rotation/reuse revoke、user/org 無効化を次の request へ反映する。admin binding の障害や不正応答は 503 fail close とし、organization 同期 lease は認証の猶予ではない。
 
+ただし、このテンプレートは production domain token の発行経路をまだ持たない。現行 admin は
+`aud=admin` だけを発行し、negative-only の受信テストは domain readiness の証明にならない。
+issuer/key ownership を定義する gateway または IdP はアーキテクチャ変更として人間承認を必須とする。
+承認済み実装から正規利用者が同じ session の `sid/sub/org` に束縛された
+`aud=domain:<service>` token を取得し、成功、wrong audience、`sid` 欠落、logout/rotation、
+user/org 無効化、admin failure 503 を fixture で実行できるまで domain readiness は false とする。
+
 ops の `latest.json` は JWT 用とは別の RSA signing pair で署名する。private half は
 `BACKUP_SIGNING_PRIVATE_KEY` secret、public half は reviewed config の
 `vars.BACKUP_SIGNING_PUBLIC_KEY` とし、production の freshness 判定と restore wrapper は
@@ -57,14 +64,26 @@ workflow_dispatch は verify/e2e と unsigned Tauri artifact の検証に限定�
 `.github/workflows/production-bootstrap.yml` の `workflow_dispatch` を使うが、
 protected `main`、production environment の required reviewer、入力検証、対象 Worker
 ごとの allowlist をすべて満たす必要がある。bootstrap でも domain Worker へは
-`JWT_PUBLIC_KEY` のみを渡し、`JWT_PRIVATE_KEY` は admin にだけ登録する。
+`JWT_PUBLIC_KEY` のみを渡し、`JWT_PRIVATE_KEY` は admin にだけ登録する。JWT と backup signer は
+bundle write 前に RSA 2048 bit 以上、pair 一致、用途間の非再利用、公開済み test fingerprint の
+不一致を検査する。
 
 デプロイチェーンはテンプレートでは `notifier → admin → ops`。fork で domain Worker を
 追加したときだけ、admin と ops の間にその domain の remote migration/deploy を挿入する。
-ただし domain は production-auth gateway/IdP、domain audience、`sid` の revoke 照合を
-実装した `src/worker/production-auth.ts` と対応テストを追加し、`require-production-domain-auth.mjs`
-を通過するまで chain/bootstrap/secret provisioning の対象にできない。admin の
-`aud=admin` token を domain で受け入れる実装は境界を壊すため禁止する。
+通常 deploy と初回 bootstrap のどちらも notifier を先行し、admin remote migration を exactly once
+成功させてから admin を deploy する。domain がある場合も domain remote migration を exactly once
+成功させてから domain を deploy し、最後に ops を deploy する。domain は上記の人間承認済み
+issuer/gateway、domain audience、`sid` の revoke 照合を実装した
+`src/worker/production-auth.ts` と正負の live-session fixture を追加し、
+`require-production-domain-auth.mjs` を通過するまで chain/bootstrap/secret provisioning の対象に
+できない。admin の `aud=admin` token を domain で受け入れる実装は境界を壊すため禁止する。
+
+production bootstrap secret bundle は最大 1 deployable domain だけを対象とする。現行 catalog は
+0 domain であり、2 domain 以上なら全 bootstrap action を write 前に fail close する。単一 domain
+では bundle 内の方向鍵重複検査を維持するが、topology-wide multi-domain 一意性は保証しない。
+catalog の exact domain 集合を key に全 domain key の存在・余剰なし・一意性を検証する bundle と、
+同一 version の順次適用・maintenance window・rollback 手順を人間承認して実装するまでは
+2 件目の deployable domain を追加しない。
 
 ## State backend（R2）
 

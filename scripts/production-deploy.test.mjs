@@ -7,12 +7,13 @@ import {
   productionDeployCommand,
 } from './production-deploy.mjs'
 
-test('only reviewed service directories can reach the production deploy wrapper', () => {
-  assert.equal(isProductionService('admin'), true)
-  assert.equal(isProductionService('notifier'), true)
-  assert.equal(isProductionService('example_service'), false)
-  assert.equal(isProductionService('../attacker'), false)
-  assert.equal(isProductionService('missing_service'), false)
+test('only reviewed service directories can reach the production deploy wrapper', async () => {
+  assert.equal(await isProductionService('admin'), true)
+  assert.equal(await isProductionService('notifier'), true)
+  assert.equal(await isProductionService('example_service'), false)
+  assert.equal(await isProductionService('example_tauri_service'), false)
+  assert.equal(await isProductionService('../attacker'), false)
+  assert.equal(await isProductionService('missing_service'), false)
 })
 
 test('rejects Wrangler flags that can replace production identity or secrets', () => {

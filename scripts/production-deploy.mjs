@@ -5,9 +5,12 @@ import { existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runProductionWrangler } from './production-wrangler.mjs'
+import {
+  loadServiceRepositoryCatalog,
+  requireCatalogDeployableService,
+} from './service-catalog.mjs'
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
-const SERVICE_PATTERN = /^[a-z][a-z0-9_]*$/
 const PUBLIC_GUARD_ENVIRONMENT = new Set([
   'PATH',
   'HOME',
@@ -36,18 +39,14 @@ function publicGuardEnvironment(environment) {
   )
 }
 
-/**
- * The template has three fixed platform Workers and any forked domain Worker.
- * A domain name is accepted only when the repository contains the two reviewed
- * service files; `check-deploy-boundary.mjs` then verifies all cross-service
- * wiring before Wrangler is reached.
- */
-export function isProductionService(service) {
-  if (!SERVICE_PATTERN.test(service) || service === 'example_service') return false
-  const serviceDir = resolve(root, `services/${service}`)
-  return (
-    existsSync(join(serviceDir, 'package.json')) && existsSync(join(serviceDir, 'wrangler.jsonc'))
-  )
+export async function isProductionService(service, rootDirectory = root) {
+  try {
+    const catalog = await loadServiceRepositoryCatalog(rootDirectory)
+    requireCatalogDeployableService(catalog, service)
+    return true
+  } catch {
+    return false
+  }
 }
 
 // Production deploys intentionally expose no Wrangler override surface. An
@@ -106,83 +105,94 @@ function fail(message) {
   process.exitCode = 1
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+async function main() {
   const [service, ...args] = process.argv.slice(2)
-  if (!isProductionService(service) || args.length > 0) {
+  if (!service || args.length > 0) {
     const overrides = forbiddenProductionDeployArgs(args)
     fail(
       overrides.length > 0
         ? `Wrangler overrides are not accepted (${overrides.join(', ')})`
         : 'production deploy accepts only the service name; edit reviewed configuration instead',
     )
-  } else {
-    const serviceDir = resolve(root, `services/${service}`)
-    try {
-      // Establish checkout trust before any credential-bearing environment is
-      // constructed or any repository helper is executed. The guard only
-      // receives only public CI context, never Cloudflare credentials.
-      execFileSync(process.execPath, [resolve(root, 'scripts/require-production-deploy.mjs')], {
-        cwd: root,
-        stdio: 'inherit',
-        env: publicGuardEnvironment(process.env),
-      })
-      const { productionCloudflareEnvironment, productionStaticEnvironment } = await import(
-        './production-environment.mjs'
-      )
-      const { requireProductionDomainAuth } = await import('./require-production-domain-auth.mjs')
-      const { buildWorkerArtifactManifest } = await import('./verify-worker-artifact.mjs')
-      if (!['admin', 'notifier', 'ops'].includes(service)) {
-        requireProductionDomainAuth(service)
-      }
-      requirePrebuiltOutput(service, serviceDir)
-      // Guard direct Make/operator deployments as well as CI artifact installs:
-      // every deployable Worker output must be regular, complete, and free of
-      // private-key material before a credentialed Wrangler process starts.
-      buildWorkerArtifactManifest(root, [service])
-      execFileSync(process.execPath, [resolve(root, 'scripts/check-deploy-boundary.mjs')], {
-        cwd: root,
-        stdio: 'inherit',
-        env: productionStaticEnvironment(process.env),
-      })
-      const childEnv = productionCloudflareEnvironment(process.env)
-      execFileSync(
-        process.execPath,
-        [resolve(root, 'scripts/check-production-config.mjs'), service],
-        {
-          cwd: root,
-          stdio: 'inherit',
-          env: childEnv,
-        },
-      )
-      execFileSync(
-        process.execPath,
-        [resolve(root, 'scripts/check-production-secrets.mjs'), service],
-        {
-          cwd: root,
-          stdio: 'inherit',
-          env: childEnv,
-        },
-      )
-      if (service === 'ops') {
-        execFileSync(process.execPath, [resolve(root, 'scripts/check-r2-private.mjs')], {
-          cwd: root,
-          stdio: 'inherit',
-          env: childEnv,
-        })
-      }
-      runProductionWrangler(
-        productionDeployCommand(service),
-        {
-          cwd: serviceDir,
-          stdio: 'inherit',
-          env: childEnv,
-          timeout: 15 * 60 * 1_000,
-          killSignal: 'SIGTERM',
-        },
-        process.env,
-      )
-    } catch (error) {
-      process.exitCode = error?.status ?? 1
-    }
+    return
   }
+  try {
+    // Establish checkout trust before parsing repository-controlled catalog or
+    // resolving any credential-bearing child process.
+    execFileSync(process.execPath, [resolve(root, 'scripts/require-production-deploy.mjs')], {
+      cwd: root,
+      stdio: 'inherit',
+      env: publicGuardEnvironment(process.env),
+    })
+    const catalog = await loadServiceRepositoryCatalog(root)
+    requireCatalogDeployableService(catalog, service)
+    const serviceDir = resolve(root, `services/${service}`)
+    const { productionCloudflareEnvironment, productionStaticEnvironment } = await import(
+      './production-environment.mjs'
+    )
+    const { requireProductionDomainAuth } = await import('./require-production-domain-auth.mjs')
+    const { buildWorkerArtifactManifest, requireCatalogWorkerArtifactServices } = await import(
+      './verify-worker-artifact.mjs'
+    )
+    if (!['admin', 'notifier', 'ops'].includes(service)) {
+      requireProductionDomainAuth(service, root, catalog)
+    }
+    requirePrebuiltOutput(service, serviceDir)
+    // Guard direct Make/operator deployments as well as CI artifact installs:
+    // every deployable Worker output must be regular, complete, and free of
+    // private-key material before a credentialed Wrangler process starts.
+    requireCatalogWorkerArtifactServices(catalog, [service])
+    buildWorkerArtifactManifest(root, [service])
+    execFileSync(process.execPath, [resolve(root, 'scripts/check-deploy-boundary.mjs')], {
+      cwd: root,
+      stdio: 'inherit',
+      env: productionStaticEnvironment(process.env),
+    })
+    const childEnv = productionCloudflareEnvironment(process.env)
+    execFileSync(
+      process.execPath,
+      [resolve(root, 'scripts/check-production-config.mjs'), service],
+      {
+        cwd: root,
+        stdio: 'inherit',
+        env: childEnv,
+      },
+    )
+    execFileSync(
+      process.execPath,
+      [resolve(root, 'scripts/check-production-secrets.mjs'), service],
+      {
+        cwd: root,
+        stdio: 'inherit',
+        env: childEnv,
+      },
+    )
+    if (service === 'ops') {
+      execFileSync(process.execPath, [resolve(root, 'scripts/check-r2-private.mjs')], {
+        cwd: root,
+        stdio: 'inherit',
+        env: childEnv,
+      })
+    }
+    runProductionWrangler(
+      productionDeployCommand(service),
+      {
+        cwd: serviceDir,
+        stdio: 'inherit',
+        env: childEnv,
+        timeout: 15 * 60 * 1_000,
+        killSignal: 'SIGTERM',
+      },
+      process.env,
+    )
+  } catch (error) {
+    console.error(
+      `production deploy blocked: ${error instanceof Error ? error.message : 'failure'}`,
+    )
+    process.exitCode = error?.status ?? 1
+  }
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await main()
 }

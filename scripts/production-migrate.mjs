@@ -10,18 +10,19 @@ import {
   productionStaticEnvironment,
 } from './production-environment.mjs'
 import { runProductionWrangler } from './production-wrangler.mjs'
-import { requireProductionDomainAuth } from './require-production-domain-auth.mjs'
+import {
+  loadServiceRepositoryCatalog,
+  requireCatalogDeployableService,
+} from './service-catalog.mjs'
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const SERVICE_PATTERN = /^[a-z][a-z0-9_]*$/
-const DISALLOWED_SERVICES = new Set(['example_service', 'notifier', 'ops'])
 
-function reviewedDatabase(service) {
-  if (!SERVICE_PATTERN.test(service) || DISALLOWED_SERVICES.has(service)) {
-    throw new Error(`unknown production migration service: ${service}`)
-  }
-  if (service !== 'admin') requireProductionDomainAuth(service)
-  const config = parseJsonc(readFileSync(join(root, `services/${service}/wrangler.jsonc`), 'utf8'))
+function reviewedDatabase(service, catalog, rootDirectory = root) {
+  requireCatalogDeployableService(catalog, service, { spa: true })
+  const config = parseJsonc(
+    readFileSync(join(rootDirectory, `services/${service}/wrangler.jsonc`), 'utf8'),
+  )
   const values = effectiveValues(config)
   if (
     typeof values.databaseName !== 'string' ||
@@ -35,17 +36,9 @@ function reviewedDatabase(service) {
   return { database: 'DB', databaseId: values.adminDatabaseId }
 }
 
-function isMigrationService(service) {
-  try {
-    reviewedDatabase(service)
-    return true
-  } catch {
-    return false
-  }
-}
-
-export function productionMigrationCommand(service) {
-  const { database } = reviewedDatabase(service)
+export async function productionMigrationCommand(service, rootDirectory = root, catalog) {
+  const reviewedCatalog = catalog ?? (await loadServiceRepositoryCatalog(rootDirectory))
+  const { database } = reviewedDatabase(service, reviewedCatalog, rootDirectory)
   return ['d1', 'migrations', 'apply', database, '--remote']
 }
 
@@ -57,45 +50,50 @@ function run(script, args, env) {
   })
 }
 
-if (process.argv[1]?.endsWith('production-migrate.mjs')) {
+async function main() {
   const [service, ...unexpectedArgs] = process.argv.slice(2)
-  if (
-    !service ||
-    unexpectedArgs.length > 0 ||
-    !SERVICE_PATTERN.test(service) ||
-    DISALLOWED_SERVICES.has(service)
-  ) {
+  if (!service || unexpectedArgs.length > 0 || !SERVICE_PATTERN.test(service)) {
     console.error(
       'production migration blocked: usage: production-migrate.mjs <admin> (no Wrangler overrides)',
     )
     process.exitCode = 1
-  } else {
-    try {
-      execFileSync(process.execPath, [resolve(root, 'scripts/require-production-deploy.mjs')], {
-        cwd: root,
-        // The checkout guard needs only public CI context. Never pass
-        // Cloudflare credentials to repository code before the guard returns.
-        env: productionStaticEnvironment(process.env),
-        stdio: 'inherit',
-      })
-      if (!isMigrationService(service)) throw new Error('reviewed migration service is invalid')
-      const childEnv = productionCloudflareEnvironment(process.env)
-      run('check-deploy-boundary.mjs', [], productionStaticEnvironment(process.env))
-      run('check-production-config.mjs', [service], childEnv)
-      run('check-production-secrets.mjs', [service], childEnv)
-      runProductionWrangler(
-        productionMigrationCommand(service),
-        {
-          cwd: resolve(root, `services/${service}`),
-          env: childEnv,
-          stdio: 'inherit',
-          timeout: 15 * 60 * 1_000,
-          killSignal: 'SIGTERM',
-        },
-        process.env,
-      )
-    } catch (error) {
-      process.exitCode = error?.status ?? 1
+    return
+  }
+  try {
+    execFileSync(process.execPath, [resolve(root, 'scripts/require-production-deploy.mjs')], {
+      cwd: root,
+      // The checkout guard needs only public CI context. Never pass
+      // Cloudflare credentials to repository code before the guard returns.
+      env: productionStaticEnvironment(process.env),
+      stdio: 'inherit',
+    })
+    const catalog = await loadServiceRepositoryCatalog(root)
+    requireCatalogDeployableService(catalog, service, { spa: true })
+    if (service !== 'admin') {
+      const { requireProductionDomainAuth } = await import('./require-production-domain-auth.mjs')
+      requireProductionDomainAuth(service, root, catalog)
     }
+    const childEnv = productionCloudflareEnvironment(process.env)
+    run('check-deploy-boundary.mjs', [], productionStaticEnvironment(process.env))
+    run('check-production-config.mjs', [service], childEnv)
+    run('check-production-secrets.mjs', [service], childEnv)
+    runProductionWrangler(
+      await productionMigrationCommand(service, root, catalog),
+      {
+        cwd: resolve(root, `services/${service}`),
+        env: childEnv,
+        stdio: 'inherit',
+        timeout: 15 * 60 * 1_000,
+        killSignal: 'SIGTERM',
+      },
+      process.env,
+    )
+  } catch (error) {
+    console.error(
+      `production migration blocked: ${error instanceof Error ? error.message : 'failure'}`,
+    )
+    process.exitCode = error?.status ?? 1
   }
 }
+
+if (process.argv[1]?.endsWith('production-migrate.mjs')) await main()

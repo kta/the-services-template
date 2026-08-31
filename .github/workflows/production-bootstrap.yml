@@ -313,6 +313,7 @@ jobs:
           PRODUCTION_D1_EXPORT_API_TOKEN: ${{ secrets.PRODUCTION_D1_EXPORT_API_TOKEN }}
           PRODUCTION_R2_POLICY_CHECK_API_TOKEN: ${{ secrets.PRODUCTION_R2_POLICY_CHECK_API_TOKEN }}
           PRODUCTION_BACKUP_SIGNING_PRIVATE_KEY: ${{ secrets.PRODUCTION_BACKUP_SIGNING_PRIVATE_KEY }}
+          REVIEWED_BACKUP_SIGNING_PUBLIC_KEY_B64: ${{ steps.reviewed-resources.outputs.backup_signing_public_key_b64 }}
         shell: bash
         run: |
           set -euo pipefail
@@ -335,7 +336,8 @@ jobs:
             PRODUCTION_R2_POLICY_CHECK_API_TOKEN
             PRODUCTION_BACKUP_SIGNING_PRIVATE_KEY
           )
-          declare -A seen_secret_digests=()
+          seen_secret_digests=()
+          seen_secret_variables=()
           for variable in "${secret_vars[@]}"; do
             value="${!variable:-}"
             if [[ -z "$value" ]]; then
@@ -358,12 +360,50 @@ jobs:
               fi
             fi
             digest="$(printf '%s' "$value" | sha256sum | cut -d' ' -f1)"
-            if [[ -n "${seen_secret_digests[$digest]:-}" ]]; then
-              echo "$variable duplicates ${seen_secret_digests[$digest]}" >&2
+            for index in "${!seen_secret_digests[@]}"; do
+              if [[ "${seen_secret_digests[$index]}" == "$digest" ]]; then
+                echo "$variable duplicates ${seen_secret_variables[$index]}" >&2
+                exit 1
+              fi
+            done
+            seen_secret_digests+=("$digest")
+            seen_secret_variables+=("$variable")
+          done
+          require_rsa_at_least_2048() {
+            local label="$1"
+            local kind="$2"
+            local value="$3"
+            local details
+            if [[ "$kind" == private ]]; then
+              details="$(printf '%s' "$value" | openssl rsa -check -text -noout 2>/dev/null)" || {
+                echo "$label must be RSA with at least 2048 bits" >&2
+                exit 1
+              }
+            else
+              details="$(printf '%s' "$value" | openssl rsa -pubin -text -noout 2>/dev/null)" || {
+                echo "$label must be RSA with at least 2048 bits" >&2
+                exit 1
+              }
+            fi
+            local bits
+            bits="$(printf '%s\n' "$details" | sed -n \
+              -e 's/^[[:space:]]*RSA Private-Key: (\([0-9][0-9]*\) bit.*/\1/p' \
+              -e 's/^[[:space:]]*Private-Key: (\([0-9][0-9]*\) bit.*/\1/p' \
+              -e 's/^[[:space:]]*RSA Public-Key: (\([0-9][0-9]*\) bit.*/\1/p' \
+              -e 's/^[[:space:]]*Public-Key: (\([0-9][0-9]*\) bit.*/\1/p' | head -n 1)"
+            if [[ ! "$bits" =~ ^[0-9]+$ || "$bits" -lt 2048 ]]; then
+              echo "$label must be RSA with at least 2048 bits" >&2
               exit 1
             fi
-            seen_secret_digests[$digest]="$variable"
-          done
+          }
+          require_rsa_at_least_2048 JWT_PRIVATE_KEY private "$PRODUCTION_JWT_PRIVATE_KEY"
+          require_rsa_at_least_2048 JWT_PUBLIC_KEY public "$PRODUCTION_JWT_PUBLIC_KEY"
+          require_rsa_at_least_2048 BACKUP_SIGNING_PRIVATE_KEY private "$PRODUCTION_BACKUP_SIGNING_PRIVATE_KEY"
+          reviewed_backup_public="$RUNNER_TEMP/reviewed-backup-signing-public-key.pem"
+          printf '%s' "$REVIEWED_BACKUP_SIGNING_PUBLIC_KEY_B64" | base64 --decode > "$reviewed_backup_public"
+          chmod 600 "$reviewed_backup_public"
+          reviewed_backup_public_value="$(cat "$reviewed_backup_public")"
+          require_rsa_at_least_2048 BACKUP_SIGNING_PUBLIC_KEY public "$reviewed_backup_public_value"
           private_fingerprint="$(printf '%s' "$PRODUCTION_JWT_PRIVATE_KEY" | openssl pkey -pubout -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1)"
           public_fingerprint="$(printf '%s' "$PRODUCTION_JWT_PUBLIC_KEY" | openssl pkey -pubin -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1)"
           backup_fingerprint="$(printf '%s' "$PRODUCTION_BACKUP_SIGNING_PRIVATE_KEY" | openssl pkey -pubout -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1)"
@@ -375,16 +415,16 @@ jobs:
             echo 'backup signing key must not reuse JWT key material' >&2
             exit 1
           }
-          reviewed_backup_public="$RUNNER_TEMP/reviewed-backup-signing-public-key.pem"
-          printf '%s' "$REVIEWED_BACKUP_SIGNING_PUBLIC_KEY_B64" | base64 --decode > "$reviewed_backup_public"
-          chmod 600 "$reviewed_backup_public"
-          printf '%s' "$PRODUCTION_BACKUP_SIGNING_PRIVATE_KEY" | openssl rsa -check -noout >/dev/null 2>&1
-          openssl rsa -pubin -in "$reviewed_backup_public" -check -noout >/dev/null 2>&1
           reviewed_backup_fingerprint="$(openssl pkey -pubin -in "$reviewed_backup_public" -outform DER 2>/dev/null | sha256sum | cut -d' ' -f1)"
           [[ -n "$reviewed_backup_fingerprint" && "$backup_fingerprint" == "$reviewed_backup_fingerprint" ]] || {
             echo 'backup signing private key does not match the reviewed ops public key' >&2
             exit 1
           }
+          known_test_public_fingerprint='f713e9c9261b62444d73646bdfa2c75794a1782d8ec8139369bd3658cd6ea188'
+          if [[ "$private_fingerprint" == "$known_test_public_fingerprint" || "$backup_fingerprint" == "$known_test_public_fingerprint" ]]; then
+            echo 'committed test key is forbidden in production bootstrap' >&2
+            exit 1
+          fi
           key_dir="$RUNNER_TEMP/production-secret-bundles"
           rm -rf -- "$key_dir"
           mkdir -p -- "$key_dir"
@@ -439,6 +479,12 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           PRODUCTION_PNPM_PATH: ${{ steps.trusted-tools.outputs.pnpm }}
         run: ${{ steps.trusted-tools.outputs.node }} scripts/production-service.mjs notifier bootstrap
+      - name: Apply admin remote migrations
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PRODUCTION_PNPM_PATH: ${{ steps.trusted-tools.outputs.pnpm }}
+        run: ${{ steps.trusted-tools.outputs.node }} scripts/production-service.mjs admin migrate
       - name: Bootstrap admin
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

@@ -5,7 +5,7 @@ import { createHash, timingSafeEqual } from 'node:crypto'
 import { appendFileSync, lstatSync, readFileSync, rmSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { loadServiceRepositoryCatalog } from './service-catalog.mjs'
+import { catalogDeployableDomains, loadServiceRepositoryCatalog } from './service-catalog.mjs'
 import {
   installVerifiedWorkerArtifact,
   WORKER_ARTIFACT_MANIFEST,
@@ -32,9 +32,8 @@ function expectedServices(catalog, channel, directories) {
   if (channel === 'ci') return deployable
 
   const domain = directories[3]
-  const deployableDomains = (catalog.services ?? [])
-    .filter((service) => service.deployable && service.directory !== 'admin')
-    .map((service) => service.directory)
+  const deployableDomains = catalogDeployableDomains(catalog).map((service) => service.directory)
+  if (deployableDomains.length !== 1) return []
   if (!deployableDomains.includes(domain)) return []
   return ['admin', 'notifier', 'ops', domain]
 }

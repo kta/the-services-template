@@ -1064,7 +1064,7 @@ function reviewedCredentialedStepProfile(workflowPath, step) {
     step.name === 'Bootstrap production Workers with fixed secret bundles' &&
     step.shell === 'bash' &&
     exactFields(step, ['name', 'env', 'shell', 'run']) &&
-    runDigest(step) === '9955f2db1410801720c40eb8b08496454742bdb5d8b76a82dfcb267a286e8d98' &&
+    runDigest(step) === '89caca599aa7186e9e0aed0390bc0d720d2b30fd0dfbc160d13c673f1d5de722' &&
     exactKeys(step.env, {
       CLOUDFLARE_API_TOKEN: `${GITHUB_EXPRESSION} secrets.CLOUDFLARE_API_TOKEN }}`,
       CLOUDFLARE_ACCOUNT_ID: `${GITHUB_EXPRESSION} secrets.CLOUDFLARE_ACCOUNT_ID }}`,
@@ -1081,6 +1081,7 @@ function reviewedCredentialedStepProfile(workflowPath, step) {
       PRODUCTION_D1_EXPORT_API_TOKEN: `${GITHUB_EXPRESSION} secrets.PRODUCTION_D1_EXPORT_API_TOKEN }}`,
       PRODUCTION_R2_POLICY_CHECK_API_TOKEN: `${GITHUB_EXPRESSION} secrets.PRODUCTION_R2_POLICY_CHECK_API_TOKEN }}`,
       PRODUCTION_BACKUP_SIGNING_PRIVATE_KEY: `${GITHUB_EXPRESSION} secrets.PRODUCTION_BACKUP_SIGNING_PRIVATE_KEY }}`,
+      REVIEWED_BACKUP_SIGNING_PUBLIC_KEY_B64: `${GITHUB_EXPRESSION} steps.reviewed-resources.outputs.backup_signing_public_key_b64 }}`,
     })
   ) {
     return 'prepare-bootstrap-secret-bundles'
@@ -1657,6 +1658,14 @@ export function validateServiceWiringSources(catalog, sources, adapters = {}) {
       'Bootstrap notifier',
       `${TRUSTED_NODE} scripts/production-service.mjs notifier bootstrap`,
       'production-bootstrap.yml notifier bootstrap step',
+      violations,
+      { pnpm: true, allowedEnv: ['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID'] },
+    ),
+    exactRootStep(
+      bootstrapCredentialedSteps,
+      'Apply admin remote migrations',
+      `${TRUSTED_NODE} scripts/production-service.mjs admin migrate`,
+      'production-bootstrap.yml admin migration step',
       violations,
       { pnpm: true, allowedEnv: ['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID'] },
     ),

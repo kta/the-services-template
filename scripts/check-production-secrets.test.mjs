@@ -8,6 +8,23 @@ import {
   validateProductionSecretNames,
 } from './check-production-secrets.mjs'
 
+const catalog = {
+  services: [
+    { directory: 'admin', package: '@app/admin', deployable: true },
+    { directory: 'booking', package: '@app/booking', deployable: true },
+    { directory: 'example_service', package: '@app/example_service', deployable: false },
+    {
+      directory: 'example_tauri_service',
+      package: '@app/example_tauri_service',
+      deployable: false,
+    },
+  ],
+  workerOnlyServices: [
+    { directory: 'notifier', package: '@app/notifier', deployable: true },
+    { directory: 'ops', package: '@app/ops', deployable: true },
+  ],
+}
+
 test('selects one exact checkout guard for deploy versus bootstrap remote inspection', () => {
   assert.deepEqual(productionSecretGuard([]), {
     guardScript: 'require-production-provisioning.mjs',
@@ -159,6 +176,8 @@ test('rejects JWT private keys on non-admin Workers even if a copied config decl
 })
 
 test('rejects the scaffold from production secret provisioning even for a normal rotation', () => {
-  assert.equal(isProductionSecretProvisioningService('example_service'), false)
-  assert.equal(isProductionSecretProvisioningService('booking'), true)
+  assert.equal(isProductionSecretProvisioningService('example_service', catalog), false)
+  assert.equal(isProductionSecretProvisioningService('example_tauri_service', catalog), false)
+  assert.equal(isProductionSecretProvisioningService('unknown_service', catalog), false)
+  assert.equal(isProductionSecretProvisioningService('booking', catalog), true)
 })

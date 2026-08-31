@@ -11,7 +11,11 @@ import {
 } from './production-environment.mjs'
 import { resolveProductionPnpm, resolveReviewedNode } from './production-pnpm.mjs'
 import { withoutCloudflareEnvironment } from './run-without-cloudflare-env.mjs'
-import { loadServiceRepositoryCatalog } from './service-catalog.mjs'
+import {
+  catalogDeployableDomains,
+  loadServiceRepositoryCatalog,
+  requireCatalogDeployableService,
+} from './service-catalog.mjs'
 
 const DEFAULT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const CREDENTIAL_ACTIONS = new Set(['migrate', 'deploy', 'bootstrap'])
@@ -31,18 +35,6 @@ function requireCredentialedActionGuard(root, action, environment, nodePath, run
     env: productionServiceGuardEnvironment(environment, nodePath),
     stdio: 'inherit',
   })
-}
-
-function catalogEntry(catalog, directory) {
-  if (typeof directory !== 'string' || !/^[a-z][a-z0-9_]{0,62}$/.test(directory)) {
-    throw new Error(`${String(directory)} is not a catalog deployable service`)
-  }
-  const entries = [...(catalog.services ?? []), ...(catalog.workerOnlyServices ?? [])]
-  const service = entries.find((candidate) => candidate.directory === directory)
-  if (service?.deployable !== true || service.package !== `@app/${directory}`) {
-    throw new Error(`${directory} is not a catalog deployable service`)
-  }
-  return service
 }
 
 function trustedPnpm(options) {
@@ -125,14 +117,20 @@ export function productionServiceInvocation(
   options = {},
 ) {
   const root = resolve(workspaceRoot)
-  const service = catalogEntry(catalog, directory)
+  const service = requireCatalogDeployableService(catalog, directory)
   const spa = (catalog.services ?? []).some((candidate) => candidate.directory === directory)
+  if (
+    (action === 'bootstrap' || action === 'guard-domain') &&
+    catalogDeployableDomains(catalog).length > 1
+  ) {
+    throw new Error(
+      'production bootstrap supports at most one deployable domain until an approved multi-domain key bundle is implemented',
+    )
+  }
 
   switch (action) {
     case 'guard-domain':
-      if (!spa || directory === 'admin') {
-        throw new Error(`${directory} is not a copied domain service`)
-      }
+      requireCatalogDeployableService(catalog, directory, { domain: true })
       return {
         command: trustedNode(options),
         args: [join(root, 'scripts/require-production-domain-auth.mjs'), directory],

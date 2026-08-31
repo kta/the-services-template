@@ -50,7 +50,7 @@ rotation workflow から登録する。
 
 ## 3. 本番 secrets を設定する
 
-機密値を wrangler.jsonc の vars、Terraform state、GitHub repository のソースへ置かない。ローカル開発は各サービスの `.dev.vars`（`make init` が `.dev.vars.example` からコピー、gitignore 対象）だけを使う。本番の Worker secret は GitHub の `production` environment secrets として保管し、protected `main` の reviewer 済み workflow が、対象 Worker ごとの allowlist と 0600 の owner-only **topology-wide bundle** を検査してから反映する。`scripts/put-production-secret.mjs` はポリシー検査を再利用する validation-only CLI であり、ローカルから `wrangler secret put` や Worker write を実行しない。local D1 seed も本番用 credential を受け取らず、remote seed / restore を含む全ての本番状態変更は protected production workflow からだけ起動する。`--bootstrap` は Worker 作成を伴うため、専用の `production-bootstrap.yml`（protected `main` の workflow_dispatch、required reviewer）だけを使う。remote の secret API は名前しか返さないため、値の境界は provisioning 時にも守る。
+機密値を wrangler.jsonc の vars、Terraform state、GitHub repository のソースへ置かない。ローカル開発は各サービスの `.dev.vars`（`make init` が `.dev.vars.example` からコピー、gitignore 対象）だけを使う。本番の Worker secret は GitHub の `production` environment secrets として保管し、protected `main` の reviewer 済み workflow が、対象 Worker ごとの allowlist と 0600 の owner-only bundle を検査してから反映する。現行 bundle が値の一意性を検証できるのは deployable domain が 1 件の構成だけであり、**topology-wide / multi-domain の保証はしない**。catalog の deployable domain が 2 件以上なら全 bootstrap action は write 前に fail close する。複数 domain を一括検証する人間承認済み bundle 設計を実装するまでは、production は最大 1 domain に限定する（このリポジトリの現行 catalog は 0 domain）。`scripts/put-production-secret.mjs` はポリシー検査を再利用する validation-only CLI であり、ローカルから `wrangler secret put` や Worker write を実行しない。local D1 seed も本番用 credential を受け取らず、remote seed / restore を含む全ての本番状態変更は protected production workflow からだけ起動する。`--bootstrap` は Worker 作成を伴うため、専用の `production-bootstrap.yml`（protected `main` の workflow_dispatch、required reviewer）だけを使う。remote の secret API は名前しか返さないため、値の境界は provisioning 時にも守る。
 
 ### 3-1. 鍵の境界
 
@@ -71,7 +71,9 @@ rotation workflow から登録する。
 
 JWT_PRIVATE_KEY は domain Worker、Tauri bundle、ブラウザ、ログ、CI artifact に渡さない。domain Worker は JWT_PUBLIC_KEY だけで検証する。issuer は `admin`、audience は admin API が `admin`、domain API が `domain:<service_name>`（雛形は `domain:example_service`）に固定され、別サービス向け token の replay を拒否する。JWT public key は environment secret から protected workflow の allowlist 済み bundle にだけ渡し、private key と同じ bundle を domain に渡さない。
 
-domain の本番 token 発行元（IdP または admin gateway）はこのテンプレートの scope 外だが、domain の受信側 live-session 境界は `@app/shared` の `tenantAuth` → `requireLiveDomainSession` → `requireActiveOrg` として実装する。admin の login/refresh は `aud=admin` を発行し、domain は `aud=domain:<service_name>` だけを受け付けるため、admin token を domain token として受け入れてはいけない。`requireLiveDomainSession` は access JWT の `sid/sub/org` を admin の refresh session と現行 user/org に照合し、logout、refresh rotation、user/org 無効化を次の domain request から拒否する。admin binding の障害・タイムアウト・不正応答は 503 で fail close し、organization 同期の 2 時間 lease は可用性用コピーの鮮度であって認証の猶予ではない。コピーした domain を本番へ追加する前には、この gate を組み込んだ `services/<domain>/src/worker/production-auth.ts` と `test/production-auth.test.ts` も実装する。実装とテストがない domain は `require-production-domain-auth.mjs` が bootstrap、remote migration、deploy、secret provisioning の全てを fail close する。
+このテンプレートには production 用 domain token の発行経路を実装していない。現行 admin login/refresh が発行するのは `aud=admin` だけであり、受信側 middleware と未認証拒否だけを持つ negative-only fixture は production readiness の証明にならない。issuer / key ownership を定義した gateway または IdP はアーキテクチャ変更なので、人間承認なしに追加しない。人間承認済みの issuer/gateway を実装し、同じ refresh session の `sid/sub/org` に束縛された `aud=domain:<service_name>` token を正規利用者が取得できる live-session 経路を fixture で実行証明するまでは、その domain の production bootstrap、remote migration、deploy、secret provisioning を `require-production-domain-auth.mjs` が fail close する。
+
+readiness fixture は少なくとも、正しい token の成功、wrong audience、`sid` 欠落、logout、refresh rotation/reuse revoke、user 無効化、organization 無効化、admin binding の障害・タイムアウト・不正応答の 503 を実行する。受信側は `tenantAuth` → `requireLiveDomainSession` → `requireActiveOrg` で `sid/sub/org` を現行 session/user/org に照合し、organization 同期の 2 時間 lease を認証猶予として使わない。これらの正負経路が実行可能でない限り readiness は false であり、現行の deployable domain 0 件のリポジトリから domain production bootstrap はできない。
 
 ### 3-2. RS256 key pair を生成して bootstrap 用 environment secret に登録する
 
@@ -84,6 +86,10 @@ Worker だけは Cloudflare Workers Secrets API の HTTP 404（未作成）を�
 `--secrets-file` は既存 secret を削除しないため、この検査に失敗した状態で強行してはならない。
 このため、次の準備で生成した値は GitHub の `production`
 environment secrets に登録し、workflow の reviewer gate を通して一度だけ使用する。
+credential-bearing step は bundle ファイルを作る前に JWT と backup signer の private/public half が
+RSA かつ 2048 bit 以上であること、各 pair が一致すること、両用途が同じ鍵でないこと、公開済み
+test key fingerprint でないことを検査する。例では 3072 bit を使うが、workflow の下限は現運用との
+互換性のため 2048 bit である。EC、1024 bit、pair 不一致、reviewed ops public key 不一致は write 前に拒否する。
 
 次の例は秘密鍵・内部鍵・pepper を owner-only の一時ディレクトリに置く。実運用の key
 pair は環境ごとに新規生成する。ファイルの内容や値をログ・チャット・リポジトリへ出さない。
@@ -155,10 +161,25 @@ pair は環境ごとに新規生成する。ファイルの内容や値をログ
 
 `.github/workflows/production-bootstrap.yml` を protected `main` の Actions 画面から
 `Run workflow` で起動し、`domain_service` には fork 後に実在するサービスディレクトリ
-（例: `booking`）を入力する。workflow は `admin`、入力した domain、`notifier`、`ops`
-の順に対象の allowlist だけを deploy する。`example_service`、予約済み Worker 名、
-不正なサービス名は拒否される。environment の required reviewer が承認しない限り
-Cloudflare credential は利用可能にならない。
+（例: `booking`）を入力する。入力 domain は validated catalog で `deployable: true` の domain
+でなければならず、`example_service`、`example_tauri_service`、予約済み Worker 名、未知名、
+不正なサービス名は拒否される。catalog に deployable domain が 2 件以上ある場合も拒否する。
+現行 catalog は 0 件なので、上記の人間承認済み token issuer/gateway と readiness fixture を備えた
+1 domain を追加するまで domain production bootstrap は実行できない。environment の required
+reviewer が承認しない限り Cloudflare credential は利用可能にならない。
+
+workflow の固定順序は次のとおりである。admin と domain の D1 migration は各 1 回だけで、
+必ず対応 Worker deploy より前に成功しなければならない。
+
+    notifier bootstrap
+    → admin remote migration（exactly once）
+    → admin bootstrap
+    → copied domain remote migration（exactly once）
+    → copied domain bootstrap
+    → ops bootstrap
+
+notifier は通知 binding の参照先として先行し、admin は fresh D1 schema を作ってから公開し、
+domain も自 D1 schema を作ってから公開する。途中で失敗した場合、後続 deploy へ進まない。
 
 bootstrap workflow は Worker ごとに固定した allowlist の JSON bundle を shell で生成し、lockfile
 から offline で検証した Wrangler の固定コマンドで `--no-bundle --secrets-file` のみを実行する。Cloudflare credential が
@@ -169,11 +190,18 @@ signer は `BACKUP_SIGNING_PRIVATE_KEY`、公開側は `BACKUP_SIGNING_PUBLIC_KE
 や internal key と同じ値を使わない。
 
 既存 Worker の鍵ローテーションも、ローカルの `put-production-secret.mjs` や raw Wrangler
-では行わない。新しい topology-wide bundle を environment secrets に登録し、
+では行わない。最大 1 domain の新しい固定 bundle を environment secrets に登録し、
 `production-bootstrap.yml` を protected `main` から reviewer 承認付きで再実行する。
-workflow は remote secret **names**、全方向鍵の重複、JWT pair、backup signer pair、対象
-Worker ごとの allowlist を write 前に検査する。secret API は値を返さず、複数 Worker の更新は
-原子的ではないため、rotation は maintenance window と rollback bundle を承認してから行う。
+workflow は remote secret **names**、その単一 domain を含む全 bundle 値の重複、JWT pair、
+backup signer pair、対象 Worker ごとの allowlist を write 前に検査する。secret API は値を返さず、
+複数 Worker の更新は原子的ではないため、rotation は maintenance window、適用順、検証手順、
+直前の rollback bundle を一度の変更として承認してから行う。途中失敗時は新旧値を混在させたまま
+通常運用へ戻さず、maintenance window 内で rollback bundle を全対象へ順次再適用する。
+
+2 domain 以上の rotation / bootstrap は未対応である。catalog の exact domain 集合を key とする
+owner-only bundle で、admin の全 `ADMIN_TO_<DOMAIN>_KEY`、各 domain の対応 key、共有方向鍵の
+存在・余剰なし・全件一意性を write 前に検証し、同一 bundle version を全 Worker へ適用する設計を
+人間が承認して実装するまで、2 件目を `deployable: true` にしない。
 
 ### 3-3. 内部鍵・pepper・外部 API key
 
@@ -240,7 +268,8 @@ selected branch・required reviewer・管理者 bypass 無効を GitHub REST API
 
 デプロイ順は binding の参照先を先にする。テンプレート自身は
 `notifier → admin → ops`、fork して domain Worker を追加した場合は
-`notifier → admin → 自ドメインサービス → ops` の単一チェーンにする。相互 service
+`notifier → admin → 自ドメインサービス → ops` の単一チェーンにする。admin と domain は
+それぞれ remote migration を exactly once 実行し、成功後にだけ対応 Worker を deploy する。相互 service
 binding の pair は初回だけ一方が未作成でも Wrangler が deploy できるが、両 Worker が揃う
 まで同期処理は成功しない。
 
@@ -248,9 +277,6 @@ binding の pair は初回だけ一方が未作成でも Wrangler が deploy で
 残る wrapper を直接呼んでも、`require-production-deploy.mjs` が CI の protected-main push 以外を
 拒否する。したがって、次の確認は CI が想定する checkout 条件を手元で確認するための
 チェックリストであり、ローカルから production Cloudflare CLI を起動する手順ではない。
-
-次の確認は CI が使う checkout 条件を手元で確認するためのチェックリストであり、ローカルから
-production Cloudflare CLI を起動する手順ではない。
 
     git config --get remote.origin.url
     git fetch --no-tags --prune origin refs/heads/main:refs/remotes/origin/main
@@ -304,16 +330,17 @@ Tauri の詳細（TAURI_DEV_HOST、mobile の port forwarding、fixed API origin
 - domain Worker に JWT_PUBLIC_KEY はあるが JWT_PRIVATE_KEY はない。
 - service binding の内部鍵は方向ごとに別値で、admin → domain、admin → notifier、domain → notifier、ops → notifier の対応する両端だけに登録されている。
 - AUTH_PEPPER は admin だけにある。
-- Worker secret は GitHub `production` environment secret から protected workflow の allowlist 経由で登録され、vars / Terraform state / source / Tauri artifact にない。`put-production-secret.mjs` は validation-only で、topology-wide bundle 検査により JWT pair 不一致、既知の dev/test 値、全方向鍵重複がないことを確認する。ops の R2 policy token と `BACKUP_SIGNING_PRIVATE_KEY` も allowlist・scope 分離を満たす。
+- Worker secret は GitHub `production` environment secret から protected workflow の allowlist 経由で登録され、vars / Terraform state / source / Tauri artifact にない。`put-production-secret.mjs` は validation-only である。最大 1 domain の bundle 検査により RSA 2048 bit 未満、JWT/backup pair 不一致、公開済み test key、bundle 内の方向鍵重複がないことを write 前に確認する。multi-domain の全件保証はなく、deployable domain が 2 件以上なら bootstrap が停止する。ops の R2 policy token と `BACKUP_SIGNING_PRIVATE_KEY` も allowlist・scope 分離を満たす。
 - main が protected branch であり、production environment が selected branch `main` のみ（`custom_branch_policies` の 1 policy）/ required reviewer / self-review 防止 / secrets になっている。
 - CI の deploy checkout が main、push の SHA と一致し、verify が成功している（ローカルの `git status` 確認だけでは deploy 許可にならない）。
 - 本番対象の D1 migration が deploy 前に CI で成功している。
 - notifier の RESEND_API_KEY、MAIL_FROM、ops の D1_EXPORT_API_TOKEN が実環境の値である。
 - ops の `BACKUP_SIGNING_PRIVATE_KEY` と `vars.BACKUP_SIGNING_PUBLIC_KEY` が同じ専用 pair で、
   `latest.json` の署名検証が成功する。R2 の managed/custom public domain は全て disabled である。
-- コピー済み domain は `production-auth.ts` と対応テストを持ち、
-  `require-production-domain-auth.mjs` が成功している。domain が admin の `aud=admin`
-  token を受け入れたり、logout/revoke 後も `sid` のない stateless token を長時間受け入れたりしない。
+- コピー済み domain は人間承認済みの token issuer/gateway、`production-auth.ts`、正規利用者が
+  `aud=domain:<service>` + `sid` token を取得する live-session fixture を持ち、
+  `require-production-domain-auth.mjs` が成功している。fixture は成功、wrong audience、`sid` 欠落、
+  logout/rotation、user/org 無効化、admin failure 503 を実行し、negative-only test では代用しない。
 - 初回 deploy 後に restore.md のリストア訓練を 1 回実施する。
 
-`example_service` と `example_tauri_service` はコピー元の雛形であり、本番対象ではない。そのため admin の production `wrangler.jsonc` に scaffold binding/secret は置かず、`ADMIN_DOMAIN_IDENTITIES` は `[]` とする。ローカル開発・test だけ Vite/Miniflare config が `EXAMPLE_SERVICE` と `ADMIN_TO_EXAMPLE_SERVICE_KEY` を追加する。フォーク後は自ドメインサービスを `deployable: true` として catalog、production deploy chain、remote migration、ops backup と同時に admin へ strict convention の tuple（例: directory `booking_service`、service `booking-service`、binding `BOOKING_SERVICE`、secret `ADMIN_TO_BOOKING_SERVICE_KEY`、同じ `{directory,binding,secret}` runtime identity）を追加して `cf-typegen` を実行する。production の domain binding/secret/runtime/generated `Env` 集合は catalog の deployable domain 集合と完全一致させ、`service-catalog.mjs validate-repository` が green になってから protected `main` に merge する。
+`example_service` と `example_tauri_service` はコピー元の雛形であり、本番対象ではない。そのため admin の production `wrangler.jsonc` に scaffold binding/secret は置かず、`ADMIN_DOMAIN_IDENTITIES` は `[]` とする。ローカル開発・test だけ Vite/Miniflare config が `EXAMPLE_SERVICE` と `ADMIN_TO_EXAMPLE_SERVICE_KEY` を追加する。現行 catalog の deployable domain は 0 件である。フォーク後は人間承認済み token issuer/gateway と上記 readiness fixture を備えた自ドメインサービスを最大 1 件だけ `deployable: true` とし、production deploy chain、remote migration、ops backup と同時に admin へ strict convention の tuple（例: directory `booking_service`、service `booking-service`、binding `BOOKING_SERVICE`、secret `ADMIN_TO_BOOKING_SERVICE_KEY`、同じ `{directory,binding,secret}` runtime identity）を追加して `cf-typegen` を実行する。production の domain binding/secret/runtime/generated `Env` 集合は catalog の deployable domain 集合と完全一致させ、`service-catalog.mjs validate-repository` が green になってから protected `main` に merge する。2 件目は multi-domain key bundle 設計を人間承認・実装するまで追加しない。

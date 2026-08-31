@@ -99,3 +99,29 @@ test('uses reviewed absolute tools and reconstructs a minimal credentialed child
     },
   )
 })
+
+test('every bootstrap action explicitly rejects more than one deployable domain', () => {
+  const catalog = {
+    services: [
+      { directory: 'admin', package: '@app/admin', deployable: true },
+      { directory: 'booking', package: '@app/booking', deployable: true },
+      { directory: 'inventory', package: '@app/inventory', deployable: true },
+    ],
+    workerOnlyServices: [],
+  }
+
+  for (const [directory, action] of [
+    ['booking', 'guard-domain'],
+    ['admin', 'bootstrap'],
+  ]) {
+    assert.throws(
+      () =>
+        productionServiceInvocation('/workspace', catalog, directory, action, {
+          nodePath: '/reviewed/node/bin/node',
+          pnpmPath: '/reviewed/pnpm/bin/pnpm',
+          runnerTemp: '/runner/temp',
+        }),
+      /at most one deployable domain/i,
+    )
+  }
+})

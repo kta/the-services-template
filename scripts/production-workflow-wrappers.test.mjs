@@ -96,7 +96,7 @@ test('production service wrapper rejects nondeployable, unknown, worker migratio
   )
   assert.throws(
     () => productionServiceInvocation('/workspace', catalog, 'admin', 'guard-domain'),
-    /copied domain service/i,
+    /catalog deployable domain service/i,
   )
   assert.throws(
     () =>

@@ -6,8 +6,8 @@ import { fileURLToPath } from 'node:url'
 import {
   isAllowedProductionSecret,
   isConfiguredDomainService,
+  requiredProductionSecretBundleNames,
   requiredProductionSecretNames,
-  requiredTopologyProductionSecretNames,
   targetProductionSecretValues,
   validateProductionSecretBundle,
   validateProductionSecretMaterial,
@@ -228,7 +228,7 @@ test('bootstrap secret files contain only target secrets and never a domain priv
   )
 })
 
-test('normal rotation requires a topology-wide bundle instead of a partial Worker bundle', () => {
+test('single-domain rotation requires one complete reviewed bundle instead of a partial Worker bundle', () => {
   const partial = validBundle()
   const missing = validateProductionSecretBundle(partial)
   assert.ok(missing.some((violation) => violation.includes('DOMAIN_TO_ADMIN_KEY')))
@@ -245,6 +245,31 @@ test('normal rotation requires a topology-wide bundle instead of a partial Worke
     BACKUP_SIGNING_PRIVATE_KEY: backup.privateKey,
   }
   assert.deepEqual(validateProductionSecretBundle(complete), [])
-  assert.ok(requiredTopologyProductionSecretNames().includes('BACKUP_SIGNING_PRIVATE_KEY'))
-  assert.ok(!requiredTopologyProductionSecretNames().includes('ADMIN_TO_EXAMPLE_SERVICE_KEY'))
+  assert.ok(requiredProductionSecretBundleNames().includes('BACKUP_SIGNING_PRIVATE_KEY'))
+  assert.ok(!requiredProductionSecretBundleNames().includes('ADMIN_TO_EXAMPLE_SERVICE_KEY'))
+})
+
+test('bootstrap bundle fails closed when more than one deployable domain is configured', () => {
+  const jwt = keyPair()
+  const backup = keyPair()
+  const values = {
+    JWT_PRIVATE_KEY: jwt.privateKey,
+    JWT_PUBLIC_KEY: jwt.publicKey,
+    DOMAIN_TO_ADMIN_KEY: randomBytes(32).toString('hex'),
+    ADMIN_TO_BOOKING_KEY: randomBytes(32).toString('hex'),
+    ADMIN_TO_INVENTORY_KEY: randomBytes(32).toString('hex'),
+    ADMIN_TO_NOTIFIER_KEY: randomBytes(32).toString('hex'),
+    DOMAIN_TO_NOTIFIER_KEY: randomBytes(32).toString('hex'),
+    OPS_TO_NOTIFIER_KEY: randomBytes(32).toString('hex'),
+    AUTH_PEPPER: randomBytes(32).toString('hex'),
+    RESEND_API_KEY: randomBytes(32).toString('hex'),
+    D1_EXPORT_API_TOKEN: randomBytes(32).toString('hex'),
+    R2_POLICY_CHECK_API_TOKEN: randomBytes(32).toString('hex'),
+    BACKUP_SIGNING_PRIVATE_KEY: backup.privateKey,
+  }
+
+  assert.deepEqual(
+    validateProductionSecretBundle(values, { domainServices: ['booking', 'inventory'] }),
+    ['production secret bundle supports at most one deployable domain'],
+  )
 })

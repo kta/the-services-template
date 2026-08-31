@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -58,6 +58,18 @@ test('worker manifest binds every regular output file to its size and SHA-256', 
     assert.ok(manifest.files.every((entry) => /^[0-9a-f]{64}$/.test(entry.sha256)))
   } finally {
     rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('direct artifact CLI rejects templates and unknown services through the catalog', () => {
+  for (const service of ['example_service', 'example_tauri_service', 'unknown_service']) {
+    const result = spawnSync(
+      process.execPath,
+      ['scripts/verify-worker-artifact.mjs', '--service', service],
+      { cwd: process.cwd(), encoding: 'utf8' },
+    )
+    assert.equal(result.status, 1, service)
+    assert.match(result.stderr, /catalog deployable/i, service)
   }
 })
 

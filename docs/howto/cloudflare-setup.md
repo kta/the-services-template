@@ -102,7 +102,9 @@ services/<name>/wrangler.jsonc の placeholder を実値に置き換える。
 
 JWT key pair は deploy.md の一時ファイル手順で生成する。private key を Tauri、ブラウザ、domain、CI artifact、Terraform state にコピーしない。
 
-内部 API の鍵は caller と受信先の方向ごとに別のランダム値を生成する。複数の Worker に登録する場合も、その方向の両端だけに同じ値を登録し、別方向へ再利用しない。domain Worker ごとの `ADMIN_TO_<DOMAIN>_KEY` も必ず別値にする。`DOMAIN_TO_ADMIN_KEY` は domain → admin live-session introspection の両端に置く専用鍵で、JWT_PRIVATE_KEY や admin → domain、domain → notifier の値とは分離する。domain A の侵害で admin JWT の偽造、domain B、別の通知経路を呼び出せないことが目的である。生成した bundle は GitHub `production` environment secret として登録し、protected workflow の allowlist 検査で全方向鍵の重複を確認する。`scripts/put-production-secret.mjs` は validation-only で、ローカルから secret を書き込まない。
+内部 API の鍵は caller と受信先の方向ごとに別のランダム値を生成する。複数の Worker に登録する場合も、その方向の両端だけに同じ値を登録し、別方向へ再利用しない。domain Worker ごとの `ADMIN_TO_<DOMAIN>_KEY` も別値にする必要があるが、現行 bootstrap が write 前に一意性を検査できるのは最大 1 deployable domain の bundle だけである。`DOMAIN_TO_ADMIN_KEY` は domain → admin live-session introspection の両端に置く専用鍵で、JWT_PRIVATE_KEY や admin → domain、domain → notifier の値とは分離する。生成した単一 domain bundle は GitHub `production` environment secret として登録し、protected workflow の allowlist 検査で bundle 内の全方向鍵重複を確認する。topology-wide multi-domain の一意性は保証せず、deployable domain が 2 件以上なら bootstrap は fail close する。全 domain key を一度に検査する bundle 設計が人間承認・実装されるまでは 1 domain に限定する。`scripts/put-production-secret.mjs` は validation-only で、ローカルから secret を書き込まない。
+
+現行 catalog の deployable domain は 0 件であり、production domain token 発行経路も未実装である。issuer/key ownership を定義する gateway/IdP は人間承認が必要なアーキテクチャ変更とする。正規利用者が `aud=domain:<service>` と live `sid/sub/org` を持つ token を取得でき、成功、wrong audience、`sid` 欠落、logout/rotation、user/org 無効化、admin failure 503 を fixture で実行するまでは domain readiness を false とし、bootstrap/migration/deploy/secret provisioning を許可しない。
 
 ローカルでは make init が .dev.vars.example を .dev.vars にコピーする。AUTH_DEV_GRANT=true と AUTH_DEV_PRIVATE_KEY は admin/example のローカル credential-less grant 専用で、本番には登録しない。`AUTH_DEV_GRANT` だけを設定しても `/api/auth/token` は 404 のままになる。
 
@@ -134,6 +136,10 @@ reviewed な account ID、R2 bucket、各 D1 の UUID/name を Cloudflare API �
 review 済み `services/ops/wrangler.jsonc` の `vars.BACKUP_SIGNING_PUBLIC_KEY` に置く。
 restore operator は public half だけを `BACKUP_SIGNING_PUBLIC_KEY` として使い、private half を
 取得しない。
+
+bootstrap は JWT と backup signer の RSA 型、2048 bit 以上、pair 一致、用途間の非再利用、
+公開済み test key fingerprint の不一致を secret bundle write 前に検査する。固定順序は
+`notifier bootstrap → admin remote migration（exactly once）→ admin bootstrap → domain remote migration（exactly once）→ domain bootstrap → ops bootstrap` であり、migration 失敗時は対応 deploy へ進まない。
 
     git fetch origin main --prune
     git status --short

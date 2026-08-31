@@ -17,6 +17,10 @@ import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { forbiddenWorkerArtifactMarkersInText } from './secret-boundary.mjs'
+import {
+  loadServiceRepositoryCatalog,
+  requireCatalogDeployableService,
+} from './service-catalog.mjs'
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
 export const WORKER_ARTIFACT_MANIFEST = 'production-worker-manifest.json'
@@ -32,6 +36,13 @@ function normalizeServices(services) {
   ) {
     throw new Error('Worker artifact service names are invalid')
   }
+  return normalized
+}
+
+export function requireCatalogWorkerArtifactServices(catalog, services) {
+  const normalized = Array.isArray(services) ? services : [services]
+  if (normalized.length === 0) throw new Error('Worker artifact service names are invalid')
+  for (const service of normalized) requireCatalogDeployableService(catalog, service)
   return normalized
 }
 
@@ -429,9 +440,11 @@ function parseCliArguments(args) {
 }
 
 const currentFile = fileURLToPath(import.meta.url)
-if (process.argv[1] && resolve(process.argv[1]) === currentFile) {
+async function main() {
   try {
     const options = parseCliArguments(process.argv.slice(2))
+    const catalog = await loadServiceRepositoryCatalog(root)
+    requireCatalogWorkerArtifactServices(catalog, options.services)
     if (options.archive !== undefined) {
       installVerifiedWorkerArtifact({
         archivePath: options.archive,
@@ -447,3 +460,5 @@ if (process.argv[1] && resolve(process.argv[1]) === currentFile) {
     process.exitCode = 1
   }
 }
+
+if (process.argv[1] && resolve(process.argv[1]) === currentFile) await main()

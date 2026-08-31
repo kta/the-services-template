@@ -152,6 +152,10 @@ jobs:
         env:
           PRODUCTION_PNPM_PATH: \${{ steps.trusted-tools.outputs.pnpm }}
         run: \${{ steps.trusted-tools.outputs.node }} scripts/production-service.mjs notifier bootstrap
+      - name: Apply admin remote migrations
+        env:
+          PRODUCTION_PNPM_PATH: \${{ steps.trusted-tools.outputs.pnpm }}
+        run: \${{ steps.trusted-tools.outputs.node }} scripts/production-service.mjs admin migrate
       - name: Bootstrap admin
         env:
           PRODUCTION_PNPM_PATH: \${{ steps.trusted-tools.outputs.pnpm }}
@@ -422,6 +426,42 @@ test('rejects echoed bootstrap guards and out-of-order wrapper execution', () =>
   assert.match(
     validateServiceWiringSources({ services, workerOnlyServices }, reordered).join('\n'),
     /production wrapper steps must follow the reviewed order/i,
+  )
+})
+
+test('bootstrap requires exactly one admin migration before admin deployment', () => {
+  const migration = `      - name: Apply admin remote migrations
+        env:
+          PRODUCTION_PNPM_PATH: \${{ steps.trusted-tools.outputs.pnpm }}
+        run: \${{ steps.trusted-tools.outputs.node }} scripts/production-service.mjs admin migrate
+`
+  const bootstrapAdmin = `      - name: Bootstrap admin
+        env:
+          PRODUCTION_PNPM_PATH: \${{ steps.trusted-tools.outputs.pnpm }}
+        run: \${{ steps.trusted-tools.outputs.node }} scripts/production-service.mjs admin bootstrap
+`
+
+  const missing = validSources()
+  missing.bootstrap = missing.bootstrap.replace(migration, '')
+  assert.match(
+    validateServiceWiringSources({ services, workerOnlyServices }, missing).join('\n'),
+    /production-bootstrap.*admin migration.*exactly once/i,
+  )
+
+  const duplicate = validSources()
+  duplicate.bootstrap = duplicate.bootstrap.replace(migration, `${migration}${migration}`)
+  assert.match(
+    validateServiceWiringSources({ services, workerOnlyServices }, duplicate).join('\n'),
+    /production-bootstrap.*admin migration.*exactly once/i,
+  )
+
+  const afterDeploy = validSources()
+  afterDeploy.bootstrap = afterDeploy.bootstrap
+    .replace(migration, '')
+    .replace(bootstrapAdmin, `${bootstrapAdmin}${migration}`)
+  assert.match(
+    validateServiceWiringSources({ services, workerOnlyServices }, afterDeploy).join('\n'),
+    /production-bootstrap.*wrapper steps must follow the reviewed order/i,
   )
 })
 

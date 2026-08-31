@@ -428,6 +428,44 @@ export async function loadServiceRepositoryCatalog(root = DEFAULT_ROOT) {
   return { services: result.services, workerOnlyServices: result.workerOnlyServices }
 }
 
+/**
+ * Authorize a production target from a catalog that has already passed
+ * loadServiceRepositoryCatalog(). Keeping this decision here prevents legacy
+ * production entry points from growing independent name/filesystem allowlists.
+ */
+export function requireCatalogDeployableService(catalog, directory, options = {}) {
+  if (typeof directory !== 'string' || !/^[a-z][a-z0-9_]{0,62}$/.test(directory)) {
+    throw new Error(`${String(directory)} is not a catalog deployable service`)
+  }
+  const spaServices = Array.isArray(catalog?.services) ? catalog.services : []
+  const workerOnlyServices = Array.isArray(catalog?.workerOnlyServices)
+    ? catalog.workerOnlyServices
+    : []
+  const spa = spaServices.find((candidate) => candidate.directory === directory)
+  const workerOnly = workerOnlyServices.find((candidate) => candidate.directory === directory)
+  const service = spa ?? workerOnly
+  if (service?.deployable !== true || service.package !== `@app/${directory}`) {
+    throw new Error(`${directory} is not a catalog deployable service`)
+  }
+  if (options.spa === true && !spa) {
+    throw new Error(`${directory} is not a catalog deployable SPA service`)
+  }
+  if (options.domain === true && (!spa || directory === 'admin')) {
+    throw new Error(`${directory} is not a catalog deployable domain service`)
+  }
+  return service
+}
+
+export function catalogDeployableDomains(catalog) {
+  const services = Array.isArray(catalog?.services) ? catalog.services : []
+  return services.filter(
+    (service) =>
+      service?.deployable === true &&
+      service.directory !== 'admin' &&
+      service.package === `@app/${service.directory}`,
+  )
+}
+
 function parseRoot(args) {
   const rootIndex = args.indexOf('--root')
   return rootIndex >= 0 ? resolve(args[rootIndex + 1]) : DEFAULT_ROOT

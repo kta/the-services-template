@@ -21,7 +21,7 @@ import { tmpdir } from 'node:os'
 import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { effectiveValues, parseJsonc } from './check-production-config.mjs'
-import { productionEnvironment } from './production-environment.mjs'
+import { productionEnvironment, productionStaticEnvironment } from './production-environment.mjs'
 import { runProductionWrangler } from './production-wrangler.mjs'
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
@@ -587,48 +587,76 @@ export function productionRestoreCommand(operation, options) {
   }
 }
 
-function runPreflight(service, { checkRemoteSecrets = false } = {}) {
+function restoreRuntime(dependencies = {}) {
+  return {
+    environment: dependencies.environment ?? process.env,
+    nowMs: dependencies.nowMs ?? Date.now(),
+    serviceConfig: dependencies.serviceConfig ?? serviceConfig,
+    execFileSync: dependencies.execFileSync ?? execFileSync,
+    runProductionWrangler: dependencies.runProductionWrangler ?? runProductionWrangler,
+    logger: dependencies.logger ?? console,
+  }
+}
+
+function runRestorePreflight(service, { checkRemoteSecrets = false } = {}, dependencies = {}) {
+  const runtime = restoreRuntime(dependencies)
   // Establish checkout trust before any repository config or credential-bearing
   // environment value is inspected. Restore is a production state mutation and
   // is intentionally restricted to the protected production workflow.
-  execFileSync(process.execPath, [join(root, 'scripts/require-production-provisioning.mjs')], {
-    cwd: root,
-    env: productionStaticEnvironment(process.env),
-    stdio: 'inherit',
-  })
-  const ops = serviceConfig('ops')
-  const admin = serviceConfig('admin')
+  runtime.execFileSync(
+    process.execPath,
+    [join(root, 'scripts/require-production-provisioning.mjs')],
+    {
+      cwd: root,
+      env: productionStaticEnvironment(runtime.environment),
+      stdio: 'inherit',
+    },
+  )
+  const ops = runtime.serviceConfig('ops')
+  const admin = runtime.serviceConfig('admin')
   const reviewedDatabaseIds = { admin: admin.databaseId }
   for (const target of ops.backupTargets) {
     if (target === 'admin') continue
-    reviewedDatabaseIds[target] = serviceConfig(target).databaseId
+    reviewedDatabaseIds[target] = runtime.serviceConfig(target).databaseId
   }
   validateRestoreDatabaseBindings(ops.databaseIds, reviewedDatabaseIds)
-  validateRestoreCloudflareAccount(ops.accountId, process.env)
-  validateRestoreSigningPublicKey(ops.signingPublicKey, process.env.BACKUP_SIGNING_PUBLIC_KEY)
-  const childEnv = productionEnvironment(process.env)
-  execFileSync(process.execPath, [join(root, 'scripts/check-production-config.mjs'), service], {
-    cwd: root,
-    env: childEnv,
-    stdio: 'inherit',
-  })
-  execFileSync(process.execPath, [join(root, 'scripts/check-r2-private.mjs')], {
+  validateRestoreCloudflareAccount(ops.accountId, runtime.environment)
+  validateRestoreSigningPublicKey(
+    ops.signingPublicKey,
+    runtime.environment.BACKUP_SIGNING_PUBLIC_KEY,
+  )
+  const childEnv = productionEnvironment(runtime.environment)
+  runtime.execFileSync(
+    process.execPath,
+    [join(root, 'scripts/check-production-config.mjs'), service],
+    {
+      cwd: root,
+      env: childEnv,
+      stdio: 'inherit',
+    },
+  )
+  runtime.execFileSync(process.execPath, [join(root, 'scripts/check-r2-private.mjs')], {
     cwd: root,
     env: childEnv,
     stdio: 'inherit',
   })
   if (checkRemoteSecrets) {
-    execFileSync(process.execPath, [join(root, 'scripts/check-production-secrets.mjs'), service], {
-      cwd: root,
-      env: childEnv,
-      stdio: 'inherit',
-    })
+    runtime.execFileSync(
+      process.execPath,
+      [join(root, 'scripts/check-production-secrets.mjs'), service],
+      {
+        cwd: root,
+        env: childEnv,
+        stdio: 'inherit',
+      },
+    )
   }
   return childEnv
 }
 
-function runWrangler(service, args, childEnv) {
-  runProductionWrangler(
+function runWrangler(service, args, childEnv, dependencies = {}) {
+  const runtime = restoreRuntime(dependencies)
+  runtime.runProductionWrangler(
     args,
     {
       cwd: join(root, 'services', service),
@@ -637,12 +665,13 @@ function runWrangler(service, args, childEnv) {
       timeout: RESTORE_CHILD_TIMEOUT_MS,
       killSignal: 'SIGTERM',
     },
-    process.env,
+    runtime.environment,
   )
 }
 
-function runWranglerJson(service, args, childEnv) {
-  return runProductionWrangler(
+function runWranglerJson(service, args, childEnv, dependencies = {}) {
+  const runtime = restoreRuntime(dependencies)
+  return runtime.runProductionWrangler(
     args,
     {
       cwd: join(root, 'services', service),
@@ -652,7 +681,7 @@ function runWranglerJson(service, args, childEnv) {
       timeout: RESTORE_CHILD_TIMEOUT_MS,
       killSignal: 'SIGTERM',
     },
-    process.env,
+    runtime.environment,
   )
 }
 
@@ -703,12 +732,19 @@ export async function createPreRestoreArtifact(
   }
 }
 
-function downloadLatestManifest(ops, childEnv, target, targetConfig, signingPublicKey) {
+function downloadLatestManifest(
+  ops,
+  childEnv,
+  target,
+  targetConfig,
+  signingPublicKey,
+  runCommand = runWrangler,
+) {
   const directory = privateTempDirectory('production-restore-manifest-')
   const output = join(directory, 'latest.json')
   writeFileSync(output, '', { mode: 0o600 })
   try {
-    runWrangler(
+    runCommand(
       'ops',
       productionRestoreCommand('download-backup', {
         bucket: ops.bucket,
@@ -834,218 +870,237 @@ function requireOption(options, name) {
   return value
 }
 
-const currentFile = fileURLToPath(import.meta.url)
-if (process.argv[1] && resolve(process.argv[1]) === currentFile) {
-  try {
-    const [operation, ...rawArgs] = process.argv.slice(2)
-    const options = parseRestoreOptions(rawArgs)
-    validateRestoreOperationOptions(operation, options)
-    const service = options['--service'] ?? 'admin'
-    if (!SERVICE_PATTERN.test(service)) throw new Error('invalid service name')
+export async function runRestoreCli(argv, dependencies = {}) {
+  const runtime = restoreRuntime(dependencies)
+  const getServiceConfig = runtime.serviceConfig
+  const wrangler = (service, args, childEnv) => runWrangler(service, args, childEnv, runtime)
+  const wranglerJson = (service, args, childEnv) =>
+    runWranglerJson(service, args, childEnv, runtime)
+  const [operation, ...rawArgs] = argv
+  const options = parseRestoreOptions(rawArgs)
+  validateRestoreOperationOptions(operation, options)
+  const service = options['--service'] ?? 'admin'
+  if (!SERVICE_PATTERN.test(service)) throw new Error('invalid service name')
 
-    if (DESTRUCTIVE_OPERATIONS.has(operation)) {
-      validateRestoreConfirmation(requireOption(options, '--confirm'))
+  if (DESTRUCTIVE_OPERATIONS.has(operation)) {
+    validateRestoreConfirmation(requireOption(options, '--confirm'))
+  }
+
+  // This is the sole CLI preflight. It proves checkout trust before reading
+  // repository config, validates the reviewed account/key bindings, and runs
+  // the shared production config and private-R2 checks for every operation.
+  const childEnv = runRestorePreflight(
+    operation === 'download-backup' ? 'ops' : service,
+    {},
+    runtime,
+  )
+
+  if (operation === 'download-backup') {
+    const target = options['--target'] ?? 'admin'
+    const key = requireOption(options, '--key')
+    validateBackupKey(key, target)
+    if (key === 'latest.json' && options['--sha256']) {
+      throw new Error('latest.json is a manifest and must not use a SQL digest')
     }
-
-    if (operation === 'download-backup') {
-      const target = options['--target'] ?? 'admin'
-      const key = requireOption(options, '--key')
-      validateBackupKey(key, target)
-      if (key === 'latest.json' && options['--sha256']) {
-        throw new Error('latest.json is a manifest and must not use a SQL digest')
+    const expectedSha =
+      key === 'latest.json' ? undefined : validateRestoreSha256(options['--sha256'])
+    const ops = getServiceConfig('ops')
+    if (!ops.bucket) throw new Error('configured backup bucket is missing')
+    validateRestoreTarget(target, ops.backupTargets)
+    const targetConfig = getServiceConfig(target)
+    if (!targetConfig.databaseName || !targetConfig.databaseId) {
+      throw new Error('configured backup target database is missing')
+    }
+    const signingPublicKey = asString(runtime.environment.BACKUP_SIGNING_PUBLIC_KEY)
+    const output = validateOutputPath(
+      requireOption(options, '--output'),
+      key === 'latest.json' ? '.json' : '.sql',
+    )
+    const staged = stagedOutputPath(output)
+    try {
+      const manifestEntry =
+        key === 'latest.json'
+          ? undefined
+          : downloadLatestManifest(ops, childEnv, target, targetConfig, signingPublicKey, wrangler)
+      if (manifestEntry && expectedSha && manifestEntry.sha256 !== expectedSha) {
+        throw new Error('requested backup SHA-256 does not match the reviewed manifest')
       }
-      const expectedSha =
-        key === 'latest.json' ? undefined : validateRestoreSha256(options['--sha256'])
-      const ops = serviceConfig('ops')
-      if (!ops.bucket) throw new Error('configured backup bucket is missing')
-      validateRestoreTarget(target, ops.backupTargets)
-      const targetConfig = serviceConfig(target)
-      if (!targetConfig.databaseName || !targetConfig.databaseId) {
-        throw new Error('configured backup target database is missing')
-      }
-      const childEnv = runPreflight('ops')
-      const signingPublicKey = asString(process.env.BACKUP_SIGNING_PUBLIC_KEY)
-      const output = validateOutputPath(
-        requireOption(options, '--output'),
-        key === 'latest.json' ? '.json' : '.sql',
+      wrangler(
+        'ops',
+        productionRestoreCommand('download-backup', {
+          bucket: ops.bucket,
+          key,
+          output: staged.path,
+        }),
+        childEnv,
       )
-      const staged = stagedOutputPath(output)
-      try {
-        const manifestEntry =
-          key === 'latest.json'
-            ? undefined
-            : downloadLatestManifest(ops, childEnv, target, targetConfig, signingPublicKey)
-        if (manifestEntry && expectedSha && manifestEntry.sha256 !== expectedSha) {
-          throw new Error('requested backup SHA-256 does not match the reviewed manifest')
+      validateRestoreOutputSize(staged.path)
+      if (key === 'latest.json') {
+        if (lstatSync(staged.path).size > MAX_RESTORE_MANIFEST_BYTES) {
+          throw new Error('restore manifest is too large')
         }
-        runWrangler(
-          'ops',
-          productionRestoreCommand('download-backup', {
-            bucket: ops.bucket,
-            key,
-            output: staged.path,
-          }),
-          childEnv,
-        )
-        validateRestoreOutputSize(staged.path)
-        if (key === 'latest.json') {
-          if (lstatSync(staged.path).size > MAX_RESTORE_MANIFEST_BYTES) {
-            throw new Error('restore manifest is too large')
-          }
-          validateRestoreProvenance(
-            JSON.parse(readFileSync(staged.path, 'utf8')),
-            target,
-            ops.accountId,
-            targetConfig.databaseId,
-            { signingPublicKey },
-          )
-        } else if (expectedSha && (await sha256File(staged.path)) !== expectedSha) {
-          throw new Error('downloaded backup SHA-256 does not match the manifest')
-        }
-        commitStagedOutput(staged.path, output)
-      } finally {
-        rmSync(staged.directory, { recursive: true, force: true })
-      }
-      console.log(`restore artifact written to ${output}`)
-    } else {
-      const config = serviceConfig(service)
-      if (!config.databaseName) throw new Error('configured D1 database name is missing')
-      const childEnv = runPreflight(service)
-      if (operation === 'time-travel-info') {
-        verifyRestoreDatabase(service, config.databaseName, config.databaseId, childEnv)
-        runWrangler(
-          service,
-          productionRestoreCommand(operation, {
-            database: config.databaseName,
-            databaseId: config.databaseId,
-          }),
-          childEnv,
-        )
-      } else if (operation === 'time-travel-restore') {
-        const timestamp = requireOption(options, '--timestamp')
-        validateRestoreTimestamp(timestamp)
-        verifyRestoreDatabase(service, config.databaseName, config.databaseId, childEnv)
-        // Always create a current-state escape hatch immediately before the
-        // destructive in-place Time Travel restore. This cannot be skipped by
-        // calling the wrapper directly with a different operation order.
-        const preRestore = await createPreRestoreArtifact(
-          service,
-          config.databaseName,
-          childEnv,
-          runWrangler,
-          config.databaseId,
-        )
-        const ops = serviceConfig('ops')
-        if (!ops.bucket) throw new Error('configured backup bucket is missing')
-        const remotePreRestoreKey = await retainPreRestoreArtifact(
-          preRestore,
-          ops,
-          service,
-          childEnv,
-        )
-        console.error(
-          `pre-restore artifact retained locally at ${preRestore.path} and in R2 as ${remotePreRestoreKey} (SHA-256 ${preRestore.sha256}); remove it only after restore validation`,
-        )
-        // Re-check the reviewed name immediately before the destructive call;
-        // the actual command uses the UUID so a name reassignment cannot
-        // redirect the restore between the initial preflight and this point.
-        verifyRestoreDatabase(service, config.databaseName, config.databaseId, childEnv)
-        runWrangler(
-          service,
-          productionRestoreCommand(operation, {
-            database: config.databaseName,
-            databaseId: config.databaseId,
-            timestamp,
-          }),
-          childEnv,
-        )
-      } else if (operation === 'export-before-restore') {
-        verifyRestoreDatabase(service, config.databaseName, config.databaseId, childEnv)
-        const output = validateOutputPath(requireOption(options, '--output'), '.sql')
-        const staged = stagedOutputPath(output)
-        try {
-          runWrangler(
-            service,
-            productionRestoreCommand(operation, {
-              database: config.databaseName,
-              databaseId: config.databaseId,
-              output: staged.path,
-            }),
-            childEnv,
-          )
-          validateRestoreOutputSize(staged.path)
-          commitStagedOutput(staged.path, output)
-        } finally {
-          rmSync(staged.directory, { recursive: true, force: true })
-        }
-        console.log(`restore artifact written to ${output}`)
-      } else if (operation === 'create-restore-db') {
-        const database = requireOption(options, '--database')
-        validateRestoreDatabaseName(database, config.databaseName)
-        runWrangler(service, productionRestoreCommand(operation, { database }), childEnv)
-      } else if (operation === 'import-backup') {
-        const database = requireOption(options, '--database')
-        validateRestoreDatabaseName(database, config.databaseName)
-        const databaseId = validateRestoreDatabaseId(requireOption(options, '--database-id'))
-        const file = validateInputFile(requireOption(options, '--file'))
-        const expectedSha = validateRestoreSha256(requireOption(options, '--sha256'))
-        const ops = serviceConfig('ops')
-        const target = options['--target'] ?? service
-        validateRestoreTarget(target, ops.backupTargets)
-        if (target !== service) throw new Error('restore target must match the selected service')
-        const targetConfig = serviceConfig(target)
-        if (!targetConfig.databaseId)
-          throw new Error('configured restore target database is missing')
-        verifyRestoreDatabase(service, database, databaseId, childEnv)
-        const manifestFile = validateManifestInputFile(requireOption(options, '--manifest'))
-        const manifest = JSON.parse(readFileSync(manifestFile, 'utf8'))
-        const requestedKey = requireOption(options, '--key')
-        // Fetch latest.json from R2 immediately before the import. The local
-        // manifest is checked only as human-provided evidence and cannot pick
-        // a backup generation that the private R2 manifest does not select.
-        const signingPublicKey = asString(process.env.BACKUP_SIGNING_PUBLIC_KEY)
-        const remoteProvenance = downloadLatestManifest(
-          ops,
-          childEnv,
-          target,
-          targetConfig,
-          signingPublicKey,
-        )
-        const provenance = validateLocalManifestAgainstRemote(
-          manifest,
+        validateRestoreProvenance(
+          JSON.parse(readFileSync(staged.path, 'utf8')),
           target,
           ops.accountId,
           targetConfig.databaseId,
-          remoteProvenance,
-          { key: requestedKey, sha256: expectedSha, signingPublicKey },
+          { signingPublicKey },
         )
-        if (provenance.sha256 !== expectedSha) {
-          throw new Error('restore input SHA-256 does not match the reviewed manifest')
-        }
-        const staged = privateTempDirectory('production-restore-input-')
-        const stagedFile = join(staged, 'restore.sql')
-        try {
-          copyFileSync(file, stagedFile)
-          chmodSync(stagedFile, 0o600)
-          if ((await sha256File(stagedFile)) !== expectedSha) {
-            throw new Error('restore input SHA-256 does not match the manifest')
-          }
-          // The destination was verified before the remote manifest and local
-          // file checks. Verify again immediately before the destructive SQL
-          // execution, and pass the UUID rather than resolving the name again.
-          verifyRestoreDatabase(service, database, databaseId, childEnv)
-          runWrangler(
-            service,
-            productionRestoreCommand(operation, { database, databaseId, file: stagedFile }),
-            childEnv,
-          )
-        } finally {
-          rmSync(staged, { recursive: true, force: true })
-        }
-      } else {
-        throw new Error('unknown restore operation')
+      } else if (expectedSha && (await sha256File(staged.path)) !== expectedSha) {
+        throw new Error('downloaded backup SHA-256 does not match the manifest')
       }
+      commitStagedOutput(staged.path, output)
+    } finally {
+      rmSync(staged.directory, { recursive: true, force: true })
     }
+    runtime.logger.log(`restore artifact written to ${output}`)
+    return
+  }
+
+  const config = getServiceConfig(service)
+  if (!config.databaseName) throw new Error('configured D1 database name is missing')
+  if (operation === 'time-travel-info') {
+    verifyRestoreDatabase(service, config.databaseName, config.databaseId, childEnv, wranglerJson)
+    wrangler(
+      service,
+      productionRestoreCommand(operation, {
+        database: config.databaseName,
+        databaseId: config.databaseId,
+      }),
+      childEnv,
+    )
+  } else if (operation === 'time-travel-restore') {
+    const timestamp = requireOption(options, '--timestamp')
+    validateRestoreTimestamp(timestamp, runtime.nowMs)
+    verifyRestoreDatabase(service, config.databaseName, config.databaseId, childEnv, wranglerJson)
+    // Always create a current-state escape hatch immediately before the
+    // destructive in-place Time Travel restore. This cannot be skipped by
+    // calling the wrapper directly with a different operation order.
+    const preRestore = await createPreRestoreArtifact(
+      service,
+      config.databaseName,
+      childEnv,
+      wrangler,
+      config.databaseId,
+    )
+    const ops = getServiceConfig('ops')
+    if (!ops.bucket) throw new Error('configured backup bucket is missing')
+    const remotePreRestoreKey = await retainPreRestoreArtifact(
+      preRestore,
+      ops,
+      service,
+      childEnv,
+      wrangler,
+    )
+    runtime.logger.error(
+      `pre-restore artifact retained locally at ${preRestore.path} and in R2 as ${remotePreRestoreKey} (SHA-256 ${preRestore.sha256}); remove it only after restore validation`,
+    )
+    // Re-check the reviewed name immediately before the destructive call;
+    // the actual command uses the UUID so a name reassignment cannot
+    // redirect the restore between the initial preflight and this point.
+    verifyRestoreDatabase(service, config.databaseName, config.databaseId, childEnv, wranglerJson)
+    wrangler(
+      service,
+      productionRestoreCommand(operation, {
+        database: config.databaseName,
+        databaseId: config.databaseId,
+        timestamp,
+        nowMs: runtime.nowMs,
+      }),
+      childEnv,
+    )
+  } else if (operation === 'export-before-restore') {
+    verifyRestoreDatabase(service, config.databaseName, config.databaseId, childEnv, wranglerJson)
+    const output = validateOutputPath(requireOption(options, '--output'), '.sql')
+    const staged = stagedOutputPath(output)
+    try {
+      wrangler(
+        service,
+        productionRestoreCommand(operation, {
+          database: config.databaseName,
+          databaseId: config.databaseId,
+          output: staged.path,
+        }),
+        childEnv,
+      )
+      validateRestoreOutputSize(staged.path)
+      commitStagedOutput(staged.path, output)
+    } finally {
+      rmSync(staged.directory, { recursive: true, force: true })
+    }
+    runtime.logger.log(`restore artifact written to ${output}`)
+  } else if (operation === 'create-restore-db') {
+    const database = requireOption(options, '--database')
+    validateRestoreDatabaseName(database, config.databaseName)
+    wrangler(service, productionRestoreCommand(operation, { database }), childEnv)
+  } else if (operation === 'import-backup') {
+    const database = requireOption(options, '--database')
+    validateRestoreDatabaseName(database, config.databaseName)
+    const databaseId = validateRestoreDatabaseId(requireOption(options, '--database-id'))
+    const file = validateInputFile(requireOption(options, '--file'))
+    const expectedSha = validateRestoreSha256(requireOption(options, '--sha256'))
+    const ops = getServiceConfig('ops')
+    const target = options['--target'] ?? service
+    validateRestoreTarget(target, ops.backupTargets)
+    if (target !== service) throw new Error('restore target must match the selected service')
+    const targetConfig = getServiceConfig(target)
+    if (!targetConfig.databaseId) throw new Error('configured restore target database is missing')
+    verifyRestoreDatabase(service, database, databaseId, childEnv, wranglerJson)
+    const manifestFile = validateManifestInputFile(requireOption(options, '--manifest'))
+    const manifest = JSON.parse(readFileSync(manifestFile, 'utf8'))
+    const requestedKey = requireOption(options, '--key')
+    // Fetch latest.json from R2 immediately before the import. The local
+    // manifest is checked only as human-provided evidence and cannot pick
+    // a backup generation that the private R2 manifest does not select.
+    const signingPublicKey = asString(runtime.environment.BACKUP_SIGNING_PUBLIC_KEY)
+    const remoteProvenance = downloadLatestManifest(
+      ops,
+      childEnv,
+      target,
+      targetConfig,
+      signingPublicKey,
+      wrangler,
+    )
+    const provenance = validateLocalManifestAgainstRemote(
+      manifest,
+      target,
+      ops.accountId,
+      targetConfig.databaseId,
+      remoteProvenance,
+      { key: requestedKey, sha256: expectedSha, signingPublicKey },
+    )
+    if (provenance.sha256 !== expectedSha) {
+      throw new Error('restore input SHA-256 does not match the reviewed manifest')
+    }
+    const staged = privateTempDirectory('production-restore-input-')
+    const stagedFile = join(staged, 'restore.sql')
+    try {
+      copyFileSync(file, stagedFile)
+      chmodSync(stagedFile, 0o600)
+      if ((await sha256File(stagedFile)) !== expectedSha) {
+        throw new Error('restore input SHA-256 does not match the manifest')
+      }
+      // The destination was verified before the remote manifest and local
+      // file checks. Verify again immediately before the destructive SQL
+      // execution, and pass the UUID rather than resolving the name again.
+      verifyRestoreDatabase(service, database, databaseId, childEnv, wranglerJson)
+      wrangler(
+        service,
+        productionRestoreCommand(operation, { database, databaseId, file: stagedFile }),
+        childEnv,
+      )
+    } finally {
+      rmSync(staged, { recursive: true, force: true })
+    }
+  } else {
+    throw new Error('unknown restore operation')
+  }
+}
+
+const currentFile = fileURLToPath(import.meta.url)
+if (process.argv[1] && resolve(process.argv[1]) === currentFile) {
+  try {
+    await runRestoreCli(process.argv.slice(2))
   } catch {
     console.error(
       'production restore blocked: validate the reviewed checkout, config, secrets, and restore inputs',

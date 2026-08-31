@@ -8,10 +8,48 @@ import {
   requireProductionDomainAuth,
 } from './require-production-domain-auth.mjs'
 
+const repositoryCatalog = {
+  services: [
+    { directory: 'admin', package: '@app/admin', deployable: true },
+    { directory: 'example_service', package: '@app/example_service', deployable: false },
+    {
+      directory: 'example_tauri_service',
+      package: '@app/example_tauri_service',
+      deployable: false,
+    },
+  ],
+  workerOnlyServices: [
+    { directory: 'notifier', package: '@app/notifier', deployable: true },
+    { directory: 'ops', package: '@app/ops', deployable: true },
+  ],
+}
+
+const bookingCatalog = {
+  services: [
+    { directory: 'admin', package: '@app/admin', deployable: true },
+    { directory: 'booking', package: '@app/booking', deployable: true },
+  ],
+  workerOnlyServices: [],
+}
+
 test('scaffold and reserved/path-traversal services are not production-ready', () => {
-  assert.equal(isProductionDomainAuthReady('example_service'), false)
-  assert.equal(isProductionDomainAuthReady('../booking'), false)
-  assert.throws(() => requireProductionDomainAuth('example_service'), /blocked until/)
+  assert.equal(
+    isProductionDomainAuthReady('example_service', process.cwd(), repositoryCatalog),
+    false,
+  )
+  assert.equal(
+    isProductionDomainAuthReady('example_tauri_service', process.cwd(), repositoryCatalog),
+    false,
+  )
+  assert.equal(
+    isProductionDomainAuthReady('unknown_service', process.cwd(), repositoryCatalog),
+    false,
+  )
+  assert.equal(isProductionDomainAuthReady('../booking', process.cwd(), repositoryCatalog), false)
+  assert.throws(
+    () => requireProductionDomainAuth('example_tauri_service', process.cwd(), repositoryCatalog),
+    /catalog deployable/i,
+  )
 })
 
 test('requires a real production auth module, worker integration, and focused test', () => {
@@ -53,14 +91,17 @@ test('requires a real production auth module, worker integration, and focused te
       ].join('\n'),
     )
 
-    assert.equal(isProductionDomainAuthReady('booking', fixtureRoot), true)
-    assert.doesNotThrow(() => requireProductionDomainAuth('booking', fixtureRoot))
+    assert.equal(isProductionDomainAuthReady('booking', fixtureRoot, bookingCatalog), false)
+    assert.throws(
+      () => requireProductionDomainAuth('booking', fixtureRoot, bookingCatalog),
+      /approved issuer or gateway.*positive live-session/i,
+    )
 
     writeFileSync(
       join(serviceRoot, 'src/worker/production-auth.ts'),
       'export const productionAuthMiddleware = () => undefined\n',
     )
-    assert.equal(isProductionDomainAuthReady('booking', fixtureRoot), false)
+    assert.equal(isProductionDomainAuthReady('booking', fixtureRoot, bookingCatalog), false)
 
     writeFileSync(
       join(serviceRoot, 'src/worker/production-auth.ts'),
@@ -70,7 +111,7 @@ test('requires a real production auth module, worker integration, and focused te
         "// domainAccessTokenAudience('booking') and checkSession(sid) in prose do not count",
       ].join('\n'),
     )
-    assert.equal(isProductionDomainAuthReady('booking', fixtureRoot), false)
+    assert.equal(isProductionDomainAuthReady('booking', fixtureRoot, bookingCatalog), false)
 
     writeFileSync(
       join(serviceRoot, 'src/worker/production-auth.ts'),
@@ -88,7 +129,7 @@ test('requires a real production auth module, worker integration, and focused te
         '}',
       ].join('\n'),
     )
-    assert.equal(isProductionDomainAuthReady('booking', fixtureRoot), false)
+    assert.equal(isProductionDomainAuthReady('booking', fixtureRoot, bookingCatalog), false)
 
     writeFileSync(
       join(serviceRoot, 'src/worker/production-auth.ts'),
@@ -115,7 +156,7 @@ test('requires a real production auth module, worker integration, and focused te
         '}',
       ].join('\n'),
     )
-    assert.equal(isProductionDomainAuthReady('booking', fixtureRoot), false)
+    assert.equal(isProductionDomainAuthReady('booking', fixtureRoot, bookingCatalog), false)
 
     writeFileSync(
       join(serviceRoot, 'src/worker/production-auth.ts'),
@@ -135,7 +176,7 @@ test('requires a real production auth module, worker integration, and focused te
       join(serviceRoot, 'test/production-auth.test.ts'),
       "test('marker-only assertion is insufficient', () => { app.use('/api/*', productionAuthMiddleware); expect(true).toBe(true) })",
     )
-    assert.equal(isProductionDomainAuthReady('booking', fixtureRoot), false)
+    assert.equal(isProductionDomainAuthReady('booking', fixtureRoot, bookingCatalog), false)
 
     writeFileSync(
       join(serviceRoot, 'test/production-auth.test.ts'),
@@ -161,7 +202,7 @@ test('requires a real production auth module, worker integration, and focused te
         '}',
       ].join('\n'),
     )
-    assert.equal(isProductionDomainAuthReady('booking', fixtureRoot), false)
+    assert.equal(isProductionDomainAuthReady('booking', fixtureRoot, bookingCatalog), false)
 
     writeFileSync(
       join(serviceRoot, 'src/worker/index.ts'),
@@ -171,7 +212,7 @@ test('requires a real production auth module, worker integration, and focused te
         "app.use('/api/*', productionAuthMiddleware)",
       ].join('\n'),
     )
-    assert.equal(isProductionDomainAuthReady('booking', fixtureRoot), false)
+    assert.equal(isProductionDomainAuthReady('booking', fixtureRoot, bookingCatalog), false)
   } finally {
     rmSync(fixtureRoot, { recursive: true, force: true })
   }

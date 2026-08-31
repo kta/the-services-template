@@ -8,6 +8,10 @@ import {
   productionCloudflareEnvironment,
   productionStaticEnvironment,
 } from './production-environment.mjs'
+import {
+  loadServiceRepositoryCatalog,
+  requireCatalogDeployableService,
+} from './service-catalog.mjs'
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const ACCOUNT_ID_PATTERN = /^[0-9a-f]{32}$/i
@@ -42,16 +46,13 @@ function domainSecretName(domainService) {
   return /^[A-Z][A-Z0-9_]*$/.test(suffix) ? `ADMIN_TO_${suffix}_KEY` : null
 }
 
-// The example service is a local scaffold, never a production target. Keep
-// this decision separate from the name-policy helper so unit tests can still
-// exercise a copied domain's allowlist without accidentally authorizing a
-// real remote write to the scaffold.
-export function isProductionSecretProvisioningService(service) {
-  return (
-    typeof service === 'string' &&
-    /^[a-z][a-z0-9_]*$/.test(service) &&
-    service !== 'example_service'
-  )
+export function isProductionSecretProvisioningService(service, catalog) {
+  try {
+    requireCatalogDeployableService(catalog, service)
+    return true
+  } catch {
+    return false
+  }
 }
 
 export function productionWorkerSecretsUrl(accountId, workerName) {
@@ -186,7 +187,7 @@ function fail(message) {
   process.exitCode = 1
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+async function main() {
   const [service, ...args] = process.argv.slice(2)
   let guard
   try {
@@ -194,60 +195,78 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   } catch {
     guard = undefined
   }
-  if (!isProductionSecretProvisioningService(service) || !guard) {
+  if (typeof service !== 'string' || !/^[a-z][a-z0-9_]*$/.test(service) || !guard) {
     fail('usage: check-production-secrets.mjs <service> [--deploy|--allow-missing-worker]')
-  } else {
-    try {
-      // This helper is also a direct CLI entry point. Establish the reviewed
-      // checkout boundary without giving its code a Cloudflare credential.
-      const { execFileSync } = await import('node:child_process')
-      execFileSync(process.execPath, [resolve(root, `scripts/${guard.guardScript}`)], {
-        cwd: root,
-        stdio: 'inherit',
-        env: productionStaticEnvironment(process.env),
-      })
-      const config = parseJsonc(
-        await readFile(resolve(root, `services/${service}/wrangler.jsonc`), 'utf8'),
+    return
+  }
+  try {
+    // This helper is also a direct CLI entry point. Establish the reviewed
+    // checkout boundary without giving its code a Cloudflare credential.
+    const { execFileSync } = await import('node:child_process')
+    execFileSync(process.execPath, [resolve(root, `scripts/${guard.guardScript}`)], {
+      cwd: root,
+      stdio: 'inherit',
+      env: productionStaticEnvironment(process.env),
+    })
+    const catalog = await loadServiceRepositoryCatalog(root)
+    const catalogService = requireCatalogDeployableService(catalog, service)
+    if (
+      (catalog.services ?? []).some(
+        (candidate) => candidate.directory === catalogService.directory,
+      ) &&
+      service !== 'admin'
+    ) {
+      const { requireProductionDomainAuth } = await import('./require-production-domain-auth.mjs')
+      requireProductionDomainAuth(service, root, catalog)
+    }
+    const config = parseJsonc(
+      await readFile(resolve(root, `services/${service}/wrangler.jsonc`), 'utf8'),
+    )
+    const options =
+      service === 'admin'
+        ? {
+            domainSecrets: configuredAdminDomainSecrets(config),
+          }
+        : {}
+    const opsConfig = parseJsonc(
+      await readFile(resolve(root, 'services/ops/wrangler.jsonc'), 'utf8'),
+    )
+    const accountId = String(process.env.CLOUDFLARE_ACCOUNT_ID ?? '').trim()
+    const reviewedAccountId = String(effectiveValues(opsConfig).opsAccountId ?? '').trim()
+    if (!ACCOUNT_ID_PATTERN.test(accountId) || accountId !== reviewedAccountId) {
+      throw new Error('Cloudflare account does not match the reviewed ops account')
+    }
+    const workerName = String(effectiveValues(config).workerName ?? '').trim()
+    const childEnv = productionCloudflareEnvironment(process.env)
+    const entries = await fetchProductionSecretEntries(
+      accountId,
+      workerName,
+      childEnv.CLOUDFLARE_API_TOKEN,
+      fetch,
+    )
+    const result = validateProductionSecretNames(service, entries, options)
+    if (result.unexpected.length || (!guard.allowMissingWorker && result.missing.length)) {
+      fail(
+        `${service} secret names do not match policy (missing: ${result.missing.join(', ') || 'none'}; unexpected: ${result.unexpected.join(', ') || 'none'})`,
       )
-      const options =
-        service === 'admin'
-          ? {
-              domainSecrets: configuredAdminDomainSecrets(config),
-            }
-          : {}
-      const opsConfig = parseJsonc(
-        await readFile(resolve(root, 'services/ops/wrangler.jsonc'), 'utf8'),
+    } else {
+      console.log(`production secret names for ${service}: ok`)
+    }
+  } catch (error) {
+    if (guard.allowMissingWorker && error?.code === 'WORKER_NOT_FOUND') {
+      console.log(
+        `production secret names for ${service}: Worker not found; bootstrap may create it`,
       )
-      const accountId = String(process.env.CLOUDFLARE_ACCOUNT_ID ?? '').trim()
-      const reviewedAccountId = String(effectiveValues(opsConfig).opsAccountId ?? '').trim()
-      if (!ACCOUNT_ID_PATTERN.test(accountId) || accountId !== reviewedAccountId) {
-        throw new Error('Cloudflare account does not match the reviewed ops account')
-      }
-      const workerName = String(effectiveValues(config).workerName ?? '').trim()
-      const childEnv = productionCloudflareEnvironment(process.env)
-      const entries = await fetchProductionSecretEntries(
-        accountId,
-        workerName,
-        childEnv.CLOUDFLARE_API_TOKEN,
-        fetch,
+    } else {
+      // Do not expose Cloudflare's response: it can contain account/project data.
+      fail(
+        error instanceof Error &&
+          /catalog deployable|approved issuer or gateway/.test(error.message)
+          ? error.message
+          : 'unable to inspect remote secret names',
       )
-      const result = validateProductionSecretNames(service, entries, options)
-      if (result.unexpected.length || (!guard.allowMissingWorker && result.missing.length)) {
-        fail(
-          `${service} secret names do not match policy (missing: ${result.missing.join(', ') || 'none'}; unexpected: ${result.unexpected.join(', ') || 'none'})`,
-        )
-      } else {
-        console.log(`production secret names for ${service}: ok`)
-      }
-    } catch (error) {
-      if (guard.allowMissingWorker && error?.code === 'WORKER_NOT_FOUND') {
-        console.log(
-          `production secret names for ${service}: Worker not found; bootstrap may create it`,
-        )
-      } else {
-        // Do not expose Wrangler's response: it can contain account/project data.
-        fail('unable to inspect remote secret names')
-      }
     }
   }
 }
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main()
