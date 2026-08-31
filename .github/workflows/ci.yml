@@ -44,6 +44,19 @@ jobs:
         run: pnpm run infra:check
       - name: Check pinned Rust toolchain
         run: test "$(rustc --version | awk '{print $2}')" = "1.88.0"
+      - name: Install Tauri Linux prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
       - name: Rust format and Tauri unit tests
         run: |
           node scripts/service-catalog.mjs native-manifests |

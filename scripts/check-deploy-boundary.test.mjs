@@ -73,6 +73,10 @@ test('production CI deploy is push-only on protected main', async () => {
     /hashicorp\/setup-terraform@[0-9a-f]{40}[\s\S]*terraform_version:\s*1\.10\.5[\s\S]*name: Terraform format and validate/,
   )
   assert.match(workflow, /name: Terraform format and validate[\s\S]*run: pnpm run infra:check/)
+  assert.match(
+    workflow,
+    /name: Install Tauri Linux prerequisites[\s\S]*libwebkit2gtk-4\.1-dev[\s\S]*libayatana-appindicator3-dev[\s\S]*name: Rust format and Tauri unit tests/,
+  )
   assert.match(workflow, /build-production:[\s\S]*needs: \[verify\]/)
   assert.match(workflow, /build-production:[\s\S]*actions\/upload-artifact@[0-9a-f]{40}/)
   assert.match(workflow, /production-artifacts\.mjs ci package admin notifier ops/)
